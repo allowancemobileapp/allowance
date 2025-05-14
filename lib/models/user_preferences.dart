@@ -2,7 +2,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class UserPreferences {
   String? username;
-  String? school;
   double? budget;
   Set<String> favoritedOptions = {};
   String subscriptionTier = "Free";
@@ -11,13 +10,12 @@ class UserPreferences {
   double? height; // Added for ProfileScreen
   int? age; // Added for ProfileScreen
   String? bloodGroup; // Added for ProfileScreen
-
+  String? schoolId;
+  String? schoolName;
   // Constructor
   UserPreferences({
     this.username,
-    this.school,
-    this.budget,
-    this.phoneNumber,
+    this.schoolId,
     Set<String>? favoritedOptions,
     this.subscriptionTier = "Free",
     this.weight,
@@ -30,7 +28,8 @@ class UserPreferences {
   Future<void> loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
     username = prefs.getString('username');
-    school = prefs.getString('school');
+    schoolName = prefs.getString('schoolName');
+    schoolId = prefs.getString('schoolId');
     budget = prefs.getDouble('budget');
     favoritedOptions = prefs.getStringList('favoritedOptions')?.toSet() ?? {};
     subscriptionTier = prefs.getString('subscriptionTier') ?? "Free";
@@ -45,7 +44,8 @@ class UserPreferences {
   Future<void> savePreferences() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('username', username ?? '');
-    await prefs.setString('school', school ?? '');
+    await prefs.setString('schoolName', schoolName ?? '');
+    await prefs.setString('schoolId', schoolId ?? '');
     await prefs.setDouble('budget', budget ?? 0.0);
     await prefs.setStringList('favoritedOptions', favoritedOptions.toList());
     await prefs.setString('subscriptionTier', subscriptionTier);

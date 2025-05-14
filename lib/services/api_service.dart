@@ -47,7 +47,7 @@ class ApiService {
   // Fetch available options.
   static Future<List<dynamic>> fetchOptions() async {
     final response = await http.get(
-      Uri.parse("$baseUrl/options?select=*"),
+      Uri.parse("$baseUrl/options?select=*,vendors(name)"),
       headers: headers,
     );
     if (response.statusCode == 200) {

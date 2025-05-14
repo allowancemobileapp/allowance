@@ -144,16 +144,24 @@ class _HomeScreenState extends State<HomeScreen> {
                       itemCount: schools.length,
                       itemBuilder: (context, index) {
                         final school = schools[index];
-                        final schoolName =
-                            school["name"] as String? ?? "Unnamed School";
+                        final schoolName = school["name"] is String
+                            ? school["name"] as String
+                            : "Unnamed School";
+                        // Dynamically access school Id
                         return ListTile(
                           title: Text(
                             schoolName,
                             style: const TextStyle(
                                 fontFamily: 'Montserrat', fontSize: 18),
                           ),
-                          onTap: () {
-                            widget.userPreferences.school = schoolName;
+                          onTap: () async {
+                            final schoolId = school["id"] is int
+                                ? school["id"].toString()
+                                : (school["id"] is String
+                                    ? school["id"]
+                                    : "defaultSchoolId");
+                            widget.userPreferences.schoolId = schoolId;
+                            widget.userPreferences.schoolName = schoolName;
                             widget.userPreferences.savePreferences();
                             Navigator.pop(context);
                             setState(() {
@@ -172,43 +180,49 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showRestaurantSelection() async {
-    final selectedSchool = widget.userPreferences.school;
+    final selectedSchoolId = widget.userPreferences.schoolId;
+    List<dynamic> vendors = [];
+    String? errorMsg;
     setState(() {
       _vendorBarTapped = true;
     });
 
-    if (selectedSchool != null && selectedSchool.isNotEmpty) {
-      List<dynamic> vendors = [];
-      String? errorMsg;
-
+    if (selectedSchoolId != null && selectedSchoolId.isNotEmpty) {
       try {
-        vendors = await ApiService.fetchVendors(selectedSchool);
-        _restaurants = vendors
-            .map<String>(
-                (vendor) => vendor["vendor"] as String? ?? "Unnamed Vendor")
-            .toList();
+        vendors = await ApiService.fetchVendors(selectedSchoolId);
+        _restaurants = vendors.map<String>((vendor) {
+          // Find the first key that holds a string value (the vendor name)
+          final vendorNameKey = vendor.keys.firstWhere(
+            (key) => vendor[key] is String,
+            orElse: () => "vendor", // Default key if no string key is found
+          );
+
+          return vendor[vendorNameKey] as String? ?? "Unnamed Vendor";
+        }).toList();
       } catch (e) {
         errorMsg = "Error loading vendors: $e";
       }
 
       if (!mounted) return;
 
-      if (errorMsg != null) {
+      if (vendors.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("No vendors found for this school.")));
+      } else if (errorMsg != null) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(errorMsg)));
-        return;
+        return; // Exit early if there's an error
       }
 
       showModalBottomSheet(
-        context: context,
-        isScrollControlled: true,
-        backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-        ),
-        builder: (BuildContext context) {
-          return StatefulBuilder(
-            builder: (context, setModalState) {
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          builder: (BuildContext context) {
+            return StatefulBuilder(builder: (context, setModalState) {
               return DraggableScrollableSheet(
                 expand: false,
                 initialChildSize: 0.6,
@@ -336,10 +350,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   );
                 },
               );
-            },
-          );
-        },
-      );
+            });
+          });
     } else {
       showModalBottomSheet(
         context: context,
@@ -606,7 +618,7 @@ class _HomeScreenState extends State<HomeScreen> {
       actions: [
         IconButton(
           icon: const Icon(BoxIcons.bxs_map, size: 36),
-          color: widget.userPreferences.school?.isNotEmpty == true
+          color: widget.userPreferences.schoolId?.isNotEmpty == true
               ? themeColor
               : Colors.white,
           onPressed: _chooseUniversity,
