@@ -1,4 +1,5 @@
 // lib/services/api_service.dart
+
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
@@ -16,57 +17,71 @@ class ApiService {
     "Content-Type": "application/json",
   };
 
-  // Fetch the list of schools (universities)
+  /// Fetch the list of schools (universities)
   static Future<List<dynamic>> fetchSchools() async {
     final response = await http.get(
       Uri.parse("$baseUrl/schools?select=*"),
       headers: headers,
     );
     if (response.statusCode == 200) {
-      return json.decode(response.body);
+      return json.decode(response.body) as List<dynamic>;
     } else {
       throw Exception("Failed to load schools: ${response.statusCode}");
     }
   }
 
-  // Fetch vendors for a given school.
-  // Note: Now we expect school to be an ID (as String) and use "school_id".
+  /// Fetch vendors for a given school.
+  /// Now expects schoolId (as String) and filters on `school_id`.
   static Future<List<dynamic>> fetchVendors(String schoolId) async {
     final response = await http.get(
       Uri.parse("$baseUrl/vendors?school_id=eq.$schoolId&select=*"),
       headers: headers,
     );
     if (response.statusCode == 200) {
-      return json.decode(response.body);
+      return json.decode(response.body) as List<dynamic>;
     } else {
       throw Exception(
           "Failed to load vendors for school '$schoolId': ${response.statusCode}");
     }
   }
 
-  // Fetch available options.
+  /// Fetch available options along with vendor name.
   static Future<List<dynamic>> fetchOptions() async {
     final response = await http.get(
       Uri.parse("$baseUrl/options?select=*,vendors(name)"),
       headers: headers,
     );
     if (response.statusCode == 200) {
-      return json.decode(response.body);
+      return json.decode(response.body) as List<dynamic>;
     } else {
       throw Exception("Failed to load options: ${response.statusCode}");
     }
   }
 
-  // Fetch food groups.
+  /// Fetch food groups.
   static Future<List<dynamic>> fetchFoodGroups() async {
     final response = await http.get(
       Uri.parse("$baseUrl/food_groups?select=*"),
       headers: headers,
     );
     if (response.statusCode == 200) {
-      return json.decode(response.body);
+      return json.decode(response.body) as List<dynamic>;
     } else {
       throw Exception("Failed to load food groups: ${response.statusCode}");
+    }
+  }
+
+  /// Fetch delivery personnel for a given school ID.
+  static Future<List<dynamic>> fetchDeliveryPersonnel(String schoolId) async {
+    final response = await http.get(
+      Uri.parse("$baseUrl/delivery_personnel?school_id=eq.$schoolId&select=*"),
+      headers: headers,
+    );
+    if (response.statusCode == 200) {
+      return json.decode(response.body) as List<dynamic>;
+    } else {
+      throw Exception(
+          "Failed to load delivery personnel for school '$schoolId': ${response.statusCode}");
     }
   }
 }

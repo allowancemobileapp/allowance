@@ -1,6 +1,7 @@
-// lib/screens/home/subscription_screen.dart
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart'; // Adjust import based on your project structure
+import 'gist_submission_screen.dart';
+import 'ticket_submission_screen.dart'; // Import added for ticket submission
 
 class SubscriptionScreen extends StatefulWidget {
   final UserPreferences userPreferences;
@@ -17,38 +18,56 @@ class SubscriptionScreen extends StatefulWidget {
 }
 
 class _SubscriptionScreenState extends State<SubscriptionScreen> {
-  String _currentTier = "Free";
+  String _currentTier = "Membership";
   late PageController _pageController;
 
-  // Subscription plans data
+  // Subscription plans data with adjusted image heights
   final List<Map<String, dynamic>> plans = [
     {
-      "tier": "Free",
-      "price": "N0/week",
+      "tier": "Membership",
+      "price": "",
       "features": [
-        "Ads",
-        "Limited diet mode access",
-        "No diet plans",
+        "Remove ads",
+        "Diet mode (coming soon)",
       ],
+      "cta": "N700/Month",
+      "imageHeight": 110.0, // Increased to match Gist Us
+      "buttonColor": Colors.orange, // Match Favorites tab
     },
     {
-      "tier": "Plus",
-      "price": "N100/week",
+      "tier": "Tickets",
+      "price": "",
       "features": [
-        "No ads",
-        "Full diet mode access",
-        "Unlimited diet plan access",
-        "Daily food timetable notifications",
+        "Sell tickets on allowance",
+        "Tap into our audience",
+        "We take N100/ticket sale",
       ],
+      "cta": "Sell Tickets",
+      "imageHeight": 80.0,
+      "buttonColor": Colors.purple, // Match Tickets tab
+    },
+    {
+      "tier": "Gist Us",
+      "price": "",
+      "features": [
+        "Tell us your latest gist on campus",
+        "Reach your desired target audience",
+      ],
+      "cta": "Advertise",
+      "imageHeight": 70.0,
+      "buttonColor": Colors.teal, // Match Delivery tab
     },
   ];
 
   @override
   void initState() {
     super.initState();
-    _currentTier = widget.userPreferences.subscriptionTier;
-    _pageController =
-        PageController(viewportFraction: 0.7); // Adjusted for card visibility
+    if (plans
+        .map((p) => p['tier'])
+        .contains(widget.userPreferences.subscriptionTier)) {
+      _currentTier = widget.userPreferences.subscriptionTier;
+    }
+    _pageController = PageController(viewportFraction: 0.77);
   }
 
   @override
@@ -57,98 +76,74 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     super.dispose();
   }
 
-  // Handle tier switching
   void _switchTier(String tier) {
-    if (tier == "Free") {
-      setState(() {
-        _currentTier = "Free";
-        widget.userPreferences.subscriptionTier = "Free";
-        widget.userPreferences.savePreferences();
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Switched to Free tier")),
-      );
-    } else if (tier == "Plus") {
-      // Placeholder for payment logic
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("Payment for Plus tier not implemented yet")),
-      );
-      // TODO: Add payment processing logic here
-    }
+    setState(() {
+      _currentTier = tier;
+      widget.userPreferences.subscriptionTier = tier;
+      widget.userPreferences.savePreferences();
+    });
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text("Switched to $tier")));
   }
 
-  // Build individual subscription card
   Widget _buildSubscriptionCard(
-      String tier, String price, List<String> features, bool isCurrent) {
-    final buttonText = isCurrent
-        ? "Current Plan"
-        : tier == "Free"
-            ? "Downgrade to Free"
-            : "Upgrade to $tier";
+    String tier,
+    String price,
+    List<String> features,
+    String cta,
+    bool isCurrent,
+    double imageHeight,
+    Color buttonColor,
+  ) {
+    String currentLabel;
+    switch (tier) {
+      case 'Membership':
+        currentLabel = 'N700/Month';
+        break;
+      case 'Tickets':
+        currentLabel = 'Sell Tickets';
+        break;
+      case 'Gist Us':
+        currentLabel = 'Advertise';
+        break;
+      default:
+        currentLabel = 'Current Plan';
+    }
+
+    final buttonText = isCurrent ? currentLabel : cta;
     final buttonEnabled = !isCurrent;
 
     return Center(
-      // Center the card on the screen
       child: SizedBox(
-        width: MediaQuery.of(context).size.width, // Full screen width
-        height: 300, // Reduced height
+        width: MediaQuery.of(context).size.width,
+        height: 330,
         child: Card(
-          color: Colors.grey[800], // Dark card background
+          color: Colors.grey[800],
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Tier title
+                // Title section
                 Text(
                   tier,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'SanFrancisco',
-                    fontSize: 24,
+                    fontSize: 18,
                     fontWeight: FontWeight.bold,
                     color: Colors.white,
                   ),
                 ),
                 const SizedBox(height: 8),
-                // Price with grass green "N" and glow
-                RichText(
-                  text: TextSpan(
-                    children: [
-                      TextSpan(
-                        text: "N",
-                        style: TextStyle(
-                          fontFamily: 'SanFrancisco',
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: widget.themeColor, // Grass green
-                          shadows: [
-                            Shadow(
-                              color: widget.themeColor.withOpacity(0.5),
-                              blurRadius: 4,
-                            ),
-                          ],
-                        ),
-                      ),
-                      TextSpan(
-                        text: price.substring(1), // Rest of the price
-                        style: const TextStyle(
-                          fontFamily: 'SanFrancisco',
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 12),
-                // Features list
-                ...features.map((feature) => Padding(
-                      padding: const EdgeInsets.only(bottom: 4.0),
+
+                // Features section
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: features.map((feature) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6.0),
                       child: Row(
                         children: [
                           const Icon(Icons.check,
@@ -159,28 +154,60 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                               feature,
                               style: const TextStyle(
                                 fontFamily: 'SanFrancisco',
-                                fontSize: 16, // Smaller font for compact height
+                                fontSize: 16,
                                 color: Colors.white,
                               ),
                             ),
                           ),
                         ],
                       ),
-                    )),
-                const Spacer(), // Push button to bottom
-                // Action button
-                Center(
+                    );
+                  }).toList(),
+                ),
+
+                const Spacer(),
+                // CTA section
+                SizedBox(
+                  width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: buttonEnabled ? () => _switchTier(tier) : null,
+                    onPressed: buttonEnabled
+                        ? () {
+                            if (tier == 'Gist Us') {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => GistSubmissionScreen(
+                                    themeColor: widget.themeColor,
+                                    schoolId: widget.userPreferences.schoolId,
+                                  ),
+                                ),
+                              );
+                            } else if (tier == 'Tickets') {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => TicketSubmissionScreen(
+                                    themeColor: widget.themeColor,
+                                    schoolId: int.tryParse(
+                                        widget.userPreferences.schoolId ?? ''),
+                                  ),
+                                ),
+                              );
+                            } else {
+                              _switchTier(tier);
+                            }
+                          }
+                        : null,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: widget.themeColor, // Grass green color
+                      backgroundColor: buttonColor,
+                      disabledBackgroundColor: buttonColor.withOpacity(0.5),
+                      disabledForegroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(8)),
                       padding: const EdgeInsets.symmetric(
                           horizontal: 24, vertical: 10),
-                      elevation: 8, // Adds elevation for glow effect
-                      shadowColor:
-                          widget.themeColor.withOpacity(0.7), // Glow shadow
+                      elevation: 8,
+                      shadowColor: buttonColor.withOpacity(0.7),
                     ),
                     child: Text(
                       buttonText,
@@ -203,44 +230,52 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900], // Dark mode background
+      backgroundColor: Colors.grey[900],
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        centerTitle: true,
-        title: const Text(
-          "Subscriptions",
-          style: TextStyle(
-            fontFamily: 'SanFrancisco',
-            fontSize: 32,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 1.5,
-            color: Colors.white,
+        backgroundColor: Colors.grey[900],
+        iconTheme: const IconThemeData(color: Colors.white),
+        scrolledUnderElevation: 0,
+        title: Center(
+          child: Image.asset(
+            'assets/images/subscriptions.png', // Restored header image
+            fit: BoxFit.contain,
+            height: 190, // Adjusted size
           ),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.notifications, size: 24),
-            color: Colors.white,
-            onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text("Notifications clicked!")),
-              );
-            },
-          ),
-        ],
       ),
       body: SafeArea(
-        child: PageView(
-          controller: _pageController,
-          children: plans
-              .map((plan) => _buildSubscriptionCard(
-                    plan["tier"],
-                    plan["price"],
-                    plan["features"],
-                    _currentTier == plan["tier"],
-                  ))
-              .toList(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+              child: Text(
+                'Current plan: Free',
+                style: TextStyle(
+                  fontFamily: 'SanFrancisco',
+                  fontSize: 18,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            Expanded(
+              child: PageView(
+                controller: _pageController,
+                children: plans
+                    .map((plan) => _buildSubscriptionCard(
+                          plan['tier'],
+                          plan['price'],
+                          List<String>.from(plan['features']),
+                          plan['cta'],
+                          _currentTier == plan['tier'],
+                          plan['imageHeight'].toDouble(),
+                          plan['buttonColor'],
+                        ))
+                    .toList(),
+              ),
+            ),
+          ],
         ),
       ),
     );

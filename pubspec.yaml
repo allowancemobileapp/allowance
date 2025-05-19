@@ -19,10 +19,14 @@ dependencies:
   firebase_core: ^3.12.1 # Check for latest compatible version
   http: ^1.3.0 # Check for latest compatible version
   url_launcher: ^6.1.10
+  supabase_flutter: ^1.10.11
+  cached_network_image: ^3.3.1
+  uuid: ^4.0.0
 
   # *** Added Dependencies for Authentication ***
   firebase_auth: ^5.1.2 # Use latest compatible version
   google_sign_in: ^6.2.1 # Use latest compatible version
+  image_picker: ^1.1.2
 
 
 dev_dependencies:
