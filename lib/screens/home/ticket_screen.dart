@@ -65,11 +65,12 @@ class _TicketScreenState extends State<TicketScreen> {
     try {
       final response = await _supabase
           .from('tickets')
-          .select<List<dynamic>>(
+          .select(
             'id, name, photo_url, date, time, organizers, location, tickets_remaining',
           )
           .order('date', ascending: true);
-      final rows = response;
+
+      final rows = response as List;
       setState(() {
         _tickets =
             rows.map((r) => Ticket.fromMap(r as Map<String, dynamic>)).toList();
