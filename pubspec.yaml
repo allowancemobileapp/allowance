@@ -38,6 +38,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.10.0
 
 flutter:
   uses-material-design: true
@@ -59,3 +60,12 @@ flutter:
     - family: Pacifico
       fonts:
         - asset: assets/fonts/Pacifico-Regular.ttf
+
+# flutter_launcher_icons configuration
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/app_icon.png"
+  # If you want Android adaptive icons (recommended), create these two files and uncomment:
+  # adaptive_icon_background: "assets/images/app_icon_bg.png"
+  # adaptive_icon_foreground: "assets/images/app_icon_foreground.png"

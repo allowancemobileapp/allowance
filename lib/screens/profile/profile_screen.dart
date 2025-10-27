@@ -1,5 +1,9 @@
+// lib/screens/profile/profile_screen.dart
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:allowance/screens/introduction/introduction_screen.dart';
+import 'package:allowance/screens/home/home_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   final UserPreferences userPreferences;
@@ -34,6 +38,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
     "O-",
   ];
 
+  bool _signingOut = false;
+
   @override
   void initState() {
     super.initState();
@@ -55,6 +61,116 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.dispose();
   }
 
+  Future<void> _confirmLogout() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Log out'),
+        content: const Text('Are you sure you want to log out?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Log out')),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await _signOut();
+    }
+  }
+
+  Future<void> _signOut() async {
+    setState(() => _signingOut = true);
+    try {
+      final supabase = Supabase.instance.client;
+
+      // Sign out from Supabase
+      await supabase.auth.signOut();
+
+      // Optionally keep local preferences; if you want to clear them uncomment below:
+      // await widget.userPreferences.clearPreferences(); // (implement if you add a clear method)
+
+      // Show friendly message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Signed out successfully.')),
+        );
+      }
+
+      // Navigate to the Introduction screen and remove all previous routes
+      if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (_) => IntroductionScreen(
+              userPreferences: widget.userPreferences,
+              onFinishIntro: () {
+                // After login, rebuild will show Home because auth state will change and main.dart listens for it.
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(
+                      builder: (_) =>
+                          HomeScreen(userPreferences: widget.userPreferences)),
+                );
+              },
+            ),
+          ),
+          (route) => false,
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to sign out: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _signingOut = false);
+    }
+  }
+
+  Widget _buildInputField({
+    required TextEditingController controller,
+    required String label,
+    required String hint,
+    TextInputType keyboardType = TextInputType.text,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: const Color(0xFF2C2C2C),
+      ),
+      child: TextField(
+        controller: controller,
+        decoration: InputDecoration(
+          labelText: label,
+          hintText: hint,
+          labelStyle: const TextStyle(
+            color: Colors.white,
+            fontFamily: 'SF Pro',
+            fontWeight: FontWeight.bold,
+          ),
+          hintStyle: const TextStyle(
+            color: Colors.white60,
+            fontFamily: 'SF Pro',
+          ),
+          filled: true,
+          fillColor: Colors.transparent,
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide.none),
+          contentPadding:
+              const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
+        ),
+        keyboardType: keyboardType,
+        style: const TextStyle(fontFamily: 'SF Pro', color: Colors.white),
+        textAlign: TextAlign.left,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -72,10 +188,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ),
         backgroundColor: Theme.of(context).scaffoldBackgroundColor,
         elevation: 4,
+        actions: [
+          // Logout button
+          IconButton(
+            icon: _signingOut
+                ? const CircularProgressIndicator.adaptive()
+                : const Icon(Icons.logout),
+            tooltip: 'Log out',
+            onPressed: _signingOut ? null : _confirmLogout,
+          )
+        ],
       ),
       body: Stack(
         children: [
-          // Centered input fields with updated styling
           Center(
             child: Padding(
               padding: const EdgeInsets.all(16.0),
@@ -116,182 +241,70 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     keyboardType: TextInputType.number,
                   ),
                   const SizedBox(height: 16),
-                  _buildDropdownField(),
+                  // Blood group dropdown
+                  Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      color: const Color(0xFF2C2C2C),
+                    ),
+                    child: DropdownButtonFormField<String>(
+                      value: _bloodGroup,
+                      items: bloodGroups
+                          .map(
+                              (b) => DropdownMenuItem(value: b, child: Text(b)))
+                          .toList(),
+                      onChanged: (v) => setState(() => _bloodGroup = v),
+                      decoration: const InputDecoration(
+                          border:
+                              OutlineInputBorder(borderSide: BorderSide.none),
+                          labelText: 'Blood Group'),
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: Center(
+                      child: ElevatedButton(
+                        onPressed: () {
+                          // Save preferences locally and notify home
+                          widget.userPreferences.username =
+                              _usernameController.text;
+                          widget.userPreferences.phoneNumber =
+                              _phoneController.text;
+                          widget.userPreferences.weight =
+                              double.tryParse(_weightController.text);
+                          widget.userPreferences.height =
+                              double.tryParse(_heightController.text);
+                          widget.userPreferences.age =
+                              int.tryParse(_ageController.text);
+                          widget.userPreferences.bloodGroup = _bloodGroup;
+                          widget.userPreferences.savePreferences();
+                          widget.onSave();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF4CAF50),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 16, horizontal: 48),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                          elevation: 0,
+                        ),
+                        child: const Text(
+                          "Save",
+                          style: TextStyle(
+                              fontFamily: 'SF Pro',
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
           ),
-          // Fixed "Save" button at the bottom (unchanged)
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Container(
-                decoration: BoxDecoration(
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFF4CAF50).withOpacity(0.15),
-                      spreadRadius: 1,
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                    BoxShadow(
-                      color: const Color(0xFF4CAF50).withOpacity(0.05),
-                      spreadRadius: 3,
-                      blurRadius: 16,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: ElevatedButton(
-                  onPressed: () {
-                    // Update user preferences
-                    widget.userPreferences.username = _usernameController.text;
-                    widget.userPreferences.phoneNumber = _phoneController.text;
-                    widget.userPreferences.weight =
-                        double.tryParse(_weightController.text);
-                    widget.userPreferences.height =
-                        double.tryParse(_heightController.text);
-                    widget.userPreferences.age =
-                        int.tryParse(_ageController.text);
-                    widget.userPreferences.bloodGroup = _bloodGroup;
-                    // Trigger callback to switch to home screen
-                    widget.onSave();
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF4CAF50),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                        vertical: 16, horizontal: 48),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: const Text(
-                    "Save",
-                    style: TextStyle(
-                      fontFamily: 'SF Pro',
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
         ],
-      ),
-    );
-  }
-
-  // Helper method to build styled input fields with left-aligned text
-  Widget _buildInputField({
-    required TextEditingController controller,
-    required String label,
-    required String hint,
-    TextInputType keyboardType = TextInputType.text,
-  }) {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        color: const Color(0xFF2C2C2C), // Matches vendor/budget bar background
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1), // Subtle glow effect
-            spreadRadius: 1,
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: TextField(
-        controller: controller,
-        decoration: InputDecoration(
-          labelText: label,
-          hintText: hint,
-          labelStyle: const TextStyle(
-            color: Colors.white,
-            fontFamily: 'SF Pro',
-            fontWeight:
-                FontWeight.bold, // Matches bold text of vendor/budget bar
-          ),
-          hintStyle: const TextStyle(
-            color: Colors.white60,
-            fontFamily: 'SF Pro',
-          ),
-          filled: true,
-          fillColor: Colors.transparent, // Background handled by Container
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
-          ),
-          contentPadding: const EdgeInsets.symmetric(
-              vertical: 18, horizontal: 16), // Adjusted for height similarity
-        ),
-        keyboardType: keyboardType,
-        style: const TextStyle(
-          fontFamily: 'SF Pro',
-          color: Colors.white,
-        ),
-        textAlign: TextAlign.left, // Changed to left-aligned
-      ),
-    );
-  }
-
-  // Helper method to build styled dropdown field with left-aligned text
-  Widget _buildDropdownField() {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        color: const Color(0xFF2C2C2C), // Matches vendor/budget bar background
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1), // Subtle glow effect
-            spreadRadius: 1,
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: DropdownButtonFormField<String>(
-        decoration: InputDecoration(
-          labelText: "Blood Group",
-          labelStyle: const TextStyle(
-            color: Colors.white,
-            fontFamily: 'SF Pro',
-            fontWeight:
-                FontWeight.bold, // Matches bold text of vendor/budget bar
-          ),
-          filled: true,
-          fillColor: Colors.transparent, // Background handled by Container
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
-          ),
-          contentPadding: const EdgeInsets.symmetric(
-              vertical: 18, horizontal: 16), // Adjusted for height similarity
-        ),
-        value: _bloodGroup,
-        items: bloodGroups
-            .map((bg) => DropdownMenuItem(
-                  value: bg,
-                  child: Text(
-                    bg,
-                    style: const TextStyle(
-                      fontFamily: 'SF Pro',
-                      color: Colors.white,
-                    ),
-                    textAlign: TextAlign.left, // Changed to left-aligned
-                  ),
-                ))
-            .toList(),
-        onChanged: (val) => setState(() => _bloodGroup = val),
-        style: const TextStyle(
-          fontFamily: 'SF Pro',
-          color: Colors.white,
-        ),
-        // Removed alignment: Alignment.center to ensure left alignment
       ),
     );
   }
