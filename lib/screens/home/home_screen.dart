@@ -14,14 +14,17 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 class HomeScreen extends StatefulWidget {
-  final UserPreferences userPreferences;
-  const HomeScreen({super.key, required this.userPreferences});
+  // Accept userPreferences as optional; we'll provide a fallback inside the state.
+  final UserPreferences? userPreferences;
+  const HomeScreen({super.key, this.userPreferences});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  late UserPreferences
+      _prefs; // non-null local alias to avoid null checks everywhere
   int _selectedIndex = 0;
   final bool _isDarkMode =
       true; // Consider making this dynamic or from preferences
@@ -50,6 +53,10 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+
+    // Create a non-null _prefs: use passed userPreferences or fallback to default
+    _prefs = widget.userPreferences ?? UserPreferences();
+
     _budgetController.addListener(() {
       setState(() {
         _isBudgetEntered = _budgetController.text.isNotEmpty;
@@ -57,7 +64,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
     _budgetFocusNode.addListener(() => setState(() {}));
     _pageController = PageController(viewportFraction: 0.85);
-    _budgetController.text = widget.userPreferences.budget?.toString() ?? "";
+    _budgetController.text = _prefs.budget?.toString() ?? "";
     _fetchGistsAndStartSlideshow();
   }
 
@@ -104,8 +111,6 @@ class _HomeScreenState extends State<HomeScreen> {
         // Ensure page controller has pages and the page value is valid before animating
         if (_pageController.page != null) {
           int nextPage = (_pageController.page!.round() + 1);
-          // Removed % _fetchedGists.length * 1000 as it's complex with infinite scroll illusion
-          // PageView itemCount handles the "infinite" illusion
           _pageController.animateToPage(
             nextPage,
             duration: const Duration(milliseconds: 500),
@@ -166,15 +171,12 @@ class _HomeScreenState extends State<HomeScreen> {
                           style: const TextStyle(
                               fontFamily: 'Montserrat', fontSize: 18)),
                       onTap: () async {
-                        widget.userPreferences.schoolId =
-                            school["id"].toString();
-                        widget.userPreferences.schoolName = name;
-                        await widget.userPreferences.savePreferences();
+                        _prefs.schoolId = school["id"].toString();
+                        _prefs.schoolName = name;
+                        await _prefs.savePreferences();
 
-                        if (!mounted) return; // Crucial check
+                        if (!mounted) return;
 
-                        // Use the context of HomeScreen to pop the modal.
-                        // This context is directly associated with the 'mounted' check.
                         Navigator.pop(context);
 
                         setState(() {
@@ -191,7 +193,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showRestaurantSelection() async {
-    final sid = widget.userPreferences.schoolId;
+    final sid = _prefs.schoolId;
     setState(() => _vendorBarTapped = true);
     if (sid != null && sid.isNotEmpty) {
       List<dynamic> vendors = [];
@@ -285,8 +287,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                   _selectedRestaurants.clear();
                                 }
                               });
-                              // This setState call rebuilds the main screen to reflect selection changes if needed.
-                              // If only the modal needs to update, this might be redundant but often harmless.
                               setState(() {});
                             },
                             activeColor: Colors.amber[700],
@@ -309,7 +309,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               _selectAll = _selectedRestaurants.length ==
                                   _restaurants.length;
                             });
-                            // This setState call rebuilds the main screen.
                             setState(() {});
                           },
                           activeColor: Colors.amber[700],
@@ -393,8 +392,8 @@ class _HomeScreenState extends State<HomeScreen> {
           Navigator.push(
               context,
               MaterialPageRoute(
-                  builder: (routeContext) => FavoritesScreen(
-                      userPreferences: widget.userPreferences)));
+                  builder: (routeContext) =>
+                      FavoritesScreen(userPreferences: _prefs)));
         } else if (tab["label"] == "Tickets") {
           Navigator.push(
               context,
@@ -442,14 +441,14 @@ class _HomeScreenState extends State<HomeScreen> {
           const SnackBar(content: Text("Please select at least one vendor.")));
       return;
     }
-    widget.userPreferences.budget = budget;
-    await widget.userPreferences.savePreferences();
+    _prefs.budget = budget;
+    await _prefs.savePreferences();
     if (!mounted) return;
     Navigator.push(
         context,
         MaterialPageRoute(
             builder: (routeContext) => AvailableOptionsScreen(
-                userPreferences: widget.userPreferences,
+                userPreferences: _prefs,
                 selectedRestaurants: _selectedRestaurants)));
   }
 
@@ -477,7 +476,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   controller: _pageController,
                   onPageChanged: (i) {
                     if (_fetchedGists.isNotEmpty) {
-                      // Add check
                       setState(
                           () => _slideshowIndex = i % _fetchedGists.length);
                     }
@@ -485,11 +483,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   itemCount: _fetchedGists.isEmpty
                       ? 0
                       : null, // For infinite scroll illusion; null means unbounded
-                  // Or, for a large finite number: _fetchedGists.length * 1000,
                   itemBuilder: (ctx, idx) {
                     if (_fetchedGists.isEmpty) {
-                      return const SizedBox
-                          .shrink(); // Should not happen if itemCount is 0
+                      return const SizedBox.shrink();
                     }
                     final actualIndex = idx % _fetchedGists.length;
                     final gist = _fetchedGists[actualIndex];
@@ -559,7 +555,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: const TextStyle(
                       fontFamily: 'SanFrancisco',
                       fontSize: 18,
-                      color: Colors.white), // Consider theme for text color
+                      color: Colors.white),
                   textAlign: TextAlign.center))),
     ]);
   }
@@ -621,7 +617,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                                               fontSize: 18 *
                                                                   vendorBudgetTextSizeFactor,
                                                               color: Colors
-                                                                  .white)), // Consider theme for chip text
+                                                                  .white)),
                                                       backgroundColor:
                                                           _isDarkMode
                                                               ? Colors.grey[700]
@@ -635,8 +631,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                           fontFamily: 'SanFrancisco',
                                           fontSize:
                                               22 * vendorBudgetTextSizeFactor,
-                                          color: Colors
-                                              .white54))), // Consider theme
+                                          color: Colors.white54))),
                           !_vendorBarTapped
                               ? Icon(BoxIcons.bxs_chevron_down,
                                   color: themeColor, size: 22)
@@ -665,12 +660,12 @@ class _HomeScreenState extends State<HomeScreen> {
                                 style: TextStyle(
                                     fontFamily: 'SanFrancisco',
                                     fontSize: 18 * vendorBudgetTextSizeFactor,
-                                    color: Colors.white), // Consider theme
+                                    color: Colors.white),
                                 decoration: InputDecoration(
                                     hintText: "Enter Budget",
                                     hintStyle: TextStyle(
                                         fontFamily: 'SanFrancisco',
-                                        color: Colors.white54, // Consider theme
+                                        color: Colors.white54,
                                         fontSize:
                                             22 * vendorBudgetTextSizeFactor),
                                     border: InputBorder.none))),
@@ -706,12 +701,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         child: _buildGistSlideshow()),
                   ]),
             ),
-            FavoritesScreen(userPreferences: widget.userPreferences),
-            SubscriptionScreen(
-                userPreferences: widget.userPreferences,
-                themeColor: themeColor),
+            FavoritesScreen(userPreferences: _prefs),
+            SubscriptionScreen(userPreferences: _prefs, themeColor: themeColor),
             ProfileScreen(
-                userPreferences: widget.userPreferences,
+                userPreferences: _prefs,
                 onSave: () => setState(() => _selectedIndex = 0)),
           ]),
         ),
@@ -735,7 +728,7 @@ class _HomeScreenState extends State<HomeScreen> {
       actions: [
         IconButton(
             icon: const Icon(BoxIcons.bxs_map, size: 36),
-            color: widget.userPreferences.schoolId?.isNotEmpty == true
+            color: _prefs.schoolId?.isNotEmpty == true
                 ? themeColor
                 : (_isDarkMode ? Colors.white54 : Colors.black54),
             onPressed: _chooseUniversity)
@@ -762,13 +755,6 @@ class _HomeScreenState extends State<HomeScreen> {
       height: 56,
       decoration: BoxDecoration(
         color: screenBgColor,
-        // boxShadow: [
-        //   BoxShadow(
-        //     color: Colors.black.withOpacity(0.1),
-        //     spreadRadius: 1,
-        //     blurRadius: 5,
-        //   )
-        // ],
       ),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(

@@ -1,8 +1,10 @@
+// lib/screens/home/ticket_submission_screen.dart
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
+import 'package:allowance/shared/services/ticket_service.dart';
 
 /// Constants for table and column names
 class TicketFields {
@@ -44,6 +46,17 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
   DateTime? _selectedDate;
   TimeOfDay? _selectedTime;
   XFile? _pickedImage;
+  bool _isSubmitting = false;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _descriptionController.dispose();
+    _locationController.dispose();
+    _organizersController.dispose();
+    _ticketsController.dispose();
+    super.dispose();
+  }
 
   Future<void> _pickImage() async {
     final picker = ImagePicker();
@@ -90,35 +103,39 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
       return;
     }
 
+    setState(() => _isSubmitting = true);
+
     try {
-      // Upload image
+      // Upload image to storage
       const bucket = 'event-images';
       final file = File(_pickedImage!.path);
       final ext = _pickedImage!.path.split('.').last;
-      final filePath = 'events/${Uuid().v4()}.$ext'; // ✅ No `const` here
+      final filePath = 'events/${const Uuid().v4()}.$ext';
 
+      // Upload (will throw on failure)
       await supabase.storage.from(bucket).upload(filePath, file);
       final publicUrl = supabase.storage.from(bucket).getPublicUrl(filePath);
 
       // Format date and time
       final dateString =
           '${_selectedDate!.year}-${_selectedDate!.month.toString().padLeft(2, '0')}-${_selectedDate!.day.toString().padLeft(2, '0')}';
-      final timeString =
-          '${_selectedTime!.hour.toString().padLeft(2, '0')}:${_selectedTime!.minute.toString().padLeft(2, '0')}';
+      // include seconds to match schema like "03:28:00"
+      final hour = _selectedTime!.hour.toString().padLeft(2, '0');
+      final minute = _selectedTime!.minute.toString().padLeft(2, '0');
+      final timeString = '$hour:$minute:00';
 
-      final data = <String, dynamic>{
-        TicketFields.schoolId: widget.schoolId,
-        TicketFields.name: _nameController.text,
-        TicketFields.description: _descriptionController.text,
-        TicketFields.date: dateString,
-        TicketFields.time: timeString,
-        TicketFields.location: _locationController.text,
-        TicketFields.organizers: _organizersController.text,
-        TicketFields.ticketsRemaining: int.parse(_ticketsController.text),
-        TicketFields.photoUrl: publicUrl,
-      };
-
-      await supabase.from(TicketFields.table).insert(data);
+      // Call TicketService to create the ticket (it will attach purchaser_id)
+      final inserted = await TicketService.instance.createTicket(
+        schoolId: widget.schoolId!,
+        name: _nameController.text.trim(),
+        description: _descriptionController.text.trim(),
+        date: DateTime.parse(dateString),
+        time: timeString,
+        location: _locationController.text.trim(),
+        organizers: _organizersController.text.trim(),
+        ticketsRemaining: int.parse(_ticketsController.text.trim()),
+        photoUrl: publicUrl,
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -127,9 +144,10 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
             backgroundColor: Colors.green,
           ),
         );
-        Navigator.pop(context);
+        Navigator.pop(context, inserted);
       }
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('Ticket submission error: $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -138,7 +156,8 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
           ),
         );
       }
-      debugPrint('Ticket submission error: $e');
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
@@ -307,12 +326,21 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: _submitTicket,
+                    onPressed: _isSubmitting ? null : _submitTicket,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: widget.themeColor,
                       padding: const EdgeInsets.symmetric(vertical: 14),
                     ),
-                    child: const Text('Create Ticket'),
+                    child: _isSubmitting
+                        ? const SizedBox(
+                            height: 20,
+                            width: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Text('Create Ticket'),
                   ),
                 ),
               ],
