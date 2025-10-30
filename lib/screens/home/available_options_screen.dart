@@ -134,7 +134,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   }
 
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
-    // build a text summary of the selected option
     final vendorName = selectedOption['vendors']['name'].toString();
     final items = (selectedOption['items'] as List<dynamic>);
     final itemList = items.map((i) => i['name'].toString()).join(', ');
@@ -150,6 +149,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
 
     showModalBottomSheet(
       context: context,
+      backgroundColor: Colors.grey[900],
       builder: (_) => FutureBuilder<List<dynamic>>(
         future: _deliveryPersonnelFuture,
         builder: (ctx, snap) {
@@ -161,13 +161,29 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
           }
           final list = snap.data ?? [];
           if (list.isEmpty) {
-            return const SizedBox(
+            return Container(
+              decoration: BoxDecoration(
+                color: Colors.grey[900],
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              padding: const EdgeInsets.all(16),
               height: 200,
-              child: Center(child: Text('No delivery personnel available.')),
+              child: const Center(
+                child: Text(
+                  'No delivery personnel available.',
+                  style: TextStyle(color: Colors.white),
+                ),
+              ),
             );
           }
           list.shuffle(Random());
-          return Padding(
+          return Container(
+            decoration: BoxDecoration(
+              color: Colors.grey[900],
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(16)),
+            ),
             padding: const EdgeInsets.all(16),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -183,7 +199,10 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                 const SizedBox(height: 8),
                 for (var person in list)
                   ListTile(
-                    title: Text('${person['name']} (${person['gender']})'),
+                    title: Text(
+                      '${person['name']} (${person['gender']})',
+                      style: const TextStyle(color: Colors.white),
+                    ),
                     trailing: ElevatedButton(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: themeColor,
@@ -237,53 +256,68 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               showModalBottomSheet(
                 context: context,
                 isScrollControlled: true,
-                builder: (ctx) => StatefulBuilder(
-                  builder: (ctx, setState) => SingleChildScrollView(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Filter Options',
-                            style: TextStyle(
-                              color: themeColor,
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
+                backgroundColor: Colors.grey[900], // dark background
+                builder: (ctx) => Theme(
+                  data: Theme.of(ctx).copyWith(
+                    textTheme: Theme.of(ctx).textTheme.apply(
+                          bodyColor: Colors.white,
+                          displayColor: Colors.white,
+                        ),
+                    iconTheme: const IconThemeData(color: Colors.white70),
+                  ),
+                  child: StatefulBuilder(
+                    builder: (ctx, setState) => SingleChildScrollView(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Filter Options',
+                              style: TextStyle(
+                                color: themeColor,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 16),
-                          for (var section in _foodSections)
-                            ExpansionTile(
-                              collapsedIconColor: themeColor,
-                              title: Text(section['name']),
-                              children: [
-                                for (var item in section['items'])
-                                  CheckboxListTile(
-                                    title: Text(item),
-                                    activeColor: themeColor,
-                                    value: !_selectedFoodItems.contains(item),
-                                    onChanged: (v) => setState(() {
-                                      if (v == true) {
-                                        _selectedFoodItems.remove(item);
-                                      } else {
-                                        _selectedFoodItems.add(item);
-                                      }
-                                    }),
-                                  ),
-                              ],
+                            const SizedBox(height: 16),
+                            for (var section in _foodSections)
+                              ExpansionTile(
+                                collapsedIconColor: themeColor,
+                                title: Text(section['name'],
+                                    style:
+                                        const TextStyle(color: Colors.white)),
+                                children: [
+                                  for (var item in section['items'])
+                                    CheckboxListTile(
+                                      title: Text(item,
+                                          style: const TextStyle(
+                                              color: Colors.white)),
+                                      activeColor: themeColor,
+                                      checkColor: Colors.white,
+                                      value: !_selectedFoodItems.contains(item),
+                                      onChanged: (v) => setState(() {
+                                        if (v == true) {
+                                          _selectedFoodItems.remove(item);
+                                        } else {
+                                          _selectedFoodItems.add(item);
+                                        }
+                                      }),
+                                    ),
+                                ],
+                              ),
+                            const SizedBox(height: 16),
+                            Align(
+                              alignment: Alignment.bottomRight,
+                              child: TextButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                child: Text('Close',
+                                    style: TextStyle(color: themeColor)),
+                              ),
                             ),
-                          const SizedBox(height: 16),
-                          Align(
-                            alignment: Alignment.bottomRight,
-                            child: TextButton(
-                              onPressed: () => Navigator.of(context).pop(),
-                              child: Text('Close',
-                                  style: TextStyle(color: themeColor)),
-                            ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -419,9 +453,11 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                                     _favoritedOptionIds
                                                         .add(idStr);
                                                   }
+                                                  // convert Set -> List before saving to UserPreferences
                                                   widget.userPreferences
                                                           .favoritedOptions =
-                                                      _favoritedOptionIds;
+                                                      _favoritedOptionIds
+                                                          .toList();
                                                   widget.userPreferences
                                                       .savePreferences();
                                                 });

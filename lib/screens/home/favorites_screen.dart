@@ -1,6 +1,8 @@
 // lib/screens/home/favorites_screen.dart
 
+import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/services/api_service.dart';
 
@@ -20,6 +22,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   final Color themeColor = const Color(0xFF4CAF50);
   late Future<List<dynamic>> _optionsFuture;
   late Future<List<dynamic>> _foodGroupsFuture;
+  late Future<List<dynamic>> _deliveryPersonnelFuture;
   List<dynamic> _groups = [];
   String _selectedGroup = 'All';
 
@@ -28,7 +31,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   // All options fetched
   List<dynamic> _allOptions = [];
 
-  // Filter state (like in AvailableOptions)
+  // Filter state
   final List<Map<String, dynamic>> _foodSections = [];
   final Set<String> _selectedFoodItems = {};
 
@@ -37,12 +40,14 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
     super.initState();
     _optionsFuture = ApiService.fetchOptions();
     _foodGroupsFuture = ApiService.fetchFoodGroups();
-    // Load favorites
+    _deliveryPersonnelFuture = ApiService.fetchDeliveryPersonnel(
+      widget.userPreferences.schoolId.toString(),
+    );
+
     _favoritedOptionIds = widget.userPreferences.favoritedOptions
         .map((e) => e.toString())
         .toSet();
 
-    // Setup groups list directly from fetched set
     _foodGroupsFuture.then((foodGroups) {
       final groupsSet = <Map<String, dynamic>>[
         {'id': 'all', 'name': 'All'}
@@ -56,46 +61,106 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       setState(() => _groups = groupsSet);
     });
 
-    // Fetch all options to support filtering
     _optionsFuture.then((opts) {
       _allOptions = opts;
       setState(() {});
     });
   }
 
-  // Combined filter: favorites, group, selectedFoodItems
-  List<dynamic> _filteredOptions(List<dynamic> options) {
-    return options.where((option) {
-      final idStr = option['id'].toString();
-      if (!_favoritedOptionIds.contains(idStr)) {
-        return false;
-      }
+  // --- DELIVERY POPUP ---
+  void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
+    final vendorName = selectedOption['vendors']['name'].toString();
+    final items = (selectedOption['items'] as List<dynamic>);
+    final itemList = items.map((i) => i['name'].toString()).join(', ');
+    final total = items
+        .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
+        .toStringAsFixed(0);
 
-      // Group filter
-      final groupId = option['group_id']?.toString() ?? '';
-      if (_selectedGroup != 'All') {
-        final selectedGroup = _groups
-            .firstWhere((g) => g['name'] == _selectedGroup)['id']
-            .toString();
-        if (groupId != selectedGroup) {
-          return false;
-        }
-      }
+    final message = Uri.encodeComponent(
+      'Hello! I\'d like to order from $vendorName:\n'
+      'Items: $itemList\n'
+      'Total: ₦$total',
+    );
 
-      // Selected food items filter
-      final items = option['items'] is List<dynamic>
-          ? option['items'] as List<dynamic>
-          : [];
-      if (items.any((i) {
-        return _selectedFoodItems.contains(i['name'].toString());
-      })) {
-        return false;
-      }
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      builder: (_) => FutureBuilder<List<dynamic>>(
+        future: _deliveryPersonnelFuture,
+        builder: (ctx, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const SizedBox(
+              height: 200,
+              child:
+                  Center(child: CircularProgressIndicator(color: Colors.white)),
+            );
+          }
 
-      return true;
-    }).toList();
+          final list = snap.data ?? [];
+          if (list.isEmpty) {
+            return const SizedBox(
+              height: 200,
+              child: Center(
+                child: Text('No delivery personnel available.',
+                    style: TextStyle(color: Colors.white70)),
+              ),
+            );
+          }
+
+          list.shuffle(Random());
+          return Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Select your delivery personnel',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: themeColor,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                for (var person in list)
+                  ListTile(
+                    title: Text('${person['name']} (${person['gender']})',
+                        style: const TextStyle(color: Colors.white)),
+                    trailing: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: themeColor,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      onPressed: () async {
+                        final urlBase =
+                            person['whatsapp_url']?.toString() ?? '';
+                        final uri = Uri.parse('$urlBase?text=$message');
+                        if (await canLaunchUrl(uri)) {
+                          await launchUrl(uri);
+                        } else {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content:
+                                  Text('WhatsApp not available on this device'),
+                            ),
+                          );
+                        }
+                      },
+                      child: const Text('Contact'),
+                    ),
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
+  // --- FILTER POPUP ---
   void _showFilterPopup(BuildContext context) {
     _foodSections.clear();
     final Map<String, Set<String>> categories = {};
@@ -115,9 +180,11 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       _foodSections.add({'name': cat, 'items': names.toList()});
     });
     setState(() {});
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      backgroundColor: Colors.grey[900],
       builder: (_) => StatefulBuilder(
         builder: (ctx, setState) => SingleChildScrollView(
           child: Container(
@@ -126,21 +193,21 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                DefaultTextStyle(
-                  style: TextStyle(
-                    color: themeColor,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  child: const Text('Filter Options'),
-                ),
+                Text('Filter Options',
+                    style: TextStyle(
+                        color: themeColor,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold)),
                 const SizedBox(height: 16),
                 ..._foodSections.map((section) => ExpansionTile(
                       collapsedIconColor: themeColor,
-                      title: Text(section['name']),
+                      title: Text(section['name'],
+                          style: const TextStyle(color: Colors.white)),
                       children: (section['items'] as List<String>)
                           .map((item) => CheckboxListTile(
-                                title: Text(item),
+                                title: Text(item,
+                                    style:
+                                        const TextStyle(color: Colors.white)),
                                 activeColor: themeColor,
                                 value: !_selectedFoodItems.contains(item),
                                 onChanged: (v) => setState(() {
@@ -158,7 +225,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                   alignment: Alignment.centerRight,
                   child: TextButton(
                     onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Close'),
+                    child: Text('Close', style: TextStyle(color: themeColor)),
                   ),
                 ),
               ],
@@ -169,7 +236,35 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
     ).then((_) => setState(() {}));
   }
 
+  // --- HELPERS ---
+  List<dynamic> _filteredOptions(List<dynamic> options) {
+    return options.where((option) {
+      final idStr = option['id'].toString();
+      if (!_favoritedOptionIds.contains(idStr)) return false;
+
+      final groupId = option['group_id']?.toString() ?? '';
+      if (_selectedGroup != 'All') {
+        final selectedGroup = _groups
+            .firstWhere((g) => g['name'] == _selectedGroup)['id']
+            .toString();
+        if (groupId != selectedGroup) return false;
+      }
+
+      final items = option['items'] is List<dynamic>
+          ? option['items'] as List<dynamic>
+          : [];
+      if (items.any((i) {
+        return _selectedFoodItems.contains(i['name'].toString());
+      })) {
+        return false;
+      }
+
+      return true;
+    }).toList();
+  }
+
   String getItemName(dynamic item) => item['name'].toString();
+
   double getAdjustedPrice(dynamic item) {
     final price = (item['price'] as num?)?.toDouble() ?? 0.0;
     switch (item['portion']) {
@@ -182,6 +277,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
     }
   }
 
+  // --- UI ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -213,9 +309,9 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
           } else if (!snap.hasData) {
             return const Center(child: Text('No data available.'));
           }
+
           final options = snap.data!;
-          // apply combined filters
-          List<dynamic> displayed = _filteredOptions(options);
+          final displayed = _filteredOptions(options);
 
           return Column(
             children: [
@@ -240,14 +336,11 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                             borderRadius: BorderRadius.circular(20),
                           ),
                           alignment: Alignment.center,
-                          child: Text(
-                            name,
-                            style: const TextStyle(
-                              fontFamily: 'SanFrancisco',
-                              fontSize: 14,
-                              color: Colors.white,
-                            ),
-                          ),
+                          child: Text(name,
+                              style: const TextStyle(
+                                  fontFamily: 'SanFrancisco',
+                                  fontSize: 14,
+                                  color: Colors.white)),
                         ),
                       );
                     },
@@ -267,8 +360,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                         : [];
                     final total = items.fold<double>(
                         0, (sum, it) => sum + getAdjustedPrice(it));
-                    final calories =
-                        option['total_calories']?.toString() ?? '0 kcal';
                     final idStr = option['id'].toString();
                     final isFav = _favoritedOptionIds.contains(idStr);
 
@@ -276,10 +367,8 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                       tween:
                           Tween(begin: const Offset(0, 0.1), end: Offset.zero),
                       duration: const Duration(milliseconds: 500),
-                      builder: (context, off, child) => Transform.translate(
-                        offset: off,
-                        child: child,
-                      ),
+                      builder: (context, off, child) =>
+                          Transform.translate(offset: off, child: child),
                       child: Card(
                         color: Colors.grey[800]!.withOpacity(0.7),
                         elevation: 4,
@@ -299,15 +388,12 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                     mainAxisAlignment:
                                         MainAxisAlignment.spaceBetween,
                                     children: [
-                                      Text(
-                                        vendor,
-                                        style: const TextStyle(
-                                          fontFamily: 'SanFrancisco',
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.white,
-                                        ),
-                                      ),
+                                      Text(vendor,
+                                          style: const TextStyle(
+                                              fontFamily: 'SanFrancisco',
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.white)),
                                       Row(
                                         children: [
                                           IconButton(
@@ -316,7 +402,8 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                               color: Colors.white,
                                               size: 26,
                                             ),
-                                            onPressed: () {},
+                                            onPressed: () =>
+                                                _showDeliveryPicker(option),
                                           ),
                                           IconButton(
                                             icon: Icon(
@@ -339,7 +426,8 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                                 }
                                                 widget.userPreferences
                                                         .favoritedOptions =
-                                                    _favoritedOptionIds;
+                                                    _favoritedOptionIds
+                                                        .toList();
                                                 widget.userPreferences
                                                     .savePreferences();
                                               });
@@ -403,12 +491,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                               color: Colors.white)),
                                     ],
                                   ),
-                                  Text('Calories: $calories',
-                                      style: const TextStyle(
-                                          fontFamily: 'SanFrancisco',
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.white)),
                                 ],
                               ),
                             ),

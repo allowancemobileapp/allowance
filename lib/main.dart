@@ -49,12 +49,33 @@ class _AllowanceAppState extends State<AllowanceApp> {
   }
 
   Future<void> _init() async {
+    // Load local prefs first. If a user is already signed in, loadPreferences()
+    // will also try to fetch/create the server profile and overwrite local values.
     await _userPreferences.loadPreferences();
     setState(() => _isLoading = false);
 
-    // Listen to Supabase auth changes (login/logout)
-    _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((event) {
-      if (mounted) setState(() {});
+    // Listen to Supabase auth changes (login / logout).
+    // We await loadPreferences() when signing in to avoid UI showing stale local values.
+    _authSub = Supabase.instance.client.auth.onAuthStateChange
+        .listen((authState) async {
+      final session = authState.session;
+      if (session != null && session.user != null) {
+        // Signed in: explicitly reload preferences (this reads server profile and writes local).
+        try {
+          await _userPreferences.loadPreferences();
+        } catch (_) {
+          // ignore - keep whatever local values exist if load fails
+        }
+        if (mounted) setState(() {});
+      } else {
+        // Signed out: clear local cache and rebuild UI so the app shows intro/login
+        try {
+          await _userPreferences.clearLocal();
+        } catch (_) {
+          // ignore
+        }
+        if (mounted) setState(() {});
+      }
     });
   }
 
@@ -80,7 +101,10 @@ class _AllowanceAppState extends State<AllowanceApp> {
       theme: ThemeData(primarySwatch: Colors.indigo),
       home: user == null
           ? IntroductionScreen(
-              onFinishIntro: () {},
+              onFinishIntro: () {
+                // When intro finishes, the introduction screen should handle sign-in / sign-up flow.
+                // After sign-in completes, the auth listener above will reload preferences and rebuild UI.
+              },
               userPreferences: _userPreferences,
             )
           : HomeScreen(userPreferences: _userPreferences),

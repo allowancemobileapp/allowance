@@ -62,11 +62,15 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   @override
   void initState() {
     super.initState();
-    if (plans
-        .map((p) => p['tier'])
-        .contains(widget.userPreferences.subscriptionTier)) {
-      _currentTier = widget.userPreferences.subscriptionTier;
+
+    // If the saved subscriptionTier exists and matches one of the plan tiers,
+    // use it. Otherwise keep the default value already in _currentTier.
+    final savedTier = widget.userPreferences.subscriptionTier;
+    if (savedTier != null &&
+        plans.map((p) => p['tier'].toString()).contains(savedTier)) {
+      _currentTier = savedTier;
     }
+
     _pageController = PageController(viewportFraction: 0.77);
   }
 

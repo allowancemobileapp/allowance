@@ -4,62 +4,25 @@ import 'package:allowance/models/user_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/screens/introduction/introduction_screen.dart';
 import 'package:allowance/screens/home/home_screen.dart';
+import 'edit_profile_screen.dart';
+
+const Color _bg = Color(0xFF121212);
+const Color _card = Color(0xFF1E1E1E);
+const Color _accent = Color(0xFF4CAF50);
 
 class ProfileScreen extends StatefulWidget {
   final UserPreferences userPreferences;
-  final VoidCallback onSave; // Callback to notify HomeScreen
+  final VoidCallback onSave;
 
-  const ProfileScreen({
-    super.key,
-    required this.userPreferences,
-    required this.onSave,
-  });
+  const ProfileScreen(
+      {super.key, required this.userPreferences, required this.onSave});
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _phoneController = TextEditingController();
-  final TextEditingController _weightController = TextEditingController();
-  final TextEditingController _heightController = TextEditingController();
-  final TextEditingController _ageController = TextEditingController();
-
-  String? _bloodGroup;
-  final List<String> bloodGroups = [
-    "A+",
-    "A-",
-    "B+",
-    "B-",
-    "AB+",
-    "AB-",
-    "O+",
-    "O-",
-  ];
-
   bool _signingOut = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _usernameController.text = widget.userPreferences.username ?? "";
-    _phoneController.text = widget.userPreferences.phoneNumber ?? "";
-    _weightController.text = widget.userPreferences.weight?.toString() ?? "";
-    _heightController.text = widget.userPreferences.height?.toString() ?? "";
-    _ageController.text = widget.userPreferences.age?.toString() ?? "";
-    _bloodGroup = widget.userPreferences.bloodGroup;
-  }
-
-  @override
-  void dispose() {
-    _usernameController.dispose();
-    _phoneController.dispose();
-    _weightController.dispose();
-    _heightController.dispose();
-    _ageController.dispose();
-    super.dispose();
-  }
 
   Future<void> _confirmLogout() async {
     final confirmed = await showDialog<bool>(
@@ -78,231 +41,183 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ),
     );
 
-    if (confirmed == true) {
-      await _signOut();
-    }
+    if (confirmed == true) await _signOut();
   }
 
   Future<void> _signOut() async {
     setState(() => _signingOut = true);
     try {
       final supabase = Supabase.instance.client;
-
-      // Sign out from Supabase
       await supabase.auth.signOut();
 
-      // Optionally keep local preferences; if you want to clear them uncomment below:
-      // await widget.userPreferences.clearPreferences(); // (implement if you add a clear method)
+      // Clear local preferences (so a new user starts fresh)
+      await widget.userPreferences.clearLocal();
 
-      // Show friendly message
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Signed out successfully.')),
-        );
-      }
-
-      // Navigate to the Introduction screen and remove all previous routes
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(
-            builder: (_) => IntroductionScreen(
-              userPreferences: widget.userPreferences,
-              onFinishIntro: () {
-                // After login, rebuild will show Home because auth state will change and main.dart listens for it.
-                Navigator.of(context).pushReplacement(
-                  MaterialPageRoute(
-                      builder: (_) =>
-                          HomeScreen(userPreferences: widget.userPreferences)),
-                );
-              },
-            ),
-          ),
+              builder: (_) => IntroductionScreen(
+                  userPreferences: widget.userPreferences,
+                  onFinishIntro: () {})),
           (route) => false,
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to sign out: $e')),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Could not sign out. Try again.'),
+            backgroundColor: Colors.red));
       }
     } finally {
       if (mounted) setState(() => _signingOut = false);
     }
   }
 
-  Widget _buildInputField({
-    required TextEditingController controller,
-    required String label,
-    required String hint,
-    TextInputType keyboardType = TextInputType.text,
-  }) {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        color: const Color(0xFF2C2C2C),
-      ),
-      child: TextField(
-        controller: controller,
-        decoration: InputDecoration(
-          labelText: label,
-          hintText: hint,
-          labelStyle: const TextStyle(
-            color: Colors.white,
-            fontFamily: 'SF Pro',
-            fontWeight: FontWeight.bold,
-          ),
-          hintStyle: const TextStyle(
-            color: Colors.white60,
-            fontFamily: 'SF Pro',
-          ),
-          filled: true,
-          fillColor: Colors.transparent,
-          border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide.none),
-          contentPadding:
-              const EdgeInsets.symmetric(vertical: 18, horizontal: 16),
-        ),
-        keyboardType: keyboardType,
-        style: const TextStyle(fontFamily: 'SF Pro', color: Colors.white),
-        textAlign: TextAlign.left,
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
+    final up = widget.userPreferences;
+    final avatarUrl = up.avatarUrl;
+    final imageProvider = (avatarUrl != null && avatarUrl.isNotEmpty)
+        ? NetworkImage(avatarUrl)
+        : null;
+
     return Scaffold(
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      backgroundColor: _bg,
       appBar: AppBar(
+        backgroundColor: _bg,
+        elevation: 0,
         centerTitle: true,
-        title: const Text(
-          "My Profile",
-          style: TextStyle(
-            fontFamily: 'SF Pro',
-            fontSize: 28,
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-          ),
+        title: Image.asset(
+          'assets/images/profile.png',
+          height: 120, // adjust if you want it larger/smaller
+          fit: BoxFit.contain,
         ),
-        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-        elevation: 4,
-        actions: [
-          // Logout button
-          IconButton(
-            icon: _signingOut
-                ? const CircularProgressIndicator.adaptive()
-                : const Icon(Icons.logout),
-            tooltip: 'Log out',
-            onPressed: _signingOut ? null : _confirmLogout,
-          )
-        ],
+        automaticallyImplyLeading: false,
       ),
-      body: Stack(
+      body: ListView(
+        padding: const EdgeInsets.all(16),
         children: [
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  _buildInputField(
-                    controller: _usernameController,
-                    label: "Username",
-                    hint: "Enter your username",
-                  ),
-                  const SizedBox(height: 16),
-                  _buildInputField(
-                    controller: _phoneController,
-                    label: "Phone Number",
-                    hint: "Enter your phone number",
-                    keyboardType: TextInputType.phone,
-                  ),
-                  const SizedBox(height: 16),
-                  _buildInputField(
-                    controller: _weightController,
-                    label: "Weight (kg)",
-                    hint: "Enter your weight",
-                    keyboardType: TextInputType.number,
-                  ),
-                  const SizedBox(height: 16),
-                  _buildInputField(
-                    controller: _heightController,
-                    label: "Height (cm)",
-                    hint: "Enter your height",
-                    keyboardType: TextInputType.number,
-                  ),
-                  const SizedBox(height: 16),
-                  _buildInputField(
-                    controller: _ageController,
-                    label: "Age",
-                    hint: "Enter your age",
-                    keyboardType: TextInputType.number,
-                  ),
-                  const SizedBox(height: 16),
-                  // Blood group dropdown
-                  Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
-                      color: const Color(0xFF2C2C2C),
-                    ),
-                    child: DropdownButtonFormField<String>(
-                      value: _bloodGroup,
-                      items: bloodGroups
-                          .map(
-                              (b) => DropdownMenuItem(value: b, child: Text(b)))
-                          .toList(),
-                      onChanged: (v) => setState(() => _bloodGroup = v),
-                      decoration: const InputDecoration(
-                          border:
-                              OutlineInputBorder(borderSide: BorderSide.none),
-                          labelText: 'Blood Group'),
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8.0),
-                    child: Center(
-                      child: ElevatedButton(
-                        onPressed: () {
-                          // Save preferences locally and notify home
-                          widget.userPreferences.username =
-                              _usernameController.text;
-                          widget.userPreferences.phoneNumber =
-                              _phoneController.text;
-                          widget.userPreferences.weight =
-                              double.tryParse(_weightController.text);
-                          widget.userPreferences.height =
-                              double.tryParse(_heightController.text);
-                          widget.userPreferences.age =
-                              int.tryParse(_ageController.text);
-                          widget.userPreferences.bloodGroup = _bloodGroup;
-                          widget.userPreferences.savePreferences();
-                          widget.onSave();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF4CAF50),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 16, horizontal: 48),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                          elevation: 0,
-                        ),
-                        child: const Text(
-                          "Save",
-                          style: TextStyle(
-                              fontFamily: 'SF Pro',
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+          Column(
+            children: [
+              SizedBox(
+                width: 110,
+                height: 110,
+                child: CircleAvatar(
+                  radius: 55,
+                  backgroundColor: Colors.grey[850],
+                  backgroundImage: imageProvider,
+                  child: imageProvider == null
+                      ? Text(
+                          (up.fullName ?? '?').isNotEmpty
+                              ? up.fullName![0].toUpperCase()
+                              : '?',
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 34),
+                        )
+                      : null,
+                ),
               ),
+              const SizedBox(height: 12),
+              Text(up.fullName ?? 'No name',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 6),
+              Text('@${up.username ?? 'nouser'}',
+                  style: const TextStyle(color: Colors.white70)),
+            ],
+          ),
+          const SizedBox(height: 28),
+
+          // Info card
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+                color: _card, borderRadius: BorderRadius.circular(12)),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.phone, color: Colors.white70),
+                  title: const Text('Phone',
+                      style: TextStyle(color: Colors.white70)),
+                  subtitle: Text(up.phoneNumber ?? 'Not set',
+                      style: const TextStyle(color: Colors.white)),
+                ),
+                const Divider(color: Colors.grey),
+                ListTile(
+                  leading:
+                      const Icon(Icons.fitness_center, color: Colors.white70),
+                  title: const Text('Weight',
+                      style: TextStyle(color: Colors.white70)),
+                  subtitle: Text(up.weight?.toString() ?? 'Not set',
+                      style: const TextStyle(color: Colors.white)),
+                ),
+                const Divider(color: Colors.grey),
+                ListTile(
+                  leading: const Icon(Icons.height, color: Colors.white70),
+                  title: const Text('Height',
+                      style: TextStyle(color: Colors.white70)),
+                  subtitle: Text(up.height?.toString() ?? 'Not set',
+                      style: const TextStyle(color: Colors.white)),
+                ),
+                const Divider(color: Colors.grey),
+                ListTile(
+                  leading: const Icon(Icons.cake, color: Colors.white70),
+                  title: const Text('Age',
+                      style: TextStyle(color: Colors.white70)),
+                  subtitle: Text(up.age?.toString() ?? 'Not set',
+                      style: const TextStyle(color: Colors.white)),
+                ),
+                const Divider(color: Colors.grey),
+                ListTile(
+                  leading: const Icon(Icons.bloodtype, color: Colors.white70),
+                  title: const Text('Blood group',
+                      style: TextStyle(color: Colors.white70)),
+                  subtitle: Text(up.bloodGroup ?? 'Not set',
+                      style: const TextStyle(color: Colors.white)),
+                ),
+              ],
             ),
+          ),
+
+          const SizedBox(height: 24),
+
+          ElevatedButton.icon(
+            icon: const Icon(Icons.edit_outlined),
+            label: const Text('Edit profile'),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: _accent,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(vertical: 14)),
+            onPressed: () async {
+              final changed = await Navigator.of(context).push<bool>(
+                  MaterialPageRoute(
+                      builder: (_) => EditProfileScreen(
+                          userPreferences: widget.userPreferences)));
+              if (changed == true) {
+                setState(() {}); // reload display from updated preferences
+                widget.onSave();
+              }
+            },
+          ),
+
+          const SizedBox(height: 12),
+
+          OutlinedButton.icon(
+            icon: _signingOut
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.logout),
+            label: const Text('Log out'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.redAccent,
+              side: const BorderSide(color: Colors.redAccent),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+            ),
+            onPressed: _signingOut ? null : _confirmLogout,
           ),
         ],
       ),

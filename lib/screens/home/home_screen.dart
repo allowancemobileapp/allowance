@@ -9,12 +9,10 @@ import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/screens/home/ticket_screen.dart';
 import 'package:allowance/services/api_service.dart';
-// Add these imports for Supabase and CachedNetworkImage
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 class HomeScreen extends StatefulWidget {
-  // Accept userPreferences as optional; we'll provide a fallback inside the state.
   final UserPreferences? userPreferences;
   const HomeScreen({super.key, this.userPreferences});
 
@@ -23,11 +21,9 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  late UserPreferences
-      _prefs; // non-null local alias to avoid null checks everywhere
+  late UserPreferences _prefs;
   int _selectedIndex = 0;
-  final bool _isDarkMode =
-      true; // Consider making this dynamic or from preferences
+  final bool _isDarkMode = true;
   final TextEditingController _budgetController = TextEditingController();
   final FocusNode _budgetFocusNode = FocusNode();
   bool _isBudgetEntered = false;
@@ -50,11 +46,31 @@ class _HomeScreenState extends State<HomeScreen> {
   Timer? _slideshowTimer;
   List<Map<String, dynamic>> _fetchedGists = [];
 
+  // NEW: track loading vs loaded-with-zero-items
+  bool _isGistsLoading = true;
+
+  // Fallback images (replace with your own public URLs or storage links)
+  final List<Map<String, dynamic>> _fallbackGists = [
+    {
+      'id': 'fallback-1',
+      'title': 'Welcome to Allowance — discover local gists',
+      'image_url': 'https://picsum.photos/1200/800?seed=allowance1'
+    },
+    {
+      'id': 'fallback-2',
+      'title': 'Share news, offers and updates with your campus',
+      'image_url': 'https://picsum.photos/1200/800?seed=allowance2'
+    },
+    {
+      'id': 'fallback-3',
+      'title': 'Create Local or Global gists with an image',
+      'image_url': 'https://picsum.photos/1200/800?seed=allowance3'
+    },
+  ];
+
   @override
   void initState() {
     super.initState();
-
-    // Create a non-null _prefs: use passed userPreferences or fallback to default
     _prefs = widget.userPreferences ?? UserPreferences();
 
     _budgetController.addListener(() {
@@ -80,25 +96,48 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _fetchGistsAndStartSlideshow() async {
+    setState(() {
+      _isGistsLoading = true;
+    });
+
     try {
       final response = await supabase
           .from('gists')
           .select('id, title, image_url')
           .order('created_at', ascending: false)
           .limit(10);
-      if (mounted) {
+
+      if (!mounted) return;
+
+      final list = (response is List)
+          ? List<Map<String, dynamic>>.from(response)
+          : <Map<String, dynamic>>[];
+
+      setState(() {
+        _fetchedGists = list;
+        _isGistsLoading = false;
+      });
+
+      // If there are no gists, use fallback images
+      if (_fetchedGists.isEmpty) {
         setState(() {
-          _fetchedGists = List<Map<String, dynamic>>.from(response as List);
+          _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
         });
-        if (_fetchedGists.isNotEmpty) {
-          _startSlideshow();
-        }
+      }
+
+      if (_fetchedGists.isNotEmpty) {
+        _startSlideshow();
       }
     } catch (e) {
       if (mounted) {
+        setState(() {
+          _isGistsLoading = false;
+          _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
+        });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error fetching gists: $e')),
         );
+        _startSlideshow();
       }
     }
   }
@@ -108,7 +147,6 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_fetchedGists.isEmpty) return;
     _slideshowTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (_pageController.hasClients && _fetchedGists.isNotEmpty) {
-        // Ensure page controller has pages and the page value is valid before animating
         if (_pageController.page != null) {
           int nextPage = (_pageController.page!.round() + 1);
           _pageController.animateToPage(
@@ -153,6 +191,7 @@ class _HomeScreenState extends State<HomeScreen> {
       minChildSize: 0.3,
       builder: (BuildContext draggableSheetContext,
           ScrollController scrollController) {
+        final textColor = _isDarkMode ? Colors.white : Colors.black87;
         return Container(
           padding: const EdgeInsets.symmetric(vertical: 16),
           decoration: BoxDecoration(
@@ -168,8 +207,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     final name = school["name"] as String? ?? "Unnamed School";
                     return ListTile(
                       title: Text(name,
-                          style: const TextStyle(
-                              fontFamily: 'Montserrat', fontSize: 18)),
+                          style: TextStyle(
+                              fontFamily: 'Montserrat',
+                              fontSize: 18,
+                              color: textColor)),
                       onTap: () async {
                         _prefs.schoolId = school["id"].toString();
                         _prefs.schoolName = name;
@@ -186,7 +227,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     );
                   },
                 )
-              : const Center(child: Text("No schools available")),
+              : Center(
+                  child: Text("No schools available",
+                      style: TextStyle(color: textColor)),
+                ),
         );
       },
     );
@@ -238,6 +282,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildVendorPicker(BuildContext modalContext) {
+    final textColor = _isDarkMode ? Colors.white : Colors.black87;
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.6,
@@ -273,9 +318,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       itemBuilder: (ctx, i) {
                         if (i == 0) {
                           return CheckboxListTile(
-                            title: const Text("Select all vendors",
+                            title: Text("Select all vendors",
                                 style: TextStyle(
-                                    fontFamily: 'Montserrat', fontSize: 16)),
+                                    fontFamily: 'Montserrat',
+                                    fontSize: 16,
+                                    color: textColor)),
                             value: _selectAll,
                             onChanged: (v) {
                               modalSetState(() {
@@ -289,15 +336,17 @@ class _HomeScreenState extends State<HomeScreen> {
                               });
                               setState(() {});
                             },
-                            activeColor: Colors.amber[700],
+                            activeColor: themeColor,
                             checkColor: Colors.white,
                           );
                         }
                         final r = _restaurants[i - 1];
                         return CheckboxListTile(
                           title: Text(r,
-                              style: const TextStyle(
-                                  fontFamily: 'Montserrat', fontSize: 16)),
+                              style: TextStyle(
+                                  fontFamily: 'Montserrat',
+                                  fontSize: 16,
+                                  color: textColor)),
                           value: _selectedRestaurants.contains(r),
                           onChanged: (v) {
                             modalSetState(() {
@@ -311,7 +360,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             });
                             setState(() {});
                           },
-                          activeColor: Colors.amber[700],
+                          activeColor: themeColor,
                           checkColor: Colors.white,
                         );
                       }),
@@ -337,6 +386,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildSelectSchoolPrompt(BuildContext modalContext) {
+    final textColor = _isDarkMode ? Colors.white : Colors.black87;
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.4,
@@ -353,18 +403,24 @@ class _HomeScreenState extends State<HomeScreen> {
           child: ListView(
             controller: scrollController,
             children: [
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 child: Text("Select Restaurant",
                     style: TextStyle(
                         fontFamily: 'Montserrat',
                         fontSize: 18,
-                        fontWeight: FontWeight.bold)),
+                        fontWeight: FontWeight.bold,
+                        color: textColor)),
               ),
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                 child: Text("Please select a school first.",
-                    style: TextStyle(fontFamily: 'Montserrat', fontSize: 16)),
+                    style: TextStyle(
+                        fontFamily: 'Montserrat',
+                        fontSize: 16,
+                        color: textColor)),
               ),
               const SizedBox(height: 16),
               Padding(
@@ -373,8 +429,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   alignment: Alignment.centerRight,
                   child: TextButton(
                     onPressed: () => Navigator.pop(modalContext),
-                    child: const Text("Ok",
-                        style: TextStyle(fontFamily: 'Montserrat')),
+                    child: Text("Ok",
+                        style: TextStyle(
+                            fontFamily: 'Montserrat', color: textColor)),
                   ),
                 ),
               ),
@@ -470,7 +527,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: themeColor))),
       SizedBox(
           height: MediaQuery.of(context).size.height * 0.36,
-          child: _fetchedGists.isEmpty
+          child: _isGistsLoading
               ? Center(child: CircularProgressIndicator(color: themeColor))
               : PageView.builder(
                   controller: _pageController,
@@ -480,9 +537,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           () => _slideshowIndex = i % _fetchedGists.length);
                     }
                   },
-                  itemCount: _fetchedGists.isEmpty
-                      ? 0
-                      : null, // For infinite scroll illusion; null means unbounded
+                  // If there are fetched items use the infinite illusion (unbounded)
+                  itemCount: _fetchedGists.isEmpty ? 0 : null,
                   itemBuilder: (ctx, idx) {
                     if (_fetchedGists.isEmpty) {
                       return const SizedBox.shrink();
@@ -720,9 +776,7 @@ class _HomeScreenState extends State<HomeScreen> {
       leading: Builder(
           builder: (appBarContext) => IconButton(
               icon: const Icon(Icons.notifications, size: 36),
-              onPressed: () {
-                // TODO: Implement notification functionality
-              })),
+              onPressed: () {})),
       title: Image.asset('assets/images/allowance_logo.png',
           height: 200, width: 200, fit: BoxFit.contain),
       actions: [
@@ -739,11 +793,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildCustomFooter(Color screenBgColor) {
     final icons = [
       BoxIcons.bxs_home,
-      BoxIcons
-          .bxs_credit_card, // Assuming this relates to index 2 (SubscriptionScreen)
-      BoxIcons.bxs_user // Assuming this relates to index 3 (ProfileScreen)
+      BoxIcons.bxs_credit_card,
+      BoxIcons.bxs_user
     ];
-    // These indices should match the IndexedStack order
+    // Indices that map to your IndexedStack order (keep these as you had them)
     final idxs = [0, 2, 3];
     final acts = [
       () => setState(() => _selectedIndex = 0),
@@ -753,27 +806,43 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Container(
       height: 56,
-      decoration: BoxDecoration(
-        color: screenBgColor,
-      ),
+      decoration: BoxDecoration(color: screenBgColor),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: List.generate(icons.length, (i) {
-            final sel = _selectedIndex == idxs[i];
-            return GestureDetector(
-                onTap: acts[i],
-                child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    child: Icon(icons[i],
-                        size: 28,
-                        color: sel
-                            ? themeColor
-                            : (_isDarkMode
-                                ? Colors.white70
-                                : Colors.black54))));
-          })),
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: List.generate(icons.length, (i) {
+          final sel = _selectedIndex == idxs[i];
+          final isProfileTab = idxs[i] == 3;
+
+          // Use avatar if this is profile tab and avatar exists
+          Widget iconWidget;
+          if (isProfileTab &&
+              _prefs.avatarUrl != null &&
+              _prefs.avatarUrl!.isNotEmpty) {
+            iconWidget = CircleAvatar(
+              radius: 14,
+              backgroundColor: Colors.grey[800],
+              backgroundImage: NetworkImage(_prefs.avatarUrl!),
+            );
+          } else {
+            iconWidget = Icon(
+              icons[i],
+              size: 28,
+              color: sel
+                  ? themeColor
+                  : (_isDarkMode ? Colors.white70 : Colors.black54),
+            );
+          }
+
+          return GestureDetector(
+            onTap: acts[i],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: iconWidget,
+            ),
+          );
+        }),
+      ),
     );
   }
 }
