@@ -76,11 +76,17 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
         .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
         .toStringAsFixed(0);
 
-    final message = Uri.encodeComponent(
-      'Hello! I\'d like to order from $vendorName:\n'
-      'Items: $itemList\n'
-      'Total: ₦$total',
-    );
+    // 🧾 Build detailed message
+    final message = StringBuffer();
+    message.writeln("Hello! I'd like to order from $vendorName:");
+    message.writeln("Items:");
+    for (var i in items) {
+      final name = i['name'];
+      final price = getAdjustedPrice(i).toStringAsFixed(0);
+      final qty = i['quantity'] ?? 1;
+      message.writeln("- $name (₦$price × $qty)");
+    }
+    message.writeln("Total: ₦$total");
 
     showModalBottomSheet(
       context: context,
@@ -91,30 +97,43 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
           if (snap.connectionState == ConnectionState.waiting) {
             return const SizedBox(
               height: 200,
-              child:
-                  Center(child: CircularProgressIndicator(color: Colors.white)),
+              child: Center(child: CircularProgressIndicator()),
             );
           }
 
           final list = snap.data ?? [];
           if (list.isEmpty) {
-            return const SizedBox(
+            return Container(
+              decoration: BoxDecoration(
+                color: Colors.grey[900],
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              padding: const EdgeInsets.all(16),
               height: 200,
-              child: Center(
-                child: Text('No delivery personnel available.',
-                    style: TextStyle(color: Colors.white70)),
+              child: const Center(
+                child: Text(
+                  'Sorry, no delivery personnel are available right now.',
+                  style: TextStyle(color: Colors.white),
+                ),
               ),
             );
           }
 
           list.shuffle(Random());
-          return Padding(
+
+          return Container(
+            decoration: BoxDecoration(
+              color: Colors.grey[900],
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(16)),
+            ),
             padding: const EdgeInsets.all(16),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Select your delivery personnel',
+                  'Select your guy/gal',
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
@@ -124,8 +143,10 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                 const SizedBox(height: 8),
                 for (var person in list)
                   ListTile(
-                    title: Text('${person['name']} (${person['gender']})',
-                        style: const TextStyle(color: Colors.white)),
+                    title: Text(
+                      '${person['name']} (${person['gender']})',
+                      style: const TextStyle(color: Colors.white),
+                    ),
                     trailing: ElevatedButton(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: themeColor,
@@ -135,16 +156,24 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                         ),
                       ),
                       onPressed: () async {
-                        final urlBase =
-                            person['whatsapp_url']?.toString() ?? '';
-                        final uri = Uri.parse('$urlBase?text=$message');
+                        final phone = person['whatsapp_url']
+                            .toString()
+                            .replaceAll("https://wa.me/", "")
+                            .trim();
+                        final encodedMsg =
+                            Uri.encodeComponent(message.toString());
+                        final url = "https://wa.me/$phone?text=$encodedMsg";
+                        final uri = Uri.parse(url);
+
                         if (await canLaunchUrl(uri)) {
-                          await launchUrl(uri);
+                          // ✅ Let Android show WhatsApp / WhatsApp Business chooser
+                          await launchUrl(uri,
+                              mode: LaunchMode.platformDefault);
                         } else {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                              content:
-                                  Text('WhatsApp not available on this device'),
+                              content: Text(
+                                  'Unable to open WhatsApp. Please make sure WhatsApp or WhatsApp Business is installed.'),
                             ),
                           );
                         }
@@ -305,9 +334,13 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           } else if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
+            return Center(
+                child: Text(
+                    'Oops! An error occurred while loading your favorites: ${snap.error}. Please try again later.'));
           } else if (!snap.hasData) {
-            return const Center(child: Text('No data available.'));
+            return const Center(
+                child:
+                    Text('No favorites available right now. Try adding some!'));
           }
 
           final options = snap.data!;

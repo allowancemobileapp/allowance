@@ -136,17 +136,27 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
     final vendorName = selectedOption['vendors']['name'].toString();
     final items = (selectedOption['items'] as List<dynamic>);
-    final itemList = items.map((i) => i['name'].toString()).join(', ');
+
+    // 🧮 Calculate total
     final total = items
         .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
         .toStringAsFixed(0);
 
-    final message = Uri.encodeComponent(
-      'Hello! I\'d like to order from $vendorName:\n'
-      'Items: $itemList\n'
-      'Total: ₦$total',
-    );
+    // 📝 Build detailed message
+    final message = StringBuffer();
+    message.writeln("Hello! I'd like to order from $vendorName:");
+    message.writeln("Items:");
 
+    for (var i in items) {
+      final name = i['name'];
+      final price = getAdjustedPrice(i).toStringAsFixed(0);
+      final qty = i['quantity'] ?? 1;
+      message.writeln("- $name (₦$price × $qty)");
+    }
+
+    message.writeln("Total: ₦$total");
+
+    // 🧾 Show delivery picker modal
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
@@ -159,6 +169,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               child: Center(child: CircularProgressIndicator()),
             );
           }
+
           final list = snap.data ?? [];
           if (list.isEmpty) {
             return Container(
@@ -171,13 +182,15 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               height: 200,
               child: const Center(
                 child: Text(
-                  'No delivery personnel available.',
+                  'Sorry, no delivery personnel are available right now.',
                   style: TextStyle(color: Colors.white),
                 ),
               ),
             );
           }
+
           list.shuffle(Random());
+
           return Container(
             decoration: BoxDecoration(
               color: Colors.grey[900],
@@ -211,21 +224,10 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                           borderRadius: BorderRadius.circular(8),
                         ),
                       ),
-                      onPressed: () async {
-                        final urlBase =
-                            person['whatsapp_url']?.toString() ?? '';
-                        final uri = Uri.parse('$urlBase?text=$message');
-                        if (await canLaunchUrl(uri)) {
-                          await launchUrl(uri);
-                        } else {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content:
-                                  Text('WhatsApp not available on this device'),
-                            ),
-                          );
-                        }
-                      },
+                      onPressed: () => _openWhatsAppContact(
+                        person,
+                        message.toString(),
+                      ),
                       child: const Text('Contact'),
                     ),
                   ),
@@ -235,6 +237,65 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
         },
       ),
     );
+  }
+
+  Future<void> _openWhatsAppContact(
+      Map<String, dynamic> person, String rawMessage) async {
+    try {
+      final stored =
+          (person['whatsapp_url'] ?? person['phone'] ?? person['mobile'] ?? '')
+              .toString();
+      String phoneOnly = stored.replaceAll(RegExp(r'[^0-9]'), '');
+
+      if (phoneOnly.isEmpty) {
+        final alt = (person['phone'] ?? person['mobile'] ?? '').toString();
+        phoneOnly = alt.replaceAll(RegExp(r'[^0-9]'), '');
+      }
+
+      final encodedMessage = Uri.encodeComponent(rawMessage);
+
+      // ✅ Directly use the native WhatsApp URI first (works best on Android/iOS)
+      final whatsappUri =
+          Uri.parse('whatsapp://send?phone=$phoneOnly&text=$encodedMessage');
+
+      // ✅ Try WhatsApp Business fallback (for users with both installed)
+      final whatsappBusinessUri = Uri.parse(
+          'whatsapp-business://send?phone=$phoneOnly&text=$encodedMessage');
+
+      // ✅ Web fallback (for browsers or desktop)
+      final waWebUri =
+          Uri.parse('https://wa.me/$phoneOnly?text=$encodedMessage');
+
+      if (await canLaunchUrl(whatsappUri)) {
+        await launchUrl(whatsappUri, mode: LaunchMode.externalApplication);
+        return;
+      } else if (await canLaunchUrl(whatsappBusinessUri)) {
+        await launchUrl(whatsappBusinessUri,
+            mode: LaunchMode.externalApplication);
+        return;
+      } else if (await canLaunchUrl(waWebUri)) {
+        await launchUrl(waWebUri, mode: LaunchMode.externalApplication);
+        return;
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Unable to open WhatsApp. Please make sure WhatsApp or WhatsApp Business is installed.',
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text(
+                  'Oops! Something went wrong while trying to open WhatsApp: $e')),
+        );
+      }
+    }
   }
 
   @override
@@ -333,7 +394,9 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           } else if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
+            return Center(
+                child: Text(
+                    'Oops! An error occurred while loading options: ${snap.error}. Please try again later.'));
           } else if (snap.hasData) {
             final options = snap.data!;
             return Column(
@@ -531,7 +594,9 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               ],
             );
           }
-          return const Center(child: Text("No data available."));
+          return const Center(
+              child: Text(
+                  'No options available right now. Try adjusting your preferences!'));
         },
       ),
     );

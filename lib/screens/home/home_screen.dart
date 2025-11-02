@@ -11,6 +11,8 @@ import 'package:allowance/screens/home/ticket_screen.dart';
 import 'package:allowance/services/api_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'dart:developer' as developer;
 
 class HomeScreen extends StatefulWidget {
   final UserPreferences? userPreferences;
@@ -32,7 +34,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Map<String, dynamic>> _colorfulTabs = [
     {"label": "Favorites", "icon": BoxIcons.bxs_heart, "color": Colors.orange},
     {"label": "Tickets", "icon": BoxIcons.bxs_chat, "color": Colors.purple},
-    {"label": "Delivery", "icon": BoxIcons.bxs_truck, "color": Colors.teal},
+    {"label": "Dispatch", "icon": BoxIcons.bxs_truck, "color": Colors.teal},
   ];
 
   List<String> _restaurants = [];
@@ -101,44 +103,80 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      final response = await supabase
+      // Request only paid & active gists from server (server filtering preferred).
+      final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
-          .select('id, title, image_url')
+          .select('id, title, image_url, type, school_id, url, created_at')
+          .eq('paid', true)
+          .eq('status', 'active')
           .order('created_at', ascending: false)
-          .limit(10);
+          .limit(50);
 
       if (!mounted) return;
 
-      final list = (response is List)
-          ? List<Map<String, dynamic>>.from(response)
-          : <Map<String, dynamic>>[];
+      List<Map<String, dynamic>> list = raw;
 
+      // Apply client-side visibility rules:
+      // - if user has selected a school (sid): show global + local for that school
+      // - if no school selected: show only global
+
+      final sidStr = _prefs.schoolId; // stored as String or null
+      final int? sidInt = sidStr != null ? int.tryParse(sidStr) : null;
+
+      if (sidStr != null && sidStr.isNotEmpty) {
+        // Filter list to global OR local matching this sid
+        list = list.where((g) {
+          final type = (g['type'] ?? '').toString().toLowerCase();
+          if (type == 'global') return true;
+          if (type == 'local') {
+            final gSchool = g['school_id'];
+            if (gSchool == null) return false;
+
+            // Normalize DB school id to int if possible
+            final int? gsInt = int.tryParse(gSchool.toString());
+
+            // Compare ints if both available, otherwise fall back to string compare
+            if (gsInt != null && sidInt != null) {
+              return gsInt == sidInt;
+            } else {
+              return gSchool.toString() == sidStr;
+            }
+          }
+          return false;
+        }).toList();
+      } else {
+        // No school selected -> only global gists
+        list = list
+            .where(
+                (g) => (g['type'] ?? '').toString().toLowerCase() == 'global')
+            .toList();
+      }
+
+      if (!mounted) return;
       setState(() {
         _fetchedGists = list;
         _isGistsLoading = false;
       });
 
-      // If there are no gists, use fallback images
+      // If nothing to show, use fallback placeholders
       if (_fetchedGists.isEmpty) {
         setState(() {
           _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
         });
       }
 
-      if (_fetchedGists.isNotEmpty) {
-        _startSlideshow();
-      }
+      if (_fetchedGists.isNotEmpty) _startSlideshow();
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isGistsLoading = false;
-          _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error fetching gists: $e')),
-        );
-        _startSlideshow();
-      }
+      if (!mounted) return;
+      setState(() {
+        _isGistsLoading = false;
+        _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Failed to load gists. Showing defaults instead.')),
+      );
+      _startSlideshow();
     }
   }
 
@@ -165,7 +203,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       schools = await ApiService.fetchSchools();
     } catch (e) {
-      errorMsg = "Error loading schools: $e";
+      errorMsg = "Couldn't load schools right now. Please try again later.";
     }
     if (!mounted) return;
     if (errorMsg != null) {
@@ -205,12 +243,21 @@ class _HomeScreenState extends State<HomeScreen> {
                   itemBuilder: (ctx, index) {
                     final school = schools[index];
                     final name = school["name"] as String? ?? "Unnamed School";
+                    final isSelected =
+                        _prefs.schoolId == school["id"].toString();
+
                     return ListTile(
-                      title: Text(name,
-                          style: TextStyle(
-                              fontFamily: 'Montserrat',
-                              fontSize: 18,
-                              color: textColor)),
+                      title: Text(
+                        name,
+                        style: TextStyle(
+                          fontFamily: 'Montserrat',
+                          fontSize: 18,
+                          color: textColor,
+                        ),
+                      ),
+                      trailing: isSelected
+                          ? Icon(Icons.check, color: themeColor)
+                          : null,
                       onTap: () async {
                         _prefs.schoolId = school["id"].toString();
                         _prefs.schoolName = name;
@@ -228,8 +275,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   },
                 )
               : Center(
-                  child: Text("No schools available",
-                      style: TextStyle(color: textColor)),
+                  child: Text(
+                    "No schools available",
+                    style: TextStyle(color: textColor),
+                  ),
                 ),
         );
       },
@@ -248,7 +297,7 @@ class _HomeScreenState extends State<HomeScreen> {
             .map<String>((v) => v['name'] as String? ?? "Unnamed Vendor")
             .toList();
       } catch (e) {
-        errorMsg = "Error loading vendors: $e";
+        errorMsg = "Couldn't load vendors right now. Please try again later.";
       }
       if (!mounted) return;
       if (errorMsg != null) {
@@ -257,8 +306,8 @@ class _HomeScreenState extends State<HomeScreen> {
         return;
       }
       if (_restaurants.isEmpty) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text("No vendors found.")));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text("No vendors available for this school.")));
         return;
       }
       showModalBottomSheet(
@@ -457,9 +506,9 @@ class _HomeScreenState extends State<HomeScreen> {
               MaterialPageRoute(
                   builder: (routeContext) => const TicketScreen()));
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('${tab["label"]} tapped (Placeholder)',
-                  style: const TextStyle(fontFamily: 'SanFrancisco'))));
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Dispatch is coming soon',
+                  style: TextStyle(fontFamily: 'SanFrancisco'))));
         }
       },
       child: Container(
@@ -510,6 +559,17 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildGistSlideshow() {
+    final String label = _isGistsLoading
+        ? "Gist"
+        : (_fetchedGists.isNotEmpty
+            ? (((_fetchedGists[_slideshowIndex]['type'] ?? '')
+                        .toString()
+                        .toLowerCase() ==
+                    'global'
+                ? "Global Gist"
+                : "Gist"))
+            : "Gist");
+
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Container(
           margin: const EdgeInsets.only(bottom: 8),
@@ -520,7 +580,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   topLeft: Radius.circular(8),
                   topRight: Radius.circular(8),
                   bottomRight: Radius.circular(8))),
-          child: Text("Gist",
+          child: Text(label,
               style: TextStyle(
                   fontFamily: 'SanFrancisco',
                   fontSize: 16,
@@ -537,66 +597,108 @@ class _HomeScreenState extends State<HomeScreen> {
                           () => _slideshowIndex = i % _fetchedGists.length);
                     }
                   },
-                  // If there are fetched items use the infinite illusion (unbounded)
+                  // allow infinite-like scroll: when list non-empty, itemCount null
                   itemCount: _fetchedGists.isEmpty ? 0 : null,
                   itemBuilder: (ctx, idx) {
-                    if (_fetchedGists.isEmpty) {
-                      return const SizedBox.shrink();
-                    }
+                    if (_fetchedGists.isEmpty) return const SizedBox.shrink();
                     final actualIndex = idx % _fetchedGists.length;
                     final gist = _fetchedGists[actualIndex];
-                    final imageUrl = gist['image_url'] as String?;
+                    final imageUrl = (gist['image_url'] as String?) ?? '';
+                    final title = (gist['title'] as String?) ?? '';
+                    final gistUrl = (gist['url'] as String?) ?? '';
                     final scale = _slideshowIndex == actualIndex ? 1.0 : 0.9;
+
                     return Transform.scale(
                         scale: scale,
                         child: Padding(
-                            padding: EdgeInsets.only(
-                                right: actualIndex != _slideshowIndex
-                                    ? 15.0
-                                    : 0.0),
-                            child: GestureDetector(
-                              onTap: () {
-                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                                    content: Text(
-                                        'Tapped on gist: ${gist['title']} (ID: ${gist['id']})')));
-                              },
-                              child: imageUrl != null && imageUrl.isNotEmpty
-                                  ? CachedNetworkImage(
-                                      imageUrl: imageUrl,
-                                      fit: BoxFit.contain,
-                                      placeholder: (context, url) => Container(
-                                        color: _isDarkMode
-                                            ? Colors.grey[700]
-                                            : Colors.grey[200],
-                                        child: Center(
-                                            child: CircularProgressIndicator(
-                                                color: themeColor)),
-                                      ),
-                                      errorWidget: (context, url, error) =>
-                                          Container(
-                                        color: _isDarkMode
-                                            ? Colors.grey[700]
-                                            : Colors.grey[200],
-                                        child: Icon(Icons.broken_image,
+                          padding: EdgeInsets.only(
+                              right:
+                                  actualIndex != _slideshowIndex ? 15.0 : 0.0),
+                          child: GestureDetector(
+                            onTap: () {}, // Absorb tap, do nothing
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                // Background image or placeholder
+                                imageUrl.isNotEmpty
+                                    ? CachedNetworkImage(
+                                        imageUrl: imageUrl,
+                                        fit: BoxFit.cover,
+                                        placeholder: (context, url) =>
+                                            Container(
+                                          color: _isDarkMode
+                                              ? Colors.grey[700]
+                                              : Colors.grey[200],
+                                          child: Center(
+                                              child: CircularProgressIndicator(
+                                                  color: themeColor)),
+                                        ),
+                                        errorWidget: (context, url, error) =>
+                                            Container(
+                                          color: _isDarkMode
+                                              ? Colors.grey[700]
+                                              : Colors.grey[200],
+                                          child: Icon(Icons.broken_image,
+                                              color: _isDarkMode
+                                                  ? Colors.white54
+                                                  : Colors.black54,
+                                              size: 40),
+                                        ),
+                                      )
+                                    : Container(
+                                        decoration: BoxDecoration(
+                                          color: _isDarkMode
+                                              ? Colors.grey[700]
+                                              : Colors.grey[200],
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                        ),
+                                        child: Icon(Icons.image_not_supported,
                                             color: _isDarkMode
                                                 ? Colors.white54
                                                 : Colors.black54,
                                             size: 40),
                                       ),
-                                    )
-                                  : Container(
-                                      decoration: BoxDecoration(
-                                        color: _isDarkMode
-                                            ? Colors.grey[700]
-                                            : Colors.grey[200],
+
+                                // Top-right URL icon if gist has a url
+                                if (gistUrl.isNotEmpty)
+                                  Positioned(
+                                    top: 8,
+                                    right: 8,
+                                    child: Material(
+                                      color: Colors.black45,
+                                      borderRadius: BorderRadius.circular(20),
+                                      child: InkWell(
+                                        borderRadius: BorderRadius.circular(20),
+                                        onTap: () async {
+                                          // open url in external browser
+                                          final uri = Uri.tryParse(gistUrl);
+                                          if (uri != null &&
+                                              await canLaunchUrl(uri)) {
+                                            await launchUrl(uri,
+                                                mode: LaunchMode
+                                                    .externalApplication);
+                                          } else {
+                                            if (mounted) {
+                                              ScaffoldMessenger.of(context)
+                                                  .showSnackBar(const SnackBar(
+                                                      content: Text(
+                                                          'Sorry, we couldn\'t open this link.')));
+                                            }
+                                          }
+                                        },
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(8.0),
+                                          child: Icon(Icons.link,
+                                              size: 18, color: Colors.white),
+                                        ),
                                       ),
-                                      child: Icon(Icons.image_not_supported,
-                                          color: _isDarkMode
-                                              ? Colors.white54
-                                              : Colors.black54,
-                                          size: 40),
                                     ),
-                            )));
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ));
                   })),
       const SizedBox(height: 8),
       Center(
@@ -631,19 +733,75 @@ class _HomeScreenState extends State<HomeScreen> {
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         body: SafeArea(
           child: IndexedStack(index: _selectedIndex, children: [
-            Padding(
-              padding: const EdgeInsets.only(
-                  left: 16, top: 16, right: 16, bottom: 8),
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    const Spacer(),
-                    GestureDetector(
-                      onTap: () {
-                        setState(() => _vendorBarTapped = true);
-                        _showRestaurantSelection();
-                      },
-                      child: Container(
+            SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.only(
+                    left: 16, top: 70, right: 16, bottom: 8),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      GestureDetector(
+                        onTap: () {
+                          setState(() => _vendorBarTapped = true);
+                          _showRestaurantSelection();
+                        },
+                        child: Container(
+                          width: horizontalBarWidth,
+                          height: 44,
+                          decoration: BoxDecoration(
+                              color: _isDarkMode
+                                  ? Colors.grey[800]
+                                  : Colors.grey[200],
+                              borderRadius: BorderRadius.circular(25)),
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(children: [
+                            Icon(BoxIcons.bxs_store,
+                                color: themeColor, size: 20),
+                            const SizedBox(width: 8),
+                            Expanded(
+                                child: _selectedRestaurants.isNotEmpty
+                                    ? SingleChildScrollView(
+                                        scrollDirection: Axis.horizontal,
+                                        child: Row(
+                                            children: _selectedRestaurants
+                                                .map((v) => Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                              right: 12),
+                                                      child: Chip(
+                                                        label: Text(v,
+                                                            style: TextStyle(
+                                                                fontFamily:
+                                                                    'SanFrancisco',
+                                                                fontSize: 18 *
+                                                                    vendorBudgetTextSizeFactor,
+                                                                color: Colors
+                                                                    .white)),
+                                                        backgroundColor:
+                                                            _isDarkMode
+                                                                ? Colors
+                                                                    .grey[700]
+                                                                : Colors
+                                                                    .grey[300],
+                                                      ),
+                                                    ))
+                                                .toList()))
+                                    : Text("Select Vendor",
+                                        style: TextStyle(
+                                            fontFamily: 'SanFrancisco',
+                                            fontSize:
+                                                22 * vendorBudgetTextSizeFactor,
+                                            color: Colors.white54))),
+                            !_vendorBarTapped
+                                ? Icon(BoxIcons.bxs_chevron_down,
+                                    color: themeColor, size: 22)
+                                : const SizedBox(),
+                          ]),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Container(
                         width: horizontalBarWidth,
                         height: 44,
                         decoration: BoxDecoration(
@@ -653,109 +811,58 @@ class _HomeScreenState extends State<HomeScreen> {
                             borderRadius: BorderRadius.circular(25)),
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Row(children: [
-                          Icon(BoxIcons.bxs_store, color: themeColor, size: 20),
+                          Icon(BoxIcons.bxs_dollar_circle,
+                              color: themeColor, size: 20),
                           const SizedBox(width: 8),
                           Expanded(
-                              child: _selectedRestaurants.isNotEmpty
-                                  ? SingleChildScrollView(
-                                      scrollDirection: Axis.horizontal,
-                                      child: Row(
-                                          children: _selectedRestaurants
-                                              .map((v) => Padding(
-                                                    padding:
-                                                        const EdgeInsets.only(
-                                                            right: 12),
-                                                    child: Chip(
-                                                      label: Text(v,
-                                                          style: TextStyle(
-                                                              fontFamily:
-                                                                  'SanFrancisco',
-                                                              fontSize: 18 *
-                                                                  vendorBudgetTextSizeFactor,
-                                                              color: Colors
-                                                                  .white)),
-                                                      backgroundColor:
-                                                          _isDarkMode
-                                                              ? Colors.grey[700]
-                                                              : Colors
-                                                                  .grey[300],
-                                                    ),
-                                                  ))
-                                              .toList()))
-                                  : Text("Select Vendor",
-                                      style: TextStyle(
+                              child: TextField(
+                                  controller: _budgetController,
+                                  focusNode: _budgetFocusNode,
+                                  keyboardType: TextInputType.number,
+                                  style: TextStyle(
+                                      fontFamily: 'SanFrancisco',
+                                      fontSize: 18 * vendorBudgetTextSizeFactor,
+                                      color: Colors.white),
+                                  decoration: InputDecoration(
+                                      hintText: "Enter Budget",
+                                      hintStyle: TextStyle(
                                           fontFamily: 'SanFrancisco',
+                                          color: Colors.white54,
                                           fontSize:
-                                              22 * vendorBudgetTextSizeFactor,
-                                          color: Colors.white54))),
-                          !_vendorBarTapped
-                              ? Icon(BoxIcons.bxs_chevron_down,
-                                  color: themeColor, size: 22)
-                              : const SizedBox(),
+                                              22 * vendorBudgetTextSizeFactor),
+                                      border: InputBorder.none))),
+                          _budgetFocusNode.hasFocus || _isBudgetEntered
+                              ? InkWell(
+                                  onTap: _goToAvailableOptions,
+                                  child: Container(
+                                      decoration: BoxDecoration(
+                                          color: themeColor,
+                                          shape: BoxShape.circle),
+                                      padding: const EdgeInsets.all(6),
+                                      child: const Icon(
+                                          BoxIcons.bxs_chevron_right,
+                                          color: Colors.white,
+                                          size: 22)))
+                              : Icon(BoxIcons.bxs_chevron_right,
+                                  color: themeColor, size: 22),
                         ]),
                       ),
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      width: horizontalBarWidth,
-                      height: 44,
-                      decoration: BoxDecoration(
-                          color:
-                              _isDarkMode ? Colors.grey[800] : Colors.grey[200],
-                          borderRadius: BorderRadius.circular(25)),
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(children: [
-                        Icon(BoxIcons.bxs_dollar_circle,
-                            color: themeColor, size: 20),
-                        const SizedBox(width: 8),
-                        Expanded(
-                            child: TextField(
-                                controller: _budgetController,
-                                focusNode: _budgetFocusNode,
-                                keyboardType: TextInputType.number,
-                                style: TextStyle(
-                                    fontFamily: 'SanFrancisco',
-                                    fontSize: 18 * vendorBudgetTextSizeFactor,
-                                    color: Colors.white),
-                                decoration: InputDecoration(
-                                    hintText: "Enter Budget",
-                                    hintStyle: TextStyle(
-                                        fontFamily: 'SanFrancisco',
-                                        color: Colors.white54,
-                                        fontSize:
-                                            22 * vendorBudgetTextSizeFactor),
-                                    border: InputBorder.none))),
-                        _budgetFocusNode.hasFocus || _isBudgetEntered
-                            ? InkWell(
-                                onTap: _goToAvailableOptions,
-                                child: Container(
-                                    decoration: BoxDecoration(
-                                        color: themeColor,
-                                        shape: BoxShape.circle),
-                                    padding: const EdgeInsets.all(6),
-                                    child: const Icon(
-                                        BoxIcons.bxs_chevron_right,
-                                        color: Colors.white,
-                                        size: 22)))
-                            : Icon(BoxIcons.bxs_chevron_right,
-                                color: themeColor, size: 22),
-                      ]),
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                        width: horizontalBarWidth,
-                        height: 50,
-                        child: SingleChildScrollView(
-                            scrollDirection: Axis.horizontal,
-                            child: Row(
-                                children: _colorfulTabs
-                                    .map((tab) => _buildRectangularTab(tab))
-                                    .toList()))),
-                    const SizedBox(height: 16),
-                    Align(
-                        alignment: Alignment.centerLeft,
-                        child: _buildGistSlideshow()),
-                  ]),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                          width: horizontalBarWidth,
+                          height: 50,
+                          child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                  children: _colorfulTabs
+                                      .map((tab) => _buildRectangularTab(tab))
+                                      .toList()))),
+                      const SizedBox(height: 16),
+                      Align(
+                          alignment: Alignment.centerLeft,
+                          child: _buildGistSlideshow()),
+                    ]),
+              ),
             ),
             FavoritesScreen(userPreferences: _prefs),
             SubscriptionScreen(userPreferences: _prefs, themeColor: themeColor),
@@ -776,7 +883,9 @@ class _HomeScreenState extends State<HomeScreen> {
       leading: Builder(
           builder: (appBarContext) => IconButton(
               icon: const Icon(Icons.notifications, size: 36),
-              onPressed: () {})),
+              onPressed: () {
+                _showNotifications();
+              })),
       title: Image.asset('assets/images/allowance_logo.png',
           height: 200, width: 200, fit: BoxFit.contain),
       actions: [
@@ -842,6 +951,92 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           );
         }),
+      ),
+    );
+  }
+
+  // NEW: method to fetch notifications for current user
+  Future<List<Map<String, dynamic>>> _fetchNotifications() async {
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) return [];
+      final resp = await supabase
+          .from('notifications')
+          .select()
+          .eq('user_id', user.id)
+          .order('sent_at', ascending: false)
+          .limit(50);
+      return resp as List<Map<String, dynamic>>;
+    } catch (e) {
+      developer.log('Error fetching notifications: $e', name: 'notifications');
+      return [];
+    }
+  }
+
+  // NEW: show slide-up notifications bottom sheet
+  void _showNotifications() async {
+    final notifications = await _fetchNotifications();
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (sheetContext) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.4,
+        builder: (_, scrollController) => Container(
+          decoration: BoxDecoration(
+            color: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Column(
+            children: [
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                child: Text(
+                  'Notifications',
+                  style: TextStyle(
+                    fontFamily: 'Montserrat',
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: themeColor,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: notifications.isEmpty
+                    ? const Center(child: Text('No notifications yet.'))
+                    : ListView.builder(
+                        controller: scrollController,
+                        itemCount: notifications.length,
+                        itemBuilder: (ctx, i) {
+                          final notif = notifications[i];
+                          final title = notif['title'] ?? 'New Gist';
+                          final body = notif['body'] ?? '';
+                          final gistId = notif['gist_id']?.toString();
+                          return ListTile(
+                            title: Text(title),
+                            subtitle: Text(body),
+                            onTap: gistId != null
+                                ? () {
+                                    // deep-link to gist (replace with your gist view route)
+                                    Navigator.pushNamed(context, '/gist',
+                                        arguments: {'id': gistId});
+                                  }
+                                : null,
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

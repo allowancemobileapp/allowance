@@ -25,6 +25,7 @@ dependencies:
   # Firebase
   firebase_core: ^3.12.1
   firebase_auth: ^5.1.2
+  firebase_messaging: ^15.2.5
   google_sign_in: ^6.2.1
   image_picker: ^1.1.2
 
@@ -33,6 +34,7 @@ dependencies:
 
   # Apple Sign-In (updated to fix Registrar error)
   sign_in_with_apple: ^7.0.1
+  intl: ^0.20.2
 
 dev_dependencies:
   flutter_test:

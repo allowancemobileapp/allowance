@@ -1,10 +1,14 @@
 // lib/screens/home/ticket_screen.dart
-
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:intl/intl.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
 
-/// Model matching your 'tickets' table columns
 class Ticket {
   final int id;
   final String name;
@@ -14,7 +18,9 @@ class Ticket {
   final String organizers;
   final String location;
   final int ticketsRemaining;
-
+  final double price;
+  final bool paid;
+  final String status;
   Ticket({
     required this.id,
     required this.name,
@@ -24,25 +30,31 @@ class Ticket {
     required this.organizers,
     required this.location,
     required this.ticketsRemaining,
+    required this.price,
+    required this.paid,
+    required this.status,
   });
-
   factory Ticket.fromMap(Map<String, dynamic> m) {
     return Ticket(
       id: m['id'] as int,
-      name: m['name'] as String,
+      name: m['name'] ?? 'Untitled Event',
       photoUrl: m['photo_url'] as String?,
-      date: DateTime.parse(m['date'] as String),
-      time: m['time'] as String,
-      organizers: m['organizers'] as String,
-      location: m['location'] as String,
-      ticketsRemaining: m['tickets_remaining'] as int,
+      date: DateTime.parse(m['date'].toString()),
+      time: m['time'] ?? '00:00',
+      organizers: m['organizers'] ?? 'Unknown',
+      location: m['location'] ?? 'Unknown',
+      ticketsRemaining: m['tickets_remaining'] ?? 0,
+      price: (m['price'] != null)
+          ? double.tryParse(m['price'].toString()) ?? 0.0
+          : 0.0,
+      paid: m['paid'] ?? false,
+      status: m['status'] ?? 'active',
     );
   }
 }
 
 class TicketScreen extends StatefulWidget {
   const TicketScreen({super.key});
-
   @override
   State<TicketScreen> createState() => _TicketScreenState();
 }
@@ -50,11 +62,9 @@ class TicketScreen extends StatefulWidget {
 class _TicketScreenState extends State<TicketScreen> {
   final SupabaseClient _supabase = Supabase.instance.client;
   final Color themeColor = const Color(0xFF4CAF50);
-
   List<Ticket> _tickets = [];
   bool _loading = true;
   String? _error;
-
   @override
   void initState() {
     super.initState();
@@ -66,19 +76,18 @@ class _TicketScreenState extends State<TicketScreen> {
       final response = await _supabase
           .from('tickets')
           .select(
-            'id, name, photo_url, date, time, organizers, location, tickets_remaining',
-          )
+              'id, name, photo_url, date, time, organizers, location, tickets_remaining, price, paid, status')
+          .eq('status', 'active')
           .order('date', ascending: true);
-
       final rows = response as List;
       setState(() {
-        _tickets =
-            rows.map((r) => Ticket.fromMap(r as Map<String, dynamic>)).toList();
+        _tickets = rows.map((r) => Ticket.fromMap(r)).toList();
         _loading = false;
       });
     } catch (e) {
       setState(() {
-        _error = 'Failed to load tickets: $e';
+        _error =
+            'Sorry, we couldn\'t load the tickets right now. Please try again later.';
         _loading = false;
       });
     }
@@ -103,63 +112,266 @@ class _TicketScreenState extends State<TicketScreen> {
               ? Center(
                   child:
                       Text(_error!, style: const TextStyle(color: Colors.red)))
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: _tickets.length,
-                  itemBuilder: (ctx, idx) {
-                    final t = _tickets[idx];
-                    return Column(
-                      children: [
-                        _TicketCard(event: t, themeColor: themeColor),
-                        const SizedBox(height: 24),
-                      ],
-                    );
-                  },
+              : RefreshIndicator(
+                  color: themeColor,
+                  onRefresh: _loadTickets,
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _tickets.length,
+                    itemBuilder: (ctx, idx) {
+                      final t = _tickets[idx];
+                      return Column(
+                        children: [
+                          _TicketCard(
+                              event: t,
+                              themeColor: themeColor,
+                              onPurchaseSuccess: _loadTickets),
+                          const SizedBox(height: 24),
+                        ],
+                      );
+                    },
+                  ),
                 ),
     );
   }
 }
 
-class _TicketCard extends StatelessWidget {
+class _TicketCard extends StatefulWidget {
   final Ticket event;
   final Color themeColor;
-
+  final VoidCallback onPurchaseSuccess;
   const _TicketCard({
     required this.event,
     required this.themeColor,
+    required this.onPurchaseSuccess,
   });
+  @override
+  State<_TicketCard> createState() => _TicketCardState();
+}
+
+class _TicketCardState extends State<_TicketCard> {
+  late Timer _timer;
+  Duration _remaining = Duration.zero;
+  bool _isProcessing = false;
+  @override
+  void initState() {
+    super.initState();
+    _calculateRemaining();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _calculateRemaining();
+    });
+  }
+
+  void _calculateRemaining() {
+    final dt = widget.event.date;
+    final timeParts = widget.event.time.split(':');
+    DateTime eventDateTime = DateTime(
+      dt.year,
+      dt.month,
+      dt.day,
+      int.tryParse(timeParts[0]) ?? 0,
+      int.tryParse(timeParts[1]) ?? 0,
+    );
+    final diff = eventDateTime.difference(DateTime.now());
+    if (mounted) setState(() => _remaining = diff);
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
 
   String get formattedDate {
-    // e.g. Fri, 24 Feb 2023
-    final w = [
-      'Mon',
-      'Tue',
-      'Wed',
-      'Thu',
-      'Fri',
-      'Sat',
-      'Sun'
-    ][event.date.weekday - 1];
-    final m = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec'
-    ][event.date.month - 1];
-    return '$w, ${event.date.day} $m ${event.date.year}';
+    final df = DateFormat('EEE, dd MMM yyyy');
+    return df.format(widget.event.date);
+  }
+
+  String get countdownText {
+    if (_remaining.isNegative) return 'Event Ended';
+    final days = _remaining.inDays;
+    final hours = _remaining.inHours % 24;
+    final minutes = _remaining.inMinutes % 60;
+    if (days > 0) {
+      return '$days day${days > 1 ? 's' : ''} left';
+    } else if (hours > 0) {
+      return '$hours hr${hours > 1 ? 's' : ''} left';
+    } else {
+      return '$minutes min left';
+    }
+  }
+
+  Future<void> _buyTicket() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please log in to buy tickets.')),
+      );
+      return;
+    }
+    if (widget.event.ticketsRemaining <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('This event is sold out.')),
+      );
+      return;
+    }
+    final priceNaira = widget.event.price.toInt();
+    if (priceNaira <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'Sorry, there\'s an issue with the ticket price. Please try again later.')),
+      );
+      return;
+    }
+    setState(() => _isProcessing = true);
+    final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
+    if (paystackSecretKey == null || paystackSecretKey.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'Sorry, the payment system is unavailable right now. Please try again later.')),
+      );
+      setState(() => _isProcessing = false);
+      return;
+    }
+    try {
+      final reference =
+          'ticket_${widget.event.id}_${DateTime.now().millisecondsSinceEpoch}';
+      final payload = {
+        'amount': priceNaira * 100, // amount in kobo
+        'email': user.email ?? '',
+        'reference': reference,
+        'metadata': {'ticket_id': widget.event.id, 'user_id': user.id}
+      };
+      final httpResp = await http.post(
+        Uri.parse('https://api.paystack.co/transaction/initialize'),
+        headers: {
+          'Authorization': 'Bearer $paystackSecretKey',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode(payload),
+      );
+      if (httpResp.statusCode != 200) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Sorry, we couldn\'t start the payment process. Please try again.')),
+        );
+        setState(() => _isProcessing = false);
+        return;
+      }
+      final body = jsonDecode(httpResp.body) as Map<String, dynamic>;
+      final authUrl = body['data']?['authorization_url'];
+      if (authUrl == null)
+        throw 'Sorry, payment setup failed. Please try again.';
+      final uri = Uri.parse(authUrl);
+      bool launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched) {
+        launched = await launchUrl(uri, mode: LaunchMode.platformDefault);
+      }
+      if (!launched)
+        throw 'Unable to open the payment page. Please check your browser settings.';
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Payment page opened — verify after payment')),
+      );
+      await _promptVerify(reference, widget.event.id, priceNaira);
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Payment error: $e')),
+      );
+    } finally {
+      setState(() => _isProcessing = false);
+    }
+  }
+
+  Future<void> _promptVerify(String reference, int ticketId, int amount) async {
+    final shouldVerify = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('Complete Payment',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'After completing payment in your browser, tap Verify to confirm your ticket purchase.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Verify')),
+        ],
+      ),
+    );
+    if (shouldVerify == true) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+      final ok = await _verifyPayment(reference, ticketId, amount);
+      if (mounted) Navigator.pop(context);
+      if (ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Payment verified — ticket purchased!')),
+        );
+        widget.onPurchaseSuccess();
+      }
+    }
+  }
+
+  Future<bool> _verifyPayment(
+      String reference, int ticketId, int amount) async {
+    final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser!;
+    try {
+      final verifyUrl =
+          Uri.parse('https://api.paystack.co/transaction/verify/$reference');
+      final resp = await http.get(
+        verifyUrl,
+        headers: {
+          'Authorization': 'Bearer $paystackSecretKey',
+          'Content-Type': 'application/json',
+        },
+      );
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode != 200 || data['data']?['status'] != 'success') {
+        return false;
+      }
+      await supabase.from('ticket_purchases').insert({
+        'user_id': user.id,
+        'ticket_id': ticketId,
+        'payment_reference': reference,
+        'amount_paid': amount * 100,
+      });
+      await supabase
+          .from('tickets')
+          .update({'tickets_remaining': widget.event.ticketsRemaining - 1}).eq(
+              'id', ticketId);
+      return true;
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content: Text(
+                'Sorry, we couldn\'t verify your payment. Please try again.')),
+      );
+      return false;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final isSoldOut = widget.event.ticketsRemaining <= 0;
+    final isEnded = _remaining.isNegative;
     return Card(
+      color: Colors.grey[850],
       elevation: 6,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       clipBehavior: Clip.hardEdge,
@@ -167,9 +379,9 @@ class _TicketCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Stack(children: [
-            event.photoUrl != null
+            widget.event.photoUrl != null
                 ? CachedNetworkImage(
-                    imageUrl: event.photoUrl!,
+                    imageUrl: widget.event.photoUrl!,
                     height: 200,
                     width: double.infinity,
                     fit: BoxFit.cover,
@@ -205,7 +417,7 @@ class _TicketCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(event.name,
+                  Text(widget.event.name,
                       style: const TextStyle(
                           color: Colors.white,
                           fontSize: 24,
@@ -222,7 +434,7 @@ class _TicketCard extends StatelessWidget {
                     const Icon(Icons.access_time,
                         size: 16, color: Colors.white70),
                     const SizedBox(width: 6),
-                    Text(event.time,
+                    Text(widget.event.time,
                         style: const TextStyle(
                             color: Colors.white70, fontSize: 14)),
                   ]),
@@ -230,56 +442,70 @@ class _TicketCard extends StatelessWidget {
               ),
             ),
           ]),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Column(children: [
-              _InfoRow(
-                  icon: Icons.person,
-                  label: 'Organizers',
-                  value: event.organizers),
-              const SizedBox(height: 8),
-              _InfoRow(
-                  icon: Icons.location_on,
-                  label: 'Location',
-                  value: event.location),
-              const SizedBox(height: 8),
-              _InfoRow(
-                  icon: Icons.confirmation_number,
-                  label: 'Tickets remaining',
-                  value: '${event.ticketsRemaining}'),
-            ]),
+            child: Column(
+              children: [
+                _InfoRow(
+                    icon: Icons.person,
+                    label: 'Organizers',
+                    value: widget.event.organizers),
+                const SizedBox(height: 8),
+                _InfoRow(
+                    icon: Icons.location_on,
+                    label: 'Location',
+                    value: widget.event.location),
+                const SizedBox(height: 8),
+                _InfoRow(
+                    icon: Icons.confirmation_number,
+                    label: 'Tickets remaining',
+                    value: '${widget.event.ticketsRemaining}'),
+                const SizedBox(height: 8),
+                _InfoRow(
+                    icon: Icons.timer,
+                    label: 'Time to event',
+                    value: countdownText),
+              ],
+            ),
           ),
-          const SizedBox(height: 24),
-          LayoutBuilder(builder: (ctx, box) {
-            final count = (box.maxWidth / 12).floor();
-            return Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: List.generate(count, (_) {
-                return SizedBox(
-                    width: 6,
-                    height: 2,
-                    child: DecoratedBox(
-                        decoration: BoxDecoration(color: Colors.grey[400])));
-              }),
-            );
-          }),
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
+          Divider(
+              color: Colors.grey[700],
+              thickness: 0.5,
+              indent: 24,
+              endIndent: 24),
+          const SizedBox(height: 12),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
             child: SizedBox(
               width: double.infinity,
               height: 48,
-              child: ElevatedButton.icon(
-                onPressed: () {/* TODO: Buy logic */},
-                icon: const Icon(Icons.shopping_cart, size: 20),
-                label: const Text('Buy Ticket',
-                    style:
-                        TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              child: ElevatedButton(
+                onPressed:
+                    (isEnded || isSoldOut || _isProcessing) ? null : _buyTicket,
                 style: ElevatedButton.styleFrom(
-                    backgroundColor: themeColor,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12))),
+                  backgroundColor: isSoldOut || isEnded
+                      ? Colors.grey[600]
+                      : widget.themeColor,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: _isProcessing
+                    ? const CircularProgressIndicator(color: Colors.white)
+                    : Text(
+                        isEnded
+                            ? 'Event Ended'
+                            : isSoldOut
+                                ? 'SOLD OUT'
+                                : 'Buy for ₦${widget.event.price.toStringAsFixed(0)}',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white,
+                        ),
+                      ),
               ),
             ),
           ),
@@ -299,30 +525,33 @@ class _InfoRow extends StatelessWidget {
     required this.label,
     required this.value,
   });
-
   @override
   Widget build(BuildContext context) {
     return Row(children: [
-      Icon(icon, color: Colors.grey[700], size: 20),
+      Icon(icon, color: Colors.white70, size: 20),
       const SizedBox(width: 8),
       Expanded(
-          child: RichText(
-        text: TextSpan(
-          text: '$label: ',
-          style: TextStyle(
-              color: Colors.grey[500],
+        child: RichText(
+          text: TextSpan(
+            text: '$label: ',
+            style: const TextStyle(
+              color: Colors.white70,
               fontWeight: FontWeight.w600,
-              fontSize: 12),
-          children: [
-            TextSpan(
+              fontSize: 12,
+            ),
+            children: [
+              TextSpan(
                 text: value,
                 style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13))
-          ],
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ],
+          ),
         ),
-      )),
+      ),
     ]);
   }
 }

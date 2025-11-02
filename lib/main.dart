@@ -4,9 +4,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+// NEW imports
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+
 import 'models/user_preferences.dart';
 import 'screens/introduction/introduction_screen.dart';
 import 'screens/home/home_screen.dart';
+
+// import the FCM service you just added
+import 'shared/services/fcm_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,10 +29,17 @@ Future<void> main() async {
         'SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env (project root).');
   }
 
+  // Initialize Firebase (required for FCM)
+  await Firebase.initializeApp();
+
+  // Initialize Supabase
   await Supabase.initialize(
     url: supabaseUrl,
     anonKey: supabaseAnonKey,
   );
+
+  // Register background handler (redundant if done in fcm_service but safe)
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
   runApp(const AllowanceApp());
 }
@@ -54,8 +68,20 @@ class _AllowanceAppState extends State<AllowanceApp> {
     await _userPreferences.loadPreferences();
     setState(() => _isLoading = false);
 
+    // If user already signed in at app start, register FCM now
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user != null) {
+      // call after first frame so context is ready
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        // register listeners that need BuildContext
+        registerFcmListeners(
+            navigatorKey.currentContext ?? navigatorKeyRootContext!);
+      });
+      // token save does not require context
+      await initFcmAndSaveToken();
+    }
+
     // Listen to Supabase auth changes (login / logout).
-    // We await loadPreferences() when signing in to avoid UI showing stale local values.
     _authSub = Supabase.instance.client.auth.onAuthStateChange
         .listen((authState) async {
       final session = authState.session;
@@ -66,6 +92,18 @@ class _AllowanceAppState extends State<AllowanceApp> {
         } catch (_) {
           // ignore - keep whatever local values exist if load fails
         }
+
+        // Save token & register listeners after sign-in
+        try {
+          await initFcmAndSaveToken();
+        } catch (_) {}
+        // register listeners (we need a BuildContext, so do it on next frame)
+        if (mounted) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            registerFcmListeners(context);
+          });
+        }
+
         if (mounted) setState(() {});
       } else {
         // Signed out: clear local cache and rebuild UI so the app shows intro/login
@@ -79,6 +117,13 @@ class _AllowanceAppState extends State<AllowanceApp> {
     });
   }
 
+  // NOTE: we use a navigator key to have a context if you need to register listeners
+  // before a specific screen is built. If you already manage navigation differently,
+  // you can remove this and simply call registerFcmListeners(context) from your HomeScreen.
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
+  static BuildContext? navigatorKeyRootContext;
+
   @override
   void dispose() {
     _authSub?.cancel();
@@ -87,6 +132,9 @@ class _AllowanceAppState extends State<AllowanceApp> {
 
   @override
   Widget build(BuildContext context) {
+    // capture root context for FCM listener registration if needed
+    navigatorKeyRootContext ??= navigatorKey.currentContext;
+
     if (_isLoading) {
       return const MaterialApp(
         home: Scaffold(body: Center(child: CircularProgressIndicator())),
@@ -96,6 +144,7 @@ class _AllowanceAppState extends State<AllowanceApp> {
     final user = Supabase.instance.client.auth.currentUser;
 
     return MaterialApp(
+      navigatorKey: navigatorKey,
       title: 'Allowance',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.indigo),

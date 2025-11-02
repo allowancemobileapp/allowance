@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:allowance/models/user_preferences.dart'; // Adjust import based on your project structure
+import 'package:allowance/models/user_preferences.dart';
 import 'gist_submission_screen.dart';
-import 'ticket_submission_screen.dart'; // Import added for ticket submission
+import 'ticket_submission_screen.dart';
 
 class SubscriptionScreen extends StatefulWidget {
   final UserPreferences userPreferences;
-  final Color themeColor; // Grass green color for "N"
+  final Color themeColor;
 
   const SubscriptionScreen({
     super.key,
@@ -21,7 +21,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   String _currentTier = "Membership";
   late PageController _pageController;
 
-  // Subscription plans data with adjusted image heights
   final List<Map<String, dynamic>> plans = [
     {
       "tier": "Membership",
@@ -30,9 +29,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         "Remove ads",
         "Diet mode (coming soon)",
       ],
-      "cta": "N700/Month",
-      "imageHeight": 110.0, // Increased to match Gist Us
-      "buttonColor": Colors.orange, // Match Favorites tab
+      "cta": "Coming Soon", // 🟢 changed from “N700/Month”
+      "imageHeight": 110.0,
+      "buttonColor": Colors.orange,
     },
     {
       "tier": "Tickets",
@@ -44,7 +43,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       ],
       "cta": "Sell Tickets",
       "imageHeight": 80.0,
-      "buttonColor": Colors.purple, // Match Tickets tab
+      "buttonColor": Colors.purple,
     },
     {
       "tier": "Gist Us",
@@ -55,22 +54,18 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       ],
       "cta": "Advertise",
       "imageHeight": 70.0,
-      "buttonColor": Colors.teal, // Match Delivery tab
+      "buttonColor": Colors.teal,
     },
   ];
 
   @override
   void initState() {
     super.initState();
-
-    // If the saved subscriptionTier exists and matches one of the plan tiers,
-    // use it. Otherwise keep the default value already in _currentTier.
     final savedTier = widget.userPreferences.subscriptionTier;
     if (savedTier != null &&
         plans.map((p) => p['tier'].toString()).contains(savedTier)) {
       _currentTier = savedTier;
     }
-
     _pageController = PageController(viewportFraction: 0.77);
   }
 
@@ -81,13 +76,23 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   }
 
   void _switchTier(String tier) {
-    setState(() {
-      _currentTier = tier;
-      widget.userPreferences.subscriptionTier = tier;
-      widget.userPreferences.savePreferences();
-    });
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text("Switched to $tier")));
+    try {
+      setState(() {
+        _currentTier = tier;
+        widget.userPreferences.subscriptionTier = tier;
+        widget.userPreferences.savePreferences();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Switched to $tier plan successfully!")),
+      );
+    } catch (_) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Oops! Something went wrong. Please try again."),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
   }
 
   Widget _buildSubscriptionCard(
@@ -102,7 +107,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     String currentLabel;
     switch (tier) {
       case 'Membership':
-        currentLabel = 'N700/Month';
+        currentLabel = 'Coming Soon'; // 🟢 changed
         break;
       case 'Tickets':
         currentLabel = 'Sell Tickets';
@@ -130,10 +135,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Title section
                 Text(
                   tier,
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontFamily: 'SanFrancisco',
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
@@ -141,8 +145,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-
-                // Features section
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: features.map((feature) {
@@ -168,9 +170,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                     );
                   }).toList(),
                 ),
-
                 const Spacer(),
-                // CTA section
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
@@ -241,9 +241,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         scrolledUnderElevation: 0,
         title: Center(
           child: Image.asset(
-            'assets/images/subscriptions.png', // Restored header image
+            'assets/images/subscriptions.png',
             fit: BoxFit.contain,
-            height: 190, // Adjusted size
+            height: 190,
           ),
         ),
       ),
