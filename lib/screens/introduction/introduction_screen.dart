@@ -22,6 +22,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailCtl = TextEditingController();
   final _pwCtl = TextEditingController();
+  final _usernameCtl = TextEditingController();
   bool _loading = false;
   bool _isSignUp = false;
 
@@ -43,11 +44,32 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         if (signUpRes.user == null) {
           throw AuthException('Sign up failed');
         }
+
         // 2) Immediately sign in after sign up
         authRes = await supabase.auth.signInWithPassword(
           email: _emailCtl.text.trim(),
           password: _pwCtl.text,
         );
+
+        if (authRes.user == null) {
+          throw AuthException('Authentication failed after sign up');
+        }
+
+        // 3) Create a profile row with the username (if provided)
+        //    Wrap in try/catch so profile creation failure doesn't block navigation.
+        final usernameVal = _usernameCtl.text.trim();
+        try {
+          await supabase.from('profiles').insert({
+            'id': authRes.user!.id,
+            'email': _emailCtl.text.trim(),
+            'username': usernameVal.isNotEmpty ? usernameVal : null,
+            'created_at': DateTime.now().toUtc().toIso8601String(),
+            'updated_at': DateTime.now().toUtc().toIso8601String(),
+          });
+        } catch (e) {
+          // Non-fatal: log and continue (profile can be created later)
+          debugPrint('Profile creation after signup failed: $e');
+        }
       } else {
         // Log in existing user
         authRes = await supabase.auth.signInWithPassword(
@@ -58,6 +80,14 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
 
       if (authRes.user == null) {
         throw AuthException('Authentication failed');
+      }
+
+      // Ensure local preferences reflect the (possibly new) server profile
+      try {
+        await widget.userPreferences.loadPreferences();
+      } catch (e) {
+        // non-fatal; proceed to app but log for debugging
+        debugPrint('loadPreferences after auth failed: $e');
       }
 
       // Success: invoke callback and navigate
@@ -81,6 +111,14 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  @override
+  void dispose() {
+    _emailCtl.dispose();
+    _pwCtl.dispose();
+    _usernameCtl.dispose();
+    super.dispose();
   }
 
   @override
@@ -138,6 +176,31 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                   validator: (v) =>
                       (v == null || v.length < 6) ? 'Min 6 characters' : null,
                 ),
+
+                // Username field shown only on Sign Up
+                if (_isSignUp) ...[
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _usernameCtl,
+                    decoration: const InputDecoration(
+                      labelText: 'Username',
+                      border: OutlineInputBorder(),
+                      filled: true,
+                      fillColor: Colors.white12,
+                    ),
+                    style: const TextStyle(color: Colors.white),
+                    validator: (v) {
+                      if (!_isSignUp) return null;
+                      final s = (v ?? '').trim();
+                      if (s.isEmpty) return 'Choose a username';
+                      if (s.length < 3) return 'At least 3 characters';
+                      // basic sanity: no spaces
+                      if (s.contains(' ')) return 'No spaces allowed';
+                      return null;
+                    },
+                  ),
+                ],
+
                 const SizedBox(height: 24),
                 _loading
                     ? const CircularProgressIndicator()
@@ -150,7 +213,9 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                       ),
                 const SizedBox(height: 16),
                 TextButton(
-                  onPressed: () => setState(() => _isSignUp = !_isSignUp),
+                  onPressed: () => setState(() {
+                    _isSignUp = !_isSignUp;
+                  }),
                   child: Text(
                     _isSignUp
                         ? 'Already have an account? Log In'

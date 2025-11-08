@@ -1,5 +1,7 @@
 // lib/models/user_preferences.dart
 import 'dart:convert';
+// ignore: unused_import
+import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -29,13 +31,13 @@ class UserPreferences {
   Future<void> loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
 
+    // Your existing full local load (keep this unchanged)
     id = prefs.getString('prefs_id');
     fullName = prefs.getString('prefs_fullName');
     username = prefs.getString('prefs_username');
     avatarUrl = prefs.getString('prefs_avatarUrl');
     schoolId = prefs.getString('prefs_schoolId');
     schoolName = prefs.getString('prefs_schoolName');
-
     budget = prefs.containsKey('prefs_budget')
         ? prefs.getDouble('prefs_budget')
         : null;
@@ -48,7 +50,6 @@ class UserPreferences {
         preferences = {};
       }
     }
-
     // extra fields
     subscriptionTier = prefs.getString('prefs_subscriptionTier');
     phoneNumber = prefs.getString('prefs_phoneNumber');
@@ -67,6 +68,9 @@ class UserPreferences {
     if (user != null) {
       await _loadOrCreateProfile(user.id);
     }
+
+    // Add this call to persist any merged changes locally
+    await savePreferences();
   }
 
   /// Save to SharedPreferences and also to Supabase profiles (if signed in).

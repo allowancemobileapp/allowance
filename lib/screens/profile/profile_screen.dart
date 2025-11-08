@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/screens/introduction/introduction_screen.dart';
-import 'package:allowance/screens/home/home_screen.dart';
 import 'edit_profile_screen.dart';
 
 const Color _bg = Color(0xFF121212);
@@ -73,154 +72,245 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  // lib/screens/profile/profile_screen.dart
   @override
   Widget build(BuildContext context) {
-    final up = widget.userPreferences;
-    final avatarUrl = up.avatarUrl;
-    final imageProvider = (avatarUrl != null && avatarUrl.isNotEmpty)
-        ? NetworkImage(avatarUrl)
-        : null;
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
 
-    return Scaffold(
-      backgroundColor: _bg,
-      appBar: AppBar(
-        backgroundColor: _bg,
-        elevation: 0,
-        centerTitle: true,
-        title: Image.asset(
-          'assets/images/profile.png',
-          height: 120, // adjust if you want it larger/smaller
-          fit: BoxFit.contain,
-        ),
-        automaticallyImplyLeading: false,
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Column(
-            children: [
-              SizedBox(
-                width: 110,
-                height: 110,
-                child: CircleAvatar(
-                  radius: 55,
-                  backgroundColor: Colors.grey[850],
-                  backgroundImage: imageProvider,
-                  child: imageProvider == null
-                      ? Text(
-                          (up.fullName ?? '?').isNotEmpty
-                              ? up.fullName![0].toUpperCase()
-                              : '?',
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 34),
-                        )
-                      : null,
+    return FutureBuilder<Map<String, dynamic>?>(
+      future: _fetchProfile(),
+      builder: (context, snapshot) {
+        // Loading state
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        // Surface errors instead of failing silently
+        if (snapshot.hasError) {
+          final err = snapshot.error;
+          debugPrint('Profile load error: $err');
+          return Scaffold(
+            body: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Text(
+                  'Error loading profile.\n${err.toString()}',
+                  textAlign: TextAlign.center,
                 ),
               ),
+            ),
+          );
+        }
+
+        final profile = snapshot.data;
+
+        // If no profile row exists, let user create one
+        if (profile == null) {
+          return Scaffold(
+            body: Center(
+              child: ElevatedButton(
+                onPressed: () async {
+                  try {
+                    await supabase.from('profiles').insert({
+                      'id': user?.id,
+                      'created_at': DateTime.now().toIso8601String(),
+                      'updated_at': DateTime.now().toIso8601String(),
+                    });
+                    // NEW: refresh local preferences so UI shows the new profile
+                    await widget.userPreferences.loadPreferences();
+                    // re-run FutureBuilder + rebuild with updated prefs
+                    setState(() {});
+                  } catch (e) {
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Create profile failed: $e')),
+                      );
+                    }
+                  }
+                },
+                child: const Text('Set up your profile'),
+              ),
+            ),
+          );
+        }
+
+        // Normal UI when profile exists — use widget.userPreferences for display values
+        final up = widget.userPreferences;
+        final avatarUrl = up.avatarUrl;
+        final imageProvider = (avatarUrl != null && avatarUrl.isNotEmpty)
+            ? NetworkImage(avatarUrl)
+            : null;
+
+        return Scaffold(
+          backgroundColor: _bg,
+          appBar: AppBar(
+            backgroundColor: _bg,
+            elevation: 0,
+            centerTitle: true,
+            title: Image.asset(
+              'assets/images/profile.png',
+              height: 120,
+              fit: BoxFit.contain,
+            ),
+            automaticallyImplyLeading: false,
+          ),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              Column(
+                children: [
+                  SizedBox(
+                    width: 110,
+                    height: 110,
+                    child: CircleAvatar(
+                      radius: 55,
+                      backgroundColor: Colors.grey[850],
+                      backgroundImage: imageProvider,
+                      child: imageProvider == null
+                          ? Text(
+                              (up.fullName ?? '?').isNotEmpty
+                                  ? up.fullName![0].toUpperCase()
+                                  : '?',
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 34),
+                            )
+                          : null,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    up.fullName ?? 'No name',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 6),
+                  Text('@${up.username ?? 'nouser'}',
+                      style: const TextStyle(color: Colors.white70)),
+                ],
+              ),
+              const SizedBox(height: 28),
+
+              // Info card
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                    color: _card, borderRadius: BorderRadius.circular(12)),
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: const Icon(Icons.phone, color: Colors.white70),
+                      title: const Text('Phone',
+                          style: TextStyle(color: Colors.white70)),
+                      subtitle: Text(up.phoneNumber ?? 'Not set',
+                          style: const TextStyle(color: Colors.white)),
+                    ),
+                    const Divider(color: Colors.grey),
+                    ListTile(
+                      leading: const Icon(Icons.fitness_center,
+                          color: Colors.white70),
+                      title: const Text('Weight',
+                          style: TextStyle(color: Colors.white70)),
+                      subtitle: Text(up.weight?.toString() ?? 'Not set',
+                          style: const TextStyle(color: Colors.white)),
+                    ),
+                    const Divider(color: Colors.grey),
+                    ListTile(
+                      leading: const Icon(Icons.height, color: Colors.white70),
+                      title: const Text('Height',
+                          style: TextStyle(color: Colors.white70)),
+                      subtitle: Text(up.height?.toString() ?? 'Not set',
+                          style: const TextStyle(color: Colors.white)),
+                    ),
+                    const Divider(color: Colors.grey),
+                    ListTile(
+                      leading: const Icon(Icons.cake, color: Colors.white70),
+                      title: const Text('Age',
+                          style: TextStyle(color: Colors.white70)),
+                      subtitle: Text(up.age?.toString() ?? 'Not set',
+                          style: const TextStyle(color: Colors.white)),
+                    ),
+                    const Divider(color: Colors.grey),
+                    ListTile(
+                      leading:
+                          const Icon(Icons.bloodtype, color: Colors.white70),
+                      title: const Text('Blood group',
+                          style: TextStyle(color: Colors.white70)),
+                      subtitle: Text(up.bloodGroup ?? 'Not set',
+                          style: const TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 24),
+
+              ElevatedButton.icon(
+                icon: const Icon(Icons.edit_outlined),
+                label: const Text('Edit profile'),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: _accent,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 14)),
+                onPressed: () async {
+                  final changed = await Navigator.of(context).push<bool>(
+                    MaterialPageRoute(
+                        builder: (_) => EditProfileScreen(
+                            userPreferences: widget.userPreferences)),
+                  );
+                  if (changed == true) {
+                    setState(() {}); // reload display from updated preferences
+                    widget.onSave();
+                  }
+                },
+              ),
+
               const SizedBox(height: 12),
-              Text(up.fullName ?? 'No name',
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 6),
-              Text('@${up.username ?? 'nouser'}',
-                  style: const TextStyle(color: Colors.white70)),
+
+              OutlinedButton.icon(
+                icon: _signingOut
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.logout),
+                label: const Text('Log out'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Colors.redAccent),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: _signingOut ? null : _confirmLogout,
+              ),
             ],
           ),
-          const SizedBox(height: 28),
-
-          // Info card
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-                color: _card, borderRadius: BorderRadius.circular(12)),
-            child: Column(
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.phone, color: Colors.white70),
-                  title: const Text('Phone',
-                      style: TextStyle(color: Colors.white70)),
-                  subtitle: Text(up.phoneNumber ?? 'Not set',
-                      style: const TextStyle(color: Colors.white)),
-                ),
-                const Divider(color: Colors.grey),
-                ListTile(
-                  leading:
-                      const Icon(Icons.fitness_center, color: Colors.white70),
-                  title: const Text('Weight',
-                      style: TextStyle(color: Colors.white70)),
-                  subtitle: Text(up.weight?.toString() ?? 'Not set',
-                      style: const TextStyle(color: Colors.white)),
-                ),
-                const Divider(color: Colors.grey),
-                ListTile(
-                  leading: const Icon(Icons.height, color: Colors.white70),
-                  title: const Text('Height',
-                      style: TextStyle(color: Colors.white70)),
-                  subtitle: Text(up.height?.toString() ?? 'Not set',
-                      style: const TextStyle(color: Colors.white)),
-                ),
-                const Divider(color: Colors.grey),
-                ListTile(
-                  leading: const Icon(Icons.cake, color: Colors.white70),
-                  title: const Text('Age',
-                      style: TextStyle(color: Colors.white70)),
-                  subtitle: Text(up.age?.toString() ?? 'Not set',
-                      style: const TextStyle(color: Colors.white)),
-                ),
-                const Divider(color: Colors.grey),
-                ListTile(
-                  leading: const Icon(Icons.bloodtype, color: Colors.white70),
-                  title: const Text('Blood group',
-                      style: TextStyle(color: Colors.white70)),
-                  subtitle: Text(up.bloodGroup ?? 'Not set',
-                      style: const TextStyle(color: Colors.white)),
-                ),
-              ],
-            ),
-          ),
-
-          const SizedBox(height: 24),
-
-          ElevatedButton.icon(
-            icon: const Icon(Icons.edit_outlined),
-            label: const Text('Edit profile'),
-            style: ElevatedButton.styleFrom(
-                backgroundColor: _accent,
-                foregroundColor: Colors.black,
-                padding: const EdgeInsets.symmetric(vertical: 14)),
-            onPressed: () async {
-              final changed = await Navigator.of(context).push<bool>(
-                  MaterialPageRoute(
-                      builder: (_) => EditProfileScreen(
-                          userPreferences: widget.userPreferences)));
-              if (changed == true) {
-                setState(() {}); // reload display from updated preferences
-                widget.onSave();
-              }
-            },
-          ),
-
-          const SizedBox(height: 12),
-
-          OutlinedButton.icon(
-            icon: _signingOut
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.logout),
-            label: const Text('Log out'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: Colors.redAccent,
-              side: const BorderSide(color: Colors.redAccent),
-              padding: const EdgeInsets.symmetric(vertical: 14),
-            ),
-            onPressed: _signingOut ? null : _confirmLogout,
-          ),
-        ],
-      ),
+        );
+      },
     );
+  }
+
+  // NEW: add this helper method
+  Future<Map<String, dynamic>?> _fetchProfile() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) return null;
+    try {
+      final resp = await supabase
+          .from('profiles')
+          .select()
+          .eq('id', user.id)
+          .maybeSingle();
+
+      if (resp == null) return null;
+      // Ensure returned value is a Map<String,dynamic> without an unnecessary cast
+      return Map<String, dynamic>.from(resp);
+    } catch (e, st) {
+      debugPrint('[_fetchProfile] error: $e\n$st');
+      return null;
+    }
   }
 }
