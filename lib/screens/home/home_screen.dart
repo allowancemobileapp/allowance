@@ -55,18 +55,21 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Map<String, dynamic>> _fallbackGists = [
     {
       'id': 'fallback-1',
-      'title': 'Welcome to Allowance — discover local gists',
-      'image_url': 'https://picsum.photos/1200/800?seed=allowance1'
+      'title': 'Market your brand exclusively on campus',
+      'image_url':
+          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/InShot_20251114_172942404.jpg'
     },
     {
       'id': 'fallback-2',
-      'title': 'Share news, offers and updates with your campus',
-      'image_url': 'https://picsum.photos/1200/800?seed=allowance2'
+      'title': 'Get the best and tastiest food combos',
+      'image_url':
+          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/InShot_20251114_173051467.jpg'
     },
     {
       'id': 'fallback-3',
-      'title': 'Create Local or Global gists with an image',
-      'image_url': 'https://picsum.photos/1200/800?seed=allowance3'
+      'title': 'Let the world see your new EP!',
+      'image_url':
+          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/file_00000000da98720ab5cdd39756c77926.png'
     },
   ];
 

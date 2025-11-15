@@ -1,5 +1,6 @@
 // lib/screens/home/ticket_submission_screen.dart
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -90,6 +91,106 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
     if (picked != null && mounted) setState(() => _selectedTime = picked);
   }
 
+  /// Uploads the picked image to Supabase Storage and returns a public URL.
+  /// Fully defensive: supports uploadBinary, file fallback, and all publicUrl shapes.
+  Future<String> _uploadImageAndGetPublicUrl({
+    required String bucket,
+    required String path,
+  }) async {
+    final supabase = Supabase.instance.client;
+
+    // 1. Read file bytes (works for Android content URIs)
+    final Uint8List bytes = await _pickedImage!.readAsBytes();
+
+    bool uploaded = false;
+
+    // 2. Attempt uploadBinary first (new SDKs)
+    try {
+      await supabase.storage.from(bucket).uploadBinary(
+            path,
+            bytes,
+            fileOptions: const FileOptions(upsert: false),
+          );
+      uploaded = true;
+    } catch (eBinary) {
+      // 3. Fallback to File upload (older SDKs)
+      try {
+        final file = File(_pickedImage!.path);
+        await supabase.storage.from(bucket).upload(
+              path,
+              file,
+              fileOptions: const FileOptions(upsert: false),
+            );
+        uploaded = true;
+      } catch (eFile) {
+        throw Exception(
+          'Upload failed.\nBinary error: $eBinary\nFile error: $eFile',
+        );
+      }
+    }
+
+    if (!uploaded) {
+      throw Exception('Upload did not complete.');
+    }
+
+    // 4. Get the public URL (different SDKs return different shapes)
+    dynamic resp;
+
+    try {
+      resp = supabase.storage.from(bucket).getPublicUrl(path);
+    } catch (e) {
+      throw Exception('getPublicUrl() failed: $e');
+    }
+
+    String publicUrl = '';
+
+    // Case 1 — String
+    if (resp is String) {
+      publicUrl = resp;
+    }
+
+    // Case 2 — Map (SDK variant: {"publicUrl": "..."} or {"data": {"publicUrl": "..."}})
+    else if (resp is Map) {
+      try {
+        final map = resp;
+
+        // Try publicUrl
+        if (map['publicUrl'] != null) {
+          publicUrl = map['publicUrl'].toString();
+        }
+        // Try nested data.publicUrl
+        else if (map['data'] is Map &&
+            (map['data'] as Map)['publicUrl'] != null) {
+          publicUrl = (map['data'] as Map)['publicUrl'].toString();
+        }
+        // Try uppercase variants
+        else if (map['publicURL'] != null) {
+          publicUrl = map['publicURL'].toString();
+        } else if (map['data'] is Map &&
+            (map['data'] as Map)['publicURL'] != null) {
+          publicUrl = (map['data'] as Map)['publicURL'].toString();
+        }
+        // Worst case — stringified map
+        else {
+          publicUrl = map.toString();
+        }
+      } catch (eMap) {
+        throw Exception('Unexpected getPublicUrl() map format: $eMap');
+      }
+    }
+
+    // Case 3 — Other object → toString fallback
+    else if (resp != null) {
+      publicUrl = resp.toString();
+    }
+
+    if (publicUrl.isEmpty) {
+      throw Exception('Public URL is empty. Raw response: $resp');
+    }
+
+    return publicUrl;
+  }
+
   Future<void> _submitTicket() async {
     if (!_formKey.currentState!.validate() ||
         _pickedImage == null ||
@@ -148,15 +249,18 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
     try {
       // Upload event image
       const bucket = 'event-images';
-      final file = File(_pickedImage!.path);
-      final ext = _pickedImage!.path.split('.').last;
-      final path = 'events/${const Uuid().v4()}.$ext';
-      await supabase.storage.from(bucket).upload(path, file);
-      final publicUrl = supabase.storage.from(bucket).getPublicUrl(path);
+      final ext = _pickedImage!.name.split('.').last;
+      final uuid = const Uuid().v4();
+      final path = 'events/$uuid.$ext';
+
+      // Upload and get a public URL (throws if fails)
+      final publicUrl =
+          await _uploadImageAndGetPublicUrl(bucket: bucket, path: path);
 
       // Insert event directly (no Paystack)
       final dateString = _formatDate(_selectedDate!);
-      final timeString = '${_selectedTime!.hour}:${_selectedTime!.minute}:00';
+      final timeString =
+          '${_selectedTime!.hour.toString().padLeft(2, '0')}:${_selectedTime!.minute.toString().padLeft(2, '0')}:00';
 
       final payload = {
         'school_id': widget.schoolId,
@@ -172,7 +276,7 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
         'tickets_remaining': ticketsCount,
         'price': pricePerTicket,
         'photo_url': publicUrl,
-        'paid': true, // mark true since no payment needed
+        'paid': true,
         'status': 'active',
       };
 
@@ -187,7 +291,9 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
         );
         Navigator.pop(context, true);
       }
-    } catch (e) {
+    } catch (e, st) {
+      // Show a friendly message and log the stacktrace for adb logcat
+      debugPrint('Ticket submit error: $e\n$st');
       ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Sorry, something went wrong: $e')));
     } finally {
