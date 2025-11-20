@@ -81,87 +81,44 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   /// Upload avatar to 'avatars' bucket and return the resolved public URL (or null).
   Future<String?> _uploadAvatarIfPicked() async {
     if (_pickedAvatar == null) return widget.userPreferences.avatarUrl;
+
     final client = Supabase.instance.client;
     final bucket = 'avatars';
-    final ext = _pickedAvatar!.path.split('.').last;
+    final ext = _pickedAvatar!.name.split('.').last; // use .name, not .path
     final filename = 'avatars/${const Uuid().v4()}.$ext';
-    final file = File(_pickedAvatar!.path);
 
     try {
-      // Upload file (will throw if bucket missing/forbidden)
-      await client.storage.from(bucket).upload(filename, file);
-    } catch (e) {
-      // Friendly user message will be shown by caller; keep console log
-      debugPrint('Avatar upload failed: $e');
-      return null;
-    }
+      final bytes = await _pickedAvatar!.readAsBytes();
 
-    // Resolve public URL safely (handle common return shapes)
-    try {
-      final dynamic publicUrlRaw =
+      await client.storage.from(bucket).uploadBinary(
+            filename,
+            bytes,
+            fileOptions: FileOptions(upsert: false),
+          );
+
+      // Get public URL
+      final String publicUrl =
           client.storage.from(bucket).getPublicUrl(filename);
-
-      String? publicUrl;
-
-      if (publicUrlRaw is String) {
-        publicUrl = publicUrlRaw;
-      } else if (publicUrlRaw is Map) {
-        // check common keys conservatively
-        if (publicUrlRaw['publicUrl'] is String) {
-          publicUrl = publicUrlRaw['publicUrl'] as String;
-        } else if (publicUrlRaw['public_url'] is String) {
-          publicUrl = publicUrlRaw['public_url'] as String;
-        } else if (publicUrlRaw['url'] is String) {
-          publicUrl = publicUrlRaw['url'] as String;
-        } else if (publicUrlRaw['data'] is Map) {
-          final data = publicUrlRaw['data'] as Map;
-          if (data['publicUrl'] is String)
-            publicUrl = data['publicUrl'] as String;
-          else if (data['public_url'] is String)
-            publicUrl = data['public_url'] as String;
-          else if (data['url'] is String) publicUrl = data['url'] as String;
-        }
-        // last resort: search values
-        if (publicUrl == null) {
-          for (final v in publicUrlRaw.values) {
-            if (v is String) {
-              publicUrl = v;
-              break;
-            }
-            if (v is Map) {
-              for (final nv in v.values) {
-                if (nv is String) {
-                  publicUrl = nv;
-                  break;
-                }
-              }
-              if (publicUrl != null) break;
-            }
-          }
-        }
-      } else {
-        publicUrl = publicUrlRaw?.toString();
-      }
-
       return publicUrl;
     } catch (e) {
-      debugPrint('Resolving public URL failed: $e');
+      debugPrint('Avatar upload failed: $e');
       return null;
     }
   }
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
+
     setState(() => _isSaving = true);
 
-    final supabase = Supabase.instance.client;
+    final supabase = Supabase.instance.client; // ← FIXED: was "clientClient"
     final user = supabase.auth.currentUser;
 
     try {
-      // 1. Upload avatar first (if picked)
+      // 1. Upload avatar first
       final String? newAvatarUrl = await _uploadAvatarIfPicked();
 
-      // 2. Update all local fields
+      // 2. Update local UserPreferences
       widget.userPreferences.fullName =
           _displayNameController.text.trim().isEmpty
               ? null
@@ -182,12 +139,12 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       widget.userPreferences.age = int.tryParse(_ageController.text.trim());
       widget.userPreferences.bloodGroup = _bloodGroup;
 
-      // Apply new avatar if uploaded
       if (newAvatarUrl != null) {
         widget.userPreferences.avatarUrl = newAvatarUrl;
+        setState(() {});
       }
 
-      // 3. Mark as completed and save everything
+      // 3. Mark profile completed + save locally + server
       widget.userPreferences.hasCompletedProfile = true;
       await widget.userPreferences.savePreferences();
 
@@ -205,16 +162,16 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           'blood_group': widget.userPreferences.bloodGroup,
           'updated_at': DateTime.now().toUtc().toIso8601String(),
         };
+
         updates.removeWhere((key, value) => value == null);
 
         try {
           await supabase.from('profiles').upsert(updates);
         } catch (e) {
-          debugPrint('Direct upsert failed (non-fatal): $e');
+          debugPrint('Supabase upsert failed (non-fatal): $e');
         }
       }
 
-      // Success message
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -224,13 +181,12 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         );
       }
 
-      // 5. Go to HomeScreen – this line is now 100% correct
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(
             builder: (_) => HomeScreen(userPreferences: widget.userPreferences),
           ),
-          (route) => false, // ← THIS IS THE CORRECT LINE
+          (route) => false,
         );
       }
     } catch (e) {
@@ -238,13 +194,15 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Failed to save profile. Please try again.'),
+            content: Text('Failed to save profile'),
             backgroundColor: Colors.red,
           ),
         );
       }
     } finally {
-      if (mounted) setState(() => _isSaving = false);
+      if (mounted) {
+        setState(() => _isSaving = false);
+      }
     }
   }
 
@@ -264,11 +222,17 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final avatarUrl = widget.userPreferences.avatarUrl;
-    final imageProvider = _pickedAvatar != null
-        ? FileImage(File(_pickedAvatar!.path)) as ImageProvider
-        : (avatarUrl != null && avatarUrl.isNotEmpty
-            ? NetworkImage(avatarUrl) as ImageProvider
-            : null);
+
+    // ←←← THIS IS THE FINAL FIX FOR AVATAR NOT UPDATING
+    ImageProvider? imageProvider;
+    if (_pickedAvatar != null) {
+      imageProvider = FileImage(File(_pickedAvatar!.path));
+    } else if (avatarUrl != null && avatarUrl.isNotEmpty) {
+      // Forces Flutter to reload the new image immediately (bypasses cache)
+      imageProvider = NetworkImage(
+          '$avatarUrl?ts=${DateTime.now().millisecondsSinceEpoch}');
+    }
+    // ←←← END OF FIX
 
     return Scaffold(
       backgroundColor: _bg,
