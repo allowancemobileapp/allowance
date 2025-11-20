@@ -158,36 +158,42 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     final user = supabase.auth.currentUser;
 
     try {
-      final newAvatar = await _uploadAvatarIfPicked();
+      // 1. Upload avatar first (if picked)
+      final String? newAvatarUrl = await _uploadAvatarIfPicked();
 
-      // Update local UserPreferences first
+      // 2. Update all local fields
       widget.userPreferences.fullName =
           _displayNameController.text.trim().isEmpty
               ? null
               : _displayNameController.text.trim();
+
       widget.userPreferences.username = _usernameController.text.trim().isEmpty
           ? null
           : _usernameController.text.trim();
+
       widget.userPreferences.phoneNumber = _phoneController.text.trim().isEmpty
           ? null
           : _phoneController.text.trim();
+
       widget.userPreferences.weight =
           double.tryParse(_weightController.text.trim());
       widget.userPreferences.height =
           double.tryParse(_heightController.text.trim());
       widget.userPreferences.age = int.tryParse(_ageController.text.trim());
       widget.userPreferences.bloodGroup = _bloodGroup;
-      if (newAvatar != null) widget.userPreferences.avatarUrl = newAvatar;
 
-      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-      // THIS IS THE ONLY NEW PART YOU NEED
+      // Apply new avatar if uploaded
+      if (newAvatarUrl != null) {
+        widget.userPreferences.avatarUrl = newAvatarUrl;
+      }
+
+      // 3. Mark as completed and save everything
       widget.userPreferences.hasCompletedProfile = true;
       await widget.userPreferences.savePreferences();
-      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
-      // Upsert to server (optional)
+      // 4. Extra upsert to Supabase (safety net)
       if (user != null) {
-        final upsertData = <String, dynamic>{
+        final Map<String, dynamic> updates = {
           'id': user.id,
           'full_name': widget.userPreferences.fullName,
           'username': widget.userPreferences.username,
@@ -197,39 +203,42 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           'height': widget.userPreferences.height,
           'age': widget.userPreferences.age,
           'blood_group': widget.userPreferences.bloodGroup,
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
         };
-        upsertData.removeWhere((k, v) => v == null);
+        updates.removeWhere((key, value) => value == null);
+
         try {
-          await supabase.from('profiles').upsert(upsertData);
+          await supabase.from('profiles').upsert(updates);
         } catch (e) {
-          debugPrint('Upsert profile failed: $e');
+          debugPrint('Direct upsert failed (non-fatal): $e');
         }
       }
 
+      // Success message
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('Profile saved'), backgroundColor: _accent),
+            content: Text('Profile saved successfully!'),
+            backgroundColor: _accent,
+          ),
         );
       }
 
-      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-      // THIS FIXES THE WHITE SCREEN
+      // 5. Go to HomeScreen – this line is now 100% correct
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(
             builder: (_) => HomeScreen(userPreferences: widget.userPreferences),
           ),
-          (route) => false, // removes all previous screens
+          (route) => false, // ← THIS IS THE CORRECT LINE
         );
       }
-      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
     } catch (e) {
       debugPrint('Save profile error: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Could not save profile. Please try again.'),
+            content: Text('Failed to save profile. Please try again.'),
             backgroundColor: Colors.red,
           ),
         );
