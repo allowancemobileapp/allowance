@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/services/api_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 class AvailableOptionsScreen extends StatefulWidget {
@@ -30,19 +31,75 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   List<dynamic> _groups = [];
   String _selectedGroup = 'All';
   List<dynamic> _allOptions = [];
-  late Set<String> _favoritedOptionIds;
+
+  // New: real likes from server
+  Map<int, int> _likeCounts = {};
+  Set<int> _likedOptionIds = {};
 
   // Filter state
   final List<Map<String, dynamic>> _foodSections = [];
   final Set<String> _selectedFoodItems = {};
 
+  final supabase = Supabase.instance.client;
+
+  Future<void> _loadLikesData() async {
+    try {
+      // 1) Load all like rows and compute counts (works for signed-out users too)
+      final countsResponse =
+          await supabase.from('option_likes').select('option_id');
+
+      final Map<int, int> counts = {};
+      for (var row in countsResponse) {
+        // defensive parsing
+        final dynamic val = row['option_id'];
+        if (val == null) continue;
+        final id = val is int ? val : int.tryParse(val.toString());
+        if (id == null) continue;
+        counts[id] = (counts[id] ?? 0) + 1;
+      }
+
+      // 2) If signed in, load which options this user liked
+      final user = supabase.auth.currentUser;
+      final Set<int> likedIds = <int>{};
+      if (user != null) {
+        try {
+          final userLikesResponse = await supabase
+              .from('option_likes')
+              .select('option_id')
+              .eq('user_id', user.id);
+
+          for (var row in userLikesResponse) {
+            final dynamic val = row['option_id'];
+            final id = val is int ? val : int.tryParse(val.toString());
+            if (id != null) likedIds.add(id);
+          }
+        } catch (e) {
+          debugPrint('Failed to load user likes: $e');
+        }
+      }
+
+      // 3) Update UI and local favorites
+      if (mounted) {
+        setState(() {
+          _likeCounts = counts;
+          _likedOptionIds = likedIds;
+        });
+
+        // keep local favorites in sync when user is logged in
+        if (user != null) {
+          widget.userPreferences.favoritedOptions =
+              likedIds.map((e) => e.toString()).toList();
+          await widget.userPreferences.savePreferences();
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to load likes: $e');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
-
-    _favoritedOptionIds = widget.userPreferences.favoritedOptions
-        .map((e) => e.toString())
-        .toSet();
 
     _foodGroupsFuture = ApiService.fetchFoodGroups();
     _optionsFuture = ApiService.fetchOptions();
@@ -64,6 +121,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
 
     _optionsFuture.then((value) {
       _allOptions = value;
+      _loadLikesData(); // Load likes once options are ready
       setState(() {});
     });
   }
@@ -317,7 +375,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               showModalBottomSheet(
                 context: context,
                 isScrollControlled: true,
-                backgroundColor: Colors.grey[900], // dark background
+                backgroundColor: Colors.grey[900],
                 builder: (ctx) => Theme(
                   data: Theme.of(ctx).copyWith(
                     textTheme: Theme.of(ctx).textTheme.apply(
@@ -327,7 +385,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                     iconTheme: const IconThemeData(color: Colors.white70),
                   ),
                   child: StatefulBuilder(
-                    builder: (ctx, setState) => SingleChildScrollView(
+                    builder: (ctx, modalSetState) => SingleChildScrollView(
                       child: Padding(
                         padding: const EdgeInsets.all(16),
                         child: Column(
@@ -358,7 +416,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                       activeColor: themeColor,
                                       checkColor: Colors.white,
                                       value: !_selectedFoodItems.contains(item),
-                                      onChanged: (v) => setState(() {
+                                      onChanged: (v) => modalSetState(() {
                                         if (v == true) {
                                           _selectedFoodItems.remove(item);
                                         } else {
@@ -448,8 +506,9 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                       final items = option['items'] as List<dynamic>? ?? [];
                       final total = items.fold<double>(
                           0, (sum, itm) => sum + getAdjustedPrice(itm));
-                      final idStr = option['id'].toString();
-                      final isFav = _favoritedOptionIds.contains(idStr);
+                      final int optionId = option['id'] as int;
+                      final bool isLiked = _likedOptionIds.contains(optionId);
+                      final int likeCount = _likeCounts[optionId] ?? 0;
 
                       return TweenAnimationBuilder<Offset>(
                         tween: Tween(
@@ -497,34 +556,130 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                               onPressed: () =>
                                                   _showDeliveryPicker(option),
                                             ),
-                                            IconButton(
-                                              icon: Icon(
-                                                isFav
-                                                    ? Icons.favorite
-                                                    : Icons.favorite_border,
-                                                color: isFav
-                                                    ? Colors.red
-                                                    : Colors.white,
-                                                size: 26,
-                                              ),
-                                              onPressed: () {
-                                                setState(() {
-                                                  if (isFav) {
-                                                    _favoritedOptionIds
-                                                        .remove(idStr);
-                                                  } else {
-                                                    _favoritedOptionIds
-                                                        .add(idStr);
-                                                  }
-                                                  // convert Set -> List before saving to UserPreferences
-                                                  widget.userPreferences
-                                                          .favoritedOptions =
-                                                      _favoritedOptionIds
-                                                          .toList();
-                                                  widget.userPreferences
-                                                      .savePreferences();
-                                                });
-                                              },
+
+                                            // ❤️ Like button + like count
+                                            Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  icon: Icon(
+                                                    isLiked
+                                                        ? Icons.favorite
+                                                        : Icons.favorite_border,
+                                                    color: isLiked
+                                                        ? Colors.red
+                                                        : Colors.white,
+                                                    size: 26,
+                                                  ),
+                                                  onPressed: () async {
+                                                    final user = supabase
+                                                        .auth.currentUser;
+                                                    if (user == null) {
+                                                      if (mounted) {
+                                                        ScaffoldMessenger.of(
+                                                                context)
+                                                            .showSnackBar(
+                                                          const SnackBar(
+                                                            content: Text(
+                                                                'Please log in to like items.'),
+                                                          ),
+                                                        );
+                                                      }
+                                                      return;
+                                                    }
+
+                                                    try {
+                                                      if (isLiked) {
+                                                        // Unlike
+                                                        await supabase
+                                                            .from(
+                                                                'option_likes')
+                                                            .delete()
+                                                            .eq('option_id',
+                                                                optionId)
+                                                            .eq('user_id',
+                                                                user.id);
+
+                                                        if (mounted) {
+                                                          setState(() {
+                                                            _likedOptionIds
+                                                                .remove(
+                                                                    optionId);
+                                                            final newCount =
+                                                                (_likeCounts[
+                                                                            optionId] ??
+                                                                        1) -
+                                                                    1;
+                                                            _likeCounts[
+                                                                    optionId] =
+                                                                newCount < 0
+                                                                    ? 0
+                                                                    : newCount;
+                                                          });
+                                                        }
+                                                      } else {
+                                                        // Like
+                                                        try {
+                                                          await supabase
+                                                              .from(
+                                                                  'option_likes')
+                                                              .insert({
+                                                            'option_id':
+                                                                optionId,
+                                                            'user_id': user.id,
+                                                          });
+                                                        } catch (e) {
+                                                          // If duplicate like error, ignore it safely
+                                                          debugPrint(
+                                                              'Like insert error (ignored if duplicate): $e');
+                                                        }
+
+                                                        if (mounted) {
+                                                          setState(() {
+                                                            _likedOptionIds
+                                                                .add(optionId);
+                                                            _likeCounts[
+                                                                    optionId] =
+                                                                (_likeCounts[
+                                                                            optionId] ??
+                                                                        0) +
+                                                                    1;
+                                                          });
+                                                        }
+                                                      }
+
+                                                      // Sync favorites for Favorites screen
+                                                      widget.userPreferences
+                                                              .favoritedOptions =
+                                                          _likedOptionIds
+                                                              .map((e) =>
+                                                                  e.toString())
+                                                              .toList();
+                                                      await widget
+                                                          .userPreferences
+                                                          .savePreferences();
+                                                    } catch (e) {
+                                                      if (mounted) {
+                                                        ScaffoldMessenger.of(
+                                                                context)
+                                                            .showSnackBar(
+                                                          SnackBar(
+                                                              content: Text(
+                                                                  'Like failed: $e')),
+                                                        );
+                                                      }
+                                                    }
+                                                  },
+                                                ),
+                                                Text(
+                                                  likeCount.toString(),
+                                                  style: const TextStyle(
+                                                    color: Colors.white70,
+                                                    fontSize: 13,
+                                                    fontWeight: FontWeight.w500,
+                                                  ),
+                                                ),
+                                              ],
                                             ),
                                           ],
                                         ),

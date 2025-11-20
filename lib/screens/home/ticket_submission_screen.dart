@@ -1,4 +1,5 @@
 // lib/screens/home/ticket_submission_screen.dart
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -280,13 +281,29 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
         'status': 'active',
       };
 
-      await supabase.from('tickets').insert(payload);
+      // INSERT + GET ID + SEND PUSH NOTIFICATION TO EVERYONE
+      final insertResp = await supabase
+          .from('tickets')
+          .insert(payload)
+          .select('id')
+          .maybeSingle();
+
+      final ticketId = insertResp?['id']?.toString();
+
+      if (ticketId != null) {
+        supabase.functions.invoke('send-push-for-gist', body: {
+          'type': 'ticket',
+          'ticketId': ticketId,
+        }); // fire and forget – we don't care if it fails
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Ticket created successfully!'),
+            content: Text(
+                'Ticket created successfully! Everyone just got notified 🔥'),
             backgroundColor: Colors.green,
+            duration: Duration(seconds: 4),
           ),
         );
         Navigator.pop(context, true);

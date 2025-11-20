@@ -23,6 +23,22 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   bool _signingOut = false;
 
+  // ← NEW: stable future is created only once
+  late Future<Map<String, dynamic>?> _profileFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _profileFuture = _fetchProfile();
+  }
+
+  // ← NEW: refresh method so we can reload when needed
+  void _refreshProfile() {
+    setState(() {
+      _profileFuture = _fetchProfile();
+    });
+  }
+
   Future<void> _confirmLogout() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -72,14 +88,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  // lib/screens/profile/profile_screen.dart
   @override
   Widget build(BuildContext context) {
-    final supabase = Supabase.instance.client;
-    final user = supabase.auth.currentUser;
-
     return FutureBuilder<Map<String, dynamic>?>(
-      future: _fetchProfile(),
+      future: _profileFuture, // ← now stable, no more reload every 5 seconds
       builder: (context, snapshot) {
         // Loading state
         if (snapshot.connectionState == ConnectionState.waiting) {
@@ -109,6 +121,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
         // If no profile row exists, let user create one
         if (profile == null) {
+          final supabase = Supabase.instance.client;
+          final user = supabase.auth.currentUser;
+
           return Scaffold(
             body: Center(
               child: ElevatedButton(
@@ -119,10 +134,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       'created_at': DateTime.now().toIso8601String(),
                       'updated_at': DateTime.now().toIso8601String(),
                     });
-                    // NEW: refresh local preferences so UI shows the new profile
                     await widget.userPreferences.loadPreferences();
-                    // re-run FutureBuilder + rebuild with updated prefs
-                    setState(() {});
+                    if (!mounted) return;
+                    _refreshProfile(); // ← reload the profile row
                   } catch (e) {
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -263,7 +277,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             userPreferences: widget.userPreferences)),
                   );
                   if (changed == true) {
-                    setState(() {}); // reload display from updated preferences
+                    await widget.userPreferences.loadPreferences();
+                    _refreshProfile(); // ← make sure we show latest server data
                     widget.onSave();
                   }
                 },
@@ -293,7 +308,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  // NEW: add this helper method
   Future<Map<String, dynamic>?> _fetchProfile() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -306,7 +320,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           .maybeSingle();
 
       if (resp == null) return null;
-      // Ensure returned value is a Map<String,dynamic> without an unnecessary cast
       return Map<String, dynamic>.from(resp);
     } catch (e, st) {
       debugPrint('[_fetchProfile] error: $e\n$st');

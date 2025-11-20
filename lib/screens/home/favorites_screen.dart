@@ -1,19 +1,17 @@
 // lib/screens/home/favorites_screen.dart
-
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/services/api_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class FavoritesScreen extends StatefulWidget {
   final UserPreferences userPreferences;
-
   const FavoritesScreen({
     super.key,
     required this.userPreferences,
   });
-
   @override
   State<FavoritesScreen> createState() => _FavoritesScreenState();
 }
@@ -25,29 +23,89 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   late Future<List<dynamic>> _deliveryPersonnelFuture;
   List<dynamic> _groups = [];
   String _selectedGroup = 'All';
-
   // Favorite IDs
-  late Set<String> _favoritedOptionIds;
+  Set<String> _favoritedOptionIds = <String>{};
   // All options fetched
   List<dynamic> _allOptions = [];
-
   // Filter state
   final List<Map<String, dynamic>> _foodSections = [];
   final Set<String> _selectedFoodItems = {};
 
+  // Likes data
+  Map<int, int> _likeCounts = {};
+  Set<int> _likedOptionIds = {};
+
+  final supabase = Supabase.instance.client;
+
+  Future<void> _loadLikesData() async {
+    try {
+      // 1) Load all like rows and compute counts (works for signed-out users too)
+      final countsResponse =
+          await supabase.from('option_likes').select('option_id');
+
+      final Map<int, int> counts = {};
+      for (var row in countsResponse) {
+        // defensive parsing
+        final dynamic val = row['option_id'];
+        if (val == null) continue;
+        final id = val is int ? val : int.tryParse(val.toString());
+        if (id == null) continue;
+        counts[id] = (counts[id] ?? 0) + 1;
+      }
+
+      // 2) If signed in, load which options this user liked
+      final user = supabase.auth.currentUser;
+      final Set<int> likedIds = <int>{};
+      if (user != null) {
+        try {
+          final userLikesResponse = await supabase
+              .from('option_likes')
+              .select('option_id')
+              .eq('user_id', user.id);
+
+          for (var row in userLikesResponse) {
+            final dynamic val = row['option_id'];
+            final id = val is int ? val : int.tryParse(val.toString());
+            if (id != null) likedIds.add(id);
+          }
+        } catch (e) {
+          debugPrint('Failed to load user likes: $e');
+        }
+      }
+
+      // 3) Update UI and local favorites
+      if (mounted) {
+        setState(() {
+          _likeCounts = counts;
+          _likedOptionIds = likedIds;
+        });
+
+        // keep local favorites in sync when user is logged in
+        if (user != null) {
+          widget.userPreferences.favoritedOptions =
+              likedIds.map((e) => e.toString()).toList();
+          await widget.userPreferences.savePreferences();
+          setState(() {
+            _favoritedOptionIds = likedIds.map((e) => e.toString()).toSet();
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to load likes: $e');
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    _favoritedOptionIds = widget.userPreferences.favoritedOptions
+        .map((e) => e.toString())
+        .toSet();
     _optionsFuture = ApiService.fetchOptions();
     _foodGroupsFuture = ApiService.fetchFoodGroups();
     _deliveryPersonnelFuture = ApiService.fetchDeliveryPersonnel(
       widget.userPreferences.schoolId.toString(),
     );
-
-    _favoritedOptionIds = widget.userPreferences.favoritedOptions
-        .map((e) => e.toString())
-        .toSet();
-
     _foodGroupsFuture.then((foodGroups) {
       final groupsSet = <Map<String, dynamic>>[
         {'id': 'all', 'name': 'All'}
@@ -60,22 +118,21 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       }
       setState(() => _groups = groupsSet);
     });
-
     _optionsFuture.then((opts) {
       _allOptions = opts;
       setState(() {});
     });
+    _loadLikesData();
   }
 
   // --- DELIVERY POPUP ---
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
     final vendorName = selectedOption['vendors']['name'].toString();
     final items = (selectedOption['items'] as List<dynamic>);
-    final itemList = items.map((i) => i['name'].toString()).join(', ');
+    items.map((i) => i['name'].toString()).join(', ');
     final total = items
         .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
         .toStringAsFixed(0);
-
     // 🧾 Build detailed message
     final message = StringBuffer();
     message.writeln("Hello! I'd like to order from $vendorName:");
@@ -87,7 +144,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       message.writeln("- $name (₦$price × $qty)");
     }
     message.writeln("Total: ₦$total");
-
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
@@ -100,7 +156,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
               child: Center(child: CircularProgressIndicator()),
             );
           }
-
           final list = snap.data ?? [];
           if (list.isEmpty) {
             return Container(
@@ -119,9 +174,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
               ),
             );
           }
-
           list.shuffle(Random());
-
           return Container(
             decoration: BoxDecoration(
               color: Colors.grey[900],
@@ -164,7 +217,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                             Uri.encodeComponent(message.toString());
                         final url = "https://wa.me/$phone?text=$encodedMsg";
                         final uri = Uri.parse(url);
-
                         if (await canLaunchUrl(uri)) {
                           // ✅ Let Android show WhatsApp / WhatsApp Business chooser
                           await launchUrl(uri,
@@ -209,7 +261,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       _foodSections.add({'name': cat, 'items': names.toList()});
     });
     setState(() {});
-
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -270,7 +321,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
     return options.where((option) {
       final idStr = option['id'].toString();
       if (!_favoritedOptionIds.contains(idStr)) return false;
-
       final groupId = option['group_id']?.toString() ?? '';
       if (_selectedGroup != 'All') {
         final selectedGroup = _groups
@@ -278,7 +328,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
             .toString();
         if (groupId != selectedGroup) return false;
       }
-
       final items = option['items'] is List<dynamic>
           ? option['items'] as List<dynamic>
           : [];
@@ -287,13 +336,11 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       })) {
         return false;
       }
-
       return true;
     }).toList();
   }
 
   String getItemName(dynamic item) => item['name'].toString();
-
   double getAdjustedPrice(dynamic item) {
     final price = (item['price'] as num?)?.toDouble() ?? 0.0;
     switch (item['portion']) {
@@ -342,10 +389,8 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                 child:
                     Text('No favorites available right now. Try adding some!'));
           }
-
           final options = snap.data!;
           final displayed = _filteredOptions(options);
-
           return Column(
             children: [
               if (_groups.isNotEmpty) ...[
@@ -394,8 +439,9 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                     final total = items.fold<double>(
                         0, (sum, it) => sum + getAdjustedPrice(it));
                     final idStr = option['id'].toString();
+                    final optionId = int.tryParse(idStr) ?? 0;
                     final isFav = _favoritedOptionIds.contains(idStr);
-
+                    final likeCount = _likeCounts[optionId] ?? 0;
                     return TweenAnimationBuilder<Offset>(
                       tween:
                           Tween(begin: const Offset(0, 0.1), end: Offset.zero),
@@ -438,33 +484,112 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                             onPressed: () =>
                                                 _showDeliveryPicker(option),
                                           ),
-                                          IconButton(
-                                            icon: Icon(
-                                              isFav
-                                                  ? Icons.favorite
-                                                  : Icons.favorite_border,
-                                              color: isFav
-                                                  ? Colors.red
-                                                  : Colors.white,
-                                              size: 26,
-                                            ),
-                                            onPressed: () {
-                                              setState(() {
-                                                if (isFav) {
-                                                  _favoritedOptionIds
-                                                      .remove(idStr);
-                                                } else {
-                                                  _favoritedOptionIds
-                                                      .add(idStr);
-                                                }
-                                                widget.userPreferences
-                                                        .favoritedOptions =
-                                                    _favoritedOptionIds
-                                                        .toList();
-                                                widget.userPreferences
-                                                    .savePreferences();
-                                              });
-                                            },
+                                          Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              IconButton(
+                                                icon: Icon(
+                                                  isFav
+                                                      ? Icons.favorite
+                                                      : Icons.favorite_border,
+                                                  color: isFav
+                                                      ? Colors.red
+                                                      : Colors.white,
+                                                  size: 26,
+                                                ),
+                                                onPressed: () {
+                                                  final user =
+                                                      supabase.auth.currentUser;
+                                                  if (!isFav) {
+                                                    // Like
+                                                    if (user == null) {
+                                                      ScaffoldMessenger.of(
+                                                              context)
+                                                          .showSnackBar(
+                                                        const SnackBar(
+                                                          content: Text(
+                                                              'Please log in to like items.'),
+                                                        ),
+                                                      );
+                                                      return;
+                                                    }
+                                                    _handleLike(optionId);
+                                                  } else {
+                                                    // Unlike with confirmation
+                                                    showModalBottomSheet(
+                                                      context: context,
+                                                      backgroundColor:
+                                                          Colors.grey[900],
+                                                      builder: (_) => Container(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .all(16),
+                                                        child: Column(
+                                                          mainAxisSize:
+                                                              MainAxisSize.min,
+                                                          children: [
+                                                            const Text(
+                                                              'Are you sure you want to remove this from favorites?',
+                                                              style: TextStyle(
+                                                                color: Colors
+                                                                    .white,
+                                                                fontSize: 18,
+                                                              ),
+                                                            ),
+                                                            const SizedBox(
+                                                                height: 20),
+                                                            Row(
+                                                              mainAxisAlignment:
+                                                                  MainAxisAlignment
+                                                                      .spaceEvenly,
+                                                              children: [
+                                                                TextButton(
+                                                                  onPressed: () =>
+                                                                      Navigator.pop(
+                                                                          context),
+                                                                  child: Text(
+                                                                      'Cancel',
+                                                                      style: TextStyle(
+                                                                          color:
+                                                                              themeColor)),
+                                                                ),
+                                                                ElevatedButton(
+                                                                  style: ElevatedButton
+                                                                      .styleFrom(
+                                                                    backgroundColor:
+                                                                        themeColor,
+                                                                    foregroundColor:
+                                                                        Colors
+                                                                            .white,
+                                                                  ),
+                                                                  onPressed:
+                                                                      () {
+                                                                    Navigator.pop(
+                                                                        context);
+                                                                    _handleUnlike(
+                                                                        optionId);
+                                                                  },
+                                                                  child: const Text(
+                                                                      'Confirm'),
+                                                                ),
+                                                              ],
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ),
+                                                    );
+                                                  }
+                                                },
+                                              ),
+                                              Text(
+                                                likeCount.toString(),
+                                                style: const TextStyle(
+                                                  color: Colors.white70,
+                                                  fontSize: 13,
+                                                  fontWeight: FontWeight.w500,
+                                                ),
+                                              ),
+                                            ],
                                           ),
                                         ],
                                       ),
@@ -539,5 +664,62 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
         },
       ),
     );
+  }
+
+  Future<void> _handleLike(int optionId) async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return; // Should not reach here, but safety
+    try {
+      await supabase.from('option_likes').insert({
+        'option_id': optionId,
+        'user_id': user.id,
+      });
+      if (mounted) {
+        setState(() {
+          _likedOptionIds.add(optionId);
+          _likeCounts[optionId] = (_likeCounts[optionId] ?? 0) + 1;
+          _favoritedOptionIds.add(optionId.toString());
+        });
+        widget.userPreferences.favoritedOptions = _favoritedOptionIds.toList();
+        await widget.userPreferences.savePreferences();
+      }
+    } catch (e) {
+      debugPrint('Like insert error (ignored if duplicate): $e');
+    }
+  }
+
+  Future<void> _handleUnlike(int optionId) async {
+    final user = supabase.auth.currentUser;
+    try {
+      if (user != null) {
+        await supabase
+            .from('option_likes')
+            .delete()
+            .eq('option_id', optionId)
+            .eq('user_id', user.id);
+        if (mounted) {
+          setState(() {
+            _likedOptionIds.remove(optionId);
+            final newCount = (_likeCounts[optionId] ?? 1) - 1;
+            _likeCounts[optionId] = newCount < 0 ? 0 : newCount;
+            _favoritedOptionIds.remove(optionId.toString());
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _favoritedOptionIds.remove(optionId.toString());
+          });
+        }
+      }
+      widget.userPreferences.favoritedOptions = _favoritedOptionIds.toList();
+      await widget.userPreferences.savePreferences();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unlike failed: $e')),
+        );
+      }
+    }
   }
 }

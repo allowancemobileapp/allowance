@@ -1,9 +1,9 @@
 // lib/screens/introduction/introduction_screen.dart
-
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/home_screen.dart';
+import 'package:allowance/screens/profile/edit_profile_screen.dart'; // <-- new import
 
 class IntroductionScreen extends StatefulWidget {
   final VoidCallback onFinishIntro;
@@ -55,20 +55,87 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           throw AuthException('Authentication failed after sign up');
         }
 
-        // 3) Create a profile row with the username (if provided)
-        //    Wrap in try/catch so profile creation failure doesn't block navigation.
+        // 3) Defensive: try to create a minimal profile row (non-fatal)
         final usernameVal = _usernameCtl.text.trim();
         try {
-          await supabase.from('profiles').insert({
-            'id': authRes.user!.id,
-            'email': _emailCtl.text.trim(),
-            'username': usernameVal.isNotEmpty ? usernameVal : null,
-            'created_at': DateTime.now().toUtc().toIso8601String(),
-            'updated_at': DateTime.now().toUtc().toIso8601String(),
-          });
+          final currentUser = supabase.auth.currentUser;
+          if (currentUser != null) {
+            // insert only if not exists
+            final existing = await supabase
+                .from('profiles')
+                .select('id')
+                .eq('id', currentUser.id)
+                .maybeSingle();
+
+            if (existing == null) {
+              final insertMap = {
+                'id': currentUser.id,
+                'email': _emailCtl.text.trim(),
+                'created_at': DateTime.now().toUtc().toIso8601String(),
+                'updated_at': DateTime.now().toUtc().toIso8601String(),
+              };
+              if (usernameVal.isNotEmpty) insertMap['username'] = usernameVal;
+              await supabase.from('profiles').insert(insertMap);
+            } else {
+              // optionally update server profile if server username empty and user provided one
+              final profileResp = await supabase
+                  .from('profiles')
+                  .select()
+                  .eq('id', currentUser.id)
+                  .maybeSingle();
+              if (profileResp != null) {
+                final serverUsername = profileResp['username'] as String?;
+                if ((serverUsername == null || serverUsername.isEmpty) &&
+                    usernameVal.isNotEmpty) {
+                  await supabase.from('profiles').update({
+                    'username': usernameVal,
+                    'updated_at': DateTime.now().toUtc().toIso8601String()
+                  }).eq('id', currentUser.id);
+                }
+              }
+            }
+          }
         } catch (e) {
-          // Non-fatal: log and continue (profile can be created later)
-          debugPrint('Profile creation after signup failed: $e');
+          // non-fatal: log and continue to let user edit profile screen fix it
+          debugPrint('Profile creation after signup failed (non-fatal): $e');
+        }
+
+        // 4) Load preferences (will merge server profile into local prefs if available)
+        try {
+          await widget.userPreferences.loadPreferences();
+        } catch (e) {
+          debugPrint('loadPreferences after sign-up failed: $e');
+        }
+
+        // 5) Redirect user to EditProfileScreen so they can finish profile before entering Home.
+        // We use pushReplacement so they can't go back to Intro with back button.
+        if (mounted) {
+          final edited = await Navigator.of(context).pushReplacement(
+            MaterialPageRoute(
+              builder: (_) =>
+                  EditProfileScreen(userPreferences: widget.userPreferences),
+            ),
+          );
+
+          // After edit screen returns (or user popped), ensure prefs are reloaded and go to Home.
+          try {
+            await widget.userPreferences.loadPreferences();
+          } catch (e) {
+            debugPrint('loadPreferences after edit failed: $e');
+          }
+
+          // Invoke callback and go to Home
+          widget.onFinishIntro();
+          if (mounted) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) =>
+                    HomeScreen(userPreferences: widget.userPreferences),
+              ),
+            );
+          }
+          return;
         }
       } else {
         // Log in existing user
@@ -76,34 +143,38 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           email: _emailCtl.text.trim(),
           password: _pwCtl.text,
         );
-      }
 
-      if (authRes.user == null) {
-        throw AuthException('Authentication failed');
-      }
+        if (authRes.user == null) {
+          throw AuthException('Authentication failed');
+        }
 
-      // Ensure local preferences reflect the (possibly new) server profile
-      try {
-        await widget.userPreferences.loadPreferences();
-      } catch (e) {
-        // non-fatal; proceed to app but log for debugging
-        debugPrint('loadPreferences after auth failed: $e');
-      }
+        // Load preferences (merge server profile)
+        try {
+          await widget.userPreferences.loadPreferences();
+        } catch (e) {
+          debugPrint('loadPreferences after login failed: $e');
+        }
 
-      // Success: invoke callback and navigate
-      widget.onFinishIntro();
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (_) => HomeScreen(userPreferences: widget.userPreferences),
-        ),
-      );
+        // Success: go to Home
+        widget.onFinishIntro();
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) =>
+                  HomeScreen(userPreferences: widget.userPreferences),
+            ),
+          );
+        }
+        return;
+      }
     } on AuthException catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(error.message)));
       }
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint('Intro submit error: $e\n$st');
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('Error: $e')));

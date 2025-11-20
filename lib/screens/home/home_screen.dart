@@ -607,74 +607,62 @@ class _HomeScreenState extends State<HomeScreen> {
                     final actualIndex = idx % _fetchedGists.length;
                     final gist = _fetchedGists[actualIndex];
                     final imageUrl = (gist['image_url'] as String?) ?? '';
-                    final title = (gist['title'] as String?) ?? '';
                     final gistUrl = (gist['url'] as String?) ?? '';
                     final scale = _slideshowIndex == actualIndex ? 1.0 : 0.9;
 
                     return Transform.scale(
-                        scale: scale,
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                              right:
-                                  actualIndex != _slideshowIndex ? 15.0 : 0.0),
-                          child: GestureDetector(
-                            onTap: () {}, // Absorb tap, do nothing
+                      scale: scale,
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                            right: actualIndex != _slideshowIndex ? 15.0 : 0.0),
+                        child: GestureDetector(
+                          onTap:
+                              () {}, // keeps absorbing taps on the card itself (link icon still works)
+                          child: ClipRRect(
+                            borderRadius:
+                                BorderRadius.circular(24), // ← rounded corners
                             child: Stack(
-                              fit: StackFit.expand,
                               children: [
-                                // Background image or placeholder
-                                imageUrl.isNotEmpty
-                                    ? CachedNetworkImage(
-                                        imageUrl: imageUrl,
-                                        fit: BoxFit.cover,
-                                        placeholder: (context, url) =>
-                                            Container(
-                                          color: _isDarkMode
-                                              ? Colors.grey[700]
-                                              : Colors.grey[200],
-                                          child: Center(
-                                              child: CircularProgressIndicator(
-                                                  color: themeColor)),
-                                        ),
-                                        errorWidget: (context, url, error) =>
-                                            Container(
-                                          color: _isDarkMode
-                                              ? Colors.grey[700]
-                                              : Colors.grey[200],
-                                          child: Icon(Icons.broken_image,
-                                              color: _isDarkMode
-                                                  ? Colors.white54
-                                                  : Colors.black54,
-                                              size: 40),
-                                        ),
-                                      )
-                                    : Container(
-                                        decoration: BoxDecoration(
-                                          color: _isDarkMode
-                                              ? Colors.grey[700]
-                                              : Colors.grey[200],
-                                          borderRadius:
-                                              BorderRadius.circular(8),
-                                        ),
-                                        child: Icon(Icons.image_not_supported,
-                                            color: _isDarkMode
-                                                ? Colors.white54
-                                                : Colors.black54,
-                                            size: 40),
+                                // Full-size background (letterboxing/pillarboxing color)
+                                Positioned.fill(
+                                  child: Container(
+                                    color: _isDarkMode
+                                        ? Colors.grey[750]
+                                        : Colors.grey[300],
+                                  ),
+                                ),
+                                // Image is now always shown with its original aspect ratio, never cropped
+                                Center(
+                                  child: CachedNetworkImage(
+                                    imageUrl: imageUrl,
+                                    fit: BoxFit
+                                        .contain, // ← no cropping, full image visible
+                                    placeholder: (context, url) => Center(
+                                      child: CircularProgressIndicator(
+                                          color: themeColor),
+                                    ),
+                                    errorWidget: (context, url, error) =>
+                                        Center(
+                                      child: Icon(
+                                        Icons.broken_image,
+                                        color: _isDarkMode
+                                            ? Colors.white54
+                                            : Colors.black54,
+                                        size: 50,
                                       ),
-
-                                // Top-right URL icon if gist has a url
+                                    ),
+                                  ),
+                                ),
+                                // Link icon (if gist has a url) – made it properly circular + a bit larger
                                 if (gistUrl.isNotEmpty)
                                   Positioned(
-                                    top: 8,
-                                    right: 8,
+                                    top: 12,
+                                    right: 12,
                                     child: Material(
-                                      color: Colors.black45,
-                                      borderRadius: BorderRadius.circular(20),
+                                      color: Colors.transparent,
                                       child: InkWell(
-                                        borderRadius: BorderRadius.circular(20),
+                                        borderRadius: BorderRadius.circular(30),
                                         onTap: () async {
-                                          // open url in external browser
                                           final uri = Uri.tryParse(gistUrl);
                                           if (uri != null &&
                                               await canLaunchUrl(uri)) {
@@ -684,16 +672,22 @@ class _HomeScreenState extends State<HomeScreen> {
                                           } else {
                                             if (mounted) {
                                               ScaffoldMessenger.of(context)
-                                                  .showSnackBar(const SnackBar(
-                                                      content: Text(
-                                                          'Sorry, we couldn\'t open this link.')));
+                                                  .showSnackBar(
+                                                const SnackBar(
+                                                    content: Text(
+                                                        "Sorry, we couldn't open this link.")),
+                                              );
                                             }
                                           }
                                         },
-                                        child: Padding(
-                                          padding: const EdgeInsets.all(8.0),
-                                          child: Icon(Icons.link,
-                                              size: 18, color: Colors.white),
+                                        child: Container(
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: const BoxDecoration(
+                                            color: Colors.black54,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: const Icon(Icons.link,
+                                              size: 24, color: Colors.white),
                                         ),
                                       ),
                                     ),
@@ -701,7 +695,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               ],
                             ),
                           ),
-                        ));
+                        ),
+                      ),
+                    );
                   })),
       const SizedBox(height: 8),
       Center(
@@ -969,7 +965,7 @@ class _HomeScreenState extends State<HomeScreen> {
           .eq('user_id', user.id)
           .order('sent_at', ascending: false)
           .limit(50);
-      return resp as List<Map<String, dynamic>>;
+      return resp;
     } catch (e) {
       developer.log('Error fetching notifications: $e', name: 'notifications');
       return [];
@@ -1020,19 +1016,29 @@ class _HomeScreenState extends State<HomeScreen> {
                         itemCount: notifications.length,
                         itemBuilder: (ctx, i) {
                           final notif = notifications[i];
-                          final title = notif['title'] ?? 'New Gist';
+                          final title = notif['title'] ??
+                              'Notification'; // Use it here or remove if not needed
                           final body = notif['body'] ?? '';
-                          final gistId = notif['gist_id']?.toString();
+                          final data =
+                              notif['data'] ?? {}; // Remove unnecessary cast
+                          final gistId = data['gist_id']?.toString();
+                          final ticketId = data['ticket_id']?.toString();
                           return ListTile(
                             title: Text(title),
                             subtitle: Text(body),
-                            onTap: gistId != null
-                                ? () {
-                                    // deep-link to gist (replace with your gist view route)
-                                    Navigator.pushNamed(context, '/gist',
-                                        arguments: {'id': gistId});
-                                  }
-                                : null,
+                            onTap: () async {
+                              try {
+                                await supabase.from('notifications').update(
+                                    {'read': true}).eq('id', notif['id']);
+                              } catch (_) {}
+                              if (gistId != null) {
+                                Navigator.pushNamed(context, '/gist',
+                                    arguments: {'id': gistId});
+                              } else if (ticketId != null) {
+                                Navigator.pushNamed(context, '/ticket',
+                                    arguments: {'id': ticketId});
+                              }
+                            },
                           );
                         },
                       ),
