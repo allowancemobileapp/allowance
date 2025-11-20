@@ -1,15 +1,36 @@
 <!DOCTYPE html>
 <html>
   <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8" />
     <title>Allowance</title>
-    
-    <!-- THIS IS REQUIRED FOR FLUTTER WEB ROUTING ON VERCEL -->
-    <base href="/">
+
+    <!-- Required for Flutter Web routing on Vercel -->
+    <base href="/" />
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="favicon.png?v=3" />
+
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="manifest.json" />
+
+    <!-- iOS PWA Support -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+    <!-- Flutter Service Worker for PWA -->
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", function () {
+          navigator.serviceWorker.register("flutter_service_worker.js");
+        });
+      }
+    </script>
 
     <!-- Firebase JS SDK -->
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js"></script>
+
+    <!-- Firebase Setup -->
     <script>
       const firebaseConfig = {
         apiKey: "AIzaSyD4P3d4S1ZrhfBy9w4YqSP6i6u5b7fX4x0",
@@ -23,15 +44,12 @@
       firebase.initializeApp(firebaseConfig);
       const messaging = firebase.messaging();
 
-      // Required for web push notifications
-      navigator.serviceWorker.register('/firebase-messaging-sw.js')
-        .then((registration) => {
-          messaging.useServiceWorker(registration);
-        });
+      // Register Firebase Messaging service worker WITHOUT overriding Flutter's service worker
+      navigator.serviceWorker.register("/firebase-messaging-sw.js");
     </script>
   </head>
+
   <body>
-    <!-- Flutter web entrypoint -->
     <script src="main.dart.js" type="application/javascript"></script>
   </body>
 </html>
