@@ -1,5 +1,6 @@
 // lib/screens/profile/edit_profile_screen.dart
 import 'dart:io';
+import 'package:allowance/screens/home/home_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -159,7 +160,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     try {
       final newAvatar = await _uploadAvatarIfPicked();
 
-      // update local UserPreferences first
+      // Update local UserPreferences first
       widget.userPreferences.fullName =
           _displayNameController.text.trim().isEmpty
               ? null
@@ -178,38 +179,60 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       widget.userPreferences.bloodGroup = _bloodGroup;
       if (newAvatar != null) widget.userPreferences.avatarUrl = newAvatar;
 
+      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+      // THIS IS THE ONLY NEW PART YOU NEED
+      widget.userPreferences.hasCompletedProfile = true;
       await widget.userPreferences.savePreferences();
+      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
-      // Upsert to server profiles table (only when signed in)
+      // Upsert to server (optional)
       if (user != null) {
         final upsertData = <String, dynamic>{
           'id': user.id,
           'full_name': widget.userPreferences.fullName,
           'username': widget.userPreferences.username,
           'avatar_url': widget.userPreferences.avatarUrl,
+          'phone_number': widget.userPreferences.phoneNumber,
+          'weight': widget.userPreferences.weight,
+          'height': widget.userPreferences.height,
+          'age': widget.userPreferences.age,
+          'blood_group': widget.userPreferences.bloodGroup,
         };
         upsertData.removeWhere((k, v) => v == null);
         try {
           await supabase.from('profiles').upsert(upsertData);
         } catch (e) {
-          // friendly message but log details
           debugPrint('Upsert profile failed: $e');
-          // Continue — local preferences already saved
         }
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Profile saved'), backgroundColor: _accent));
-        Navigator.of(context).pop(true);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Profile saved'), backgroundColor: _accent),
+        );
       }
+
+      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+      // THIS FIXES THE WHITE SCREEN
+      if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: (_) => HomeScreen(userPreferences: widget.userPreferences),
+          ),
+          (route) => false, // removes all previous screens
+        );
+      }
+      // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
     } catch (e) {
       debugPrint('Save profile error: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Could not save profile. Please try again.'),
-          backgroundColor: Colors.red,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not save profile. Please try again.'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);

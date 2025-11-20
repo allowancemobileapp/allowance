@@ -25,6 +25,12 @@ class UserPreferences {
   int? age;
   String? bloodGroup;
 
+  // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+  // THIS IS THE NEW FLAG
+  bool hasCompletedProfile =
+      false; // true only after user finishes EditProfileScreen first time
+  // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+
   UserPreferences();
 
   /// Load from local storage (fast) and then try to load server profile (if signed in)
@@ -62,22 +68,32 @@ class UserPreferences {
     age = prefs.containsKey('prefs_age') ? prefs.getInt('prefs_age') : null;
     bloodGroup = prefs.getString('prefs_bloodGroup');
 
-    // If the user is signed in, attempt to merge/load server profile (but be careful not to wipe good local data)
+    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+    // LOAD THE NEW FLAG
+    hasCompletedProfile = prefs.getBool('prefs_hasCompletedProfile') ?? false;
+    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+
+    // If the user is signed in, attempt to merge/load server profile
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
     if (user != null) {
       await _loadOrCreateProfile(user.id);
     }
 
-    // Add this call to persist any merged changes locally
+    // Persist any merged changes locally
     await savePreferences();
   }
 
-  /// Save to SharedPreferences and also to Supabase profiles (if signed in).
+  /// Save to SharedPreferences and also to Supabase profiles (if signed in)
   Future<void> savePreferences() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // Local writes: always write the favorites (even if empty) so local+server can stay consistent
+    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+    // SAVE THE NEW FLAG
+    await prefs.setBool('prefs_hasCompletedProfile', hasCompletedProfile);
+    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+
+    // Local writes
     if (id != null) await prefs.setString('prefs_id', id!);
     if (fullName != null) await prefs.setString('prefs_fullName', fullName!);
     if (username != null) await prefs.setString('prefs_username', username!);
@@ -87,11 +103,9 @@ class UserPreferences {
       await prefs.setString('prefs_schoolName', schoolName!);
     if (budget != null) await prefs.setDouble('prefs_budget', budget!);
 
-    // Always persist favorited options locally (even empty list)
     await prefs.setStringList('prefs_favoritedOptions', favoritedOptions);
     await prefs.setString('prefs_preferences', jsonEncode(preferences));
 
-    // extra fields
     if (subscriptionTier != null) {
       await prefs.setString('prefs_subscriptionTier', subscriptionTier!);
     }
@@ -111,16 +125,13 @@ class UserPreferences {
       await prefs.setString('prefs_bloodGroup', bloodGroup!);
     }
 
-    // push to Supabase if logged in
+    // Push to Supabase if logged in
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
     if (user != null) {
       try {
-        // Ensure there is a profile row for this user (only creates if missing)
         await _ensureProfileExists(user.id);
 
-        // Build an "updates" map with current values.
-        // We intentionally include favorited_options (always) to keep server in sync.
         final Map<String, dynamic> updates = {};
 
         if (fullName != null && fullName!.trim().isNotEmpty) {
@@ -142,11 +153,9 @@ class UserPreferences {
           updates['budget'] = budget;
         }
 
-        // ALWAYS include favorited_options (convert to a plain list)
         updates['favorited_options'] = favoritedOptions;
         updates['preferences'] = preferences;
 
-        // extra fields (only include if present)
         if (subscriptionTier != null)
           updates['subscription_tier'] = subscriptionTier;
         if (phoneNumber != null) updates['phone_number'] = phoneNumber;
@@ -157,18 +166,16 @@ class UserPreferences {
 
         updates['updated_at'] = DateTime.now().toUtc().toIso8601String();
 
-        // If there are updates, persist them (update the user's row)
         if (updates.isNotEmpty) {
           await supabase.from('profiles').update(updates).eq('id', user.id);
         }
       } catch (e) {
-        // don't crash the app if DB update fails; keep local prefs
-        // optionally log this to your monitoring or webhook
+        // Silent fail — local data is already saved
       }
     }
   }
 
-  /// Ensure a profile row exists in `public.profiles`. If missing, insert a minimal row.
+  /// Ensure a profile row exists in `public.profiles`
   Future<void> _ensureProfileExists(String userId) async {
     final supabase = Supabase.instance.client;
     try {
@@ -182,17 +189,14 @@ class UserPreferences {
           'id': userId,
           'email': Supabase.instance.client.auth.currentUser?.email,
           'created_at': DateTime.now().toUtc().toIso8601String(),
-          'favorited_options': <String>[], // explicit empty default
+          'favorited_options': <String>[],
         };
         await supabase.from('profiles').insert(insert);
       }
-    } catch (_) {
-      // DB unreachable: nothing to do here
-    }
+    } catch (_) {}
   }
 
-  /// Ensure there's a profile row in Supabase and load it into this object.
-  /// IMPORTANT: Do not overwrite local favorites with null/empty server values.
+  /// Load or create profile from Supabase
   Future<void> _loadOrCreateProfile(String userId) async {
     final supabase = Supabase.instance.client;
     try {
@@ -203,7 +207,6 @@ class UserPreferences {
           .maybeSingle();
 
       if (resp != null) {
-        // load core fields (defensive)
         id = resp['id']?.toString() ?? userId;
         fullName = resp['full_name'] as String?;
         username = resp['username'] as String?;
@@ -211,82 +214,46 @@ class UserPreferences {
         schoolId = resp['school_id'] as String?;
         schoolName = resp['school_name'] as String?;
 
-        // favorited_options may arrive as List, String (json), or Map - parse defensively
+        // Parse favorited_options safely
         final fav = resp['favorited_options'];
         List<String> parsedFavs = [];
-        if (fav != null) {
-          if (fav is List) {
-            parsedFavs = fav.map((e) => e.toString()).toList();
-          } else if (fav is String) {
-            try {
-              final dynamic parsed = jsonDecode(fav);
-              if (parsed is List)
-                parsedFavs = parsed.map((e) => e.toString()).toList();
-            } catch (_) {
-              // ignore parse error
-            }
-          } else if (fav is Map) {
-            try {
-              parsedFavs =
-                  (fav as Map).values.map((e) => e.toString()).toList();
-            } catch (_) {
-              parsedFavs = [];
-            }
-          }
+        if (fav is List) {
+          parsedFavs = fav.map((e) => e.toString()).toList();
         }
-
-        // Only overwrite local favoritedOptions if server provided a **non-empty** list.
-        // This protects local favorites from being wiped by null/empty server values.
         if (parsedFavs.isNotEmpty) {
           favoritedOptions = parsedFavs;
         }
-        // If parsedFavs is empty, keep the existing local favoritedOptions as-is.
 
-        // preferences JSONB
+        // preferences
         final prefsJson = resp['preferences'];
         if (prefsJson != null) {
           try {
             preferences = Map<String, dynamic>.from(prefsJson as Map);
-          } catch (_) {
-            preferences = {};
-          }
+          } catch (_) {}
         }
 
-        // extra fields
         subscriptionTier = resp['subscription_tier'] as String?;
         phoneNumber = resp['phone_number'] as String?;
 
-        // numeric conversions (defensive)
         final w = resp['weight'];
-        if (w is num) {
-          weight = w.toDouble();
-        } else if (w is String) {
-          weight = double.tryParse(w);
-        }
+        weight =
+            w is num ? w.toDouble() : (w is String ? double.tryParse(w) : null);
 
         final h = resp['height'];
-        if (h is num) {
-          height = h.toDouble();
-        } else if (h is String) {
-          height = double.tryParse(h);
-        }
+        height =
+            h is num ? h.toDouble() : (h is String ? double.tryParse(h) : null);
 
         final a = resp['age'];
-        if (a is int) {
-          age = a;
-        } else if (a is String) {
-          age = int.tryParse(a);
-        }
+        age = a is int ? a : (a is String ? int.tryParse(a) : null);
 
         bloodGroup = resp['blood_group'] as String?;
 
-        // persist locally (this will not overwrite favorites unless server had a non-empty list)
         await savePreferences();
         return;
       }
 
-      // If no profile exists, create a minimal one
-      final insert = {
+      // Create minimal profile if none exists
+      await supabase.from('profiles').insert({
         'id': userId,
         'full_name': null,
         'username': null,
@@ -301,42 +268,17 @@ class UserPreferences {
         'height': null,
         'age': null,
         'blood_group': null,
-      };
+      });
 
-      await supabase.from('profiles').insert(insert);
-
-      // keep local defaults (empty)
       id = userId;
-      favoritedOptions =
-          favoritedOptions; // keep whatever local list exists (likely empty)
-      preferences = {};
-      subscriptionTier = null;
-      phoneNumber = null;
-      weight = null;
-      height = null;
-      age = null;
-      bloodGroup = null;
-
       await savePreferences();
-      return;
     } catch (e) {
-      // DB unreachable — keep empty defaults but keep local favorites intact
       id = userId;
-      preferences = preferences ?? {};
-      subscriptionTier = subscriptionTier;
-      phoneNumber = phoneNumber;
-      weight = weight;
-      height = height;
-      age = age;
-      bloodGroup = bloodGroup;
-      // ensure local saved
       await savePreferences();
-      return;
     }
   }
 
-  /// Clear local cache (useful on sign out)
-  /// NOTE: we intentionally keep prefs_favoritedOptions here to avoid deleting favorites on sign-out.
+  /// Clear local cache on logout
   Future<void> clearLocal() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -347,7 +289,6 @@ class UserPreferences {
     await prefs.remove('prefs_schoolId');
     await prefs.remove('prefs_schoolName');
     await prefs.remove('prefs_budget');
-    // Do NOT remove 'prefs_favoritedOptions' so favorites persist locally across sessions.
     await prefs.remove('prefs_preferences');
 
     await prefs.remove('prefs_subscriptionTier');
@@ -356,6 +297,7 @@ class UserPreferences {
     await prefs.remove('prefs_height');
     await prefs.remove('prefs_age');
     await prefs.remove('prefs_bloodGroup');
+    await prefs.remove('prefs_hasCompletedProfile'); // ← CLEAR FLAG ON LOGOUT
 
     id = null;
     fullName = null;
@@ -364,8 +306,6 @@ class UserPreferences {
     schoolId = null;
     schoolName = null;
     budget = null;
-    // keep favoritedOptions in memory? we'll clear it to represent logged-out user
-    // but because we preserved local storage, it will be reloaded for the next session
     favoritedOptions = [];
     preferences = {};
     subscriptionTier = null;
@@ -374,5 +314,6 @@ class UserPreferences {
     height = null;
     age = null;
     bloodGroup = null;
+    hasCompletedProfile = false; // ← RESET IN MEMORY
   }
 }

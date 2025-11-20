@@ -15,6 +15,7 @@ import 'firebase_options.dart';
 import 'models/user_preferences.dart';
 import 'screens/introduction/introduction_screen.dart';
 import 'screens/home/home_screen.dart';
+import 'screens/profile/edit_profile_screen.dart'; // ← ADD THIS IMPORT
 import 'shared/services/fcm_service.dart';
 
 Future<void> main() async {
@@ -139,7 +140,9 @@ class _AllowanceAppState extends State<AllowanceApp> {
               onFinishIntro: () {},
               userPreferences: _userPreferences,
             )
-          : HomeScreen(userPreferences: _userPreferences),
+          : (_userPreferences.hasCompletedProfile == true
+              ? HomeScreen(userPreferences: _userPreferences)
+              : EditProfileScreen(userPreferences: _userPreferences)),
     );
   }
 }
