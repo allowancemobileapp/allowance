@@ -1,6 +1,5 @@
 // lib/screens/home/ticket_submission_screen.dart
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -56,10 +55,15 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
 
   Future<void> _pickImage() async {
     final picker = ImagePicker();
-    final image =
-        await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
-    if (image != null && mounted) {
-      setState(() => _pickedImage = image);
+    final picked = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 80,
+    );
+
+    if (!mounted) return;
+
+    if (picked != null) {
+      setState(() => _pickedImage = picked);
     }
   }
 
@@ -100,41 +104,30 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
   }) async {
     final supabase = Supabase.instance.client;
 
-    // 1. Read file bytes (works for Android content URIs)
+    // ----------------------------
+    // 1. Read bytes (works on Web + Mobile)
+    // ----------------------------
     final Uint8List bytes = await _pickedImage!.readAsBytes();
 
-    bool uploaded = false;
-
-    // 2. Attempt uploadBinary first (new SDKs)
+    // ----------------------------
+    // 2. Upload using uploadBinary (the correct method for Web + Mobile)
+    // ----------------------------
     try {
       await supabase.storage.from(bucket).uploadBinary(
             path,
             bytes,
-            fileOptions: const FileOptions(upsert: false),
+            fileOptions: const FileOptions(
+              upsert: false,
+              contentType: 'image/jpeg', // or image/png
+            ),
           );
-      uploaded = true;
-    } catch (eBinary) {
-      // 3. Fallback to File upload (older SDKs)
-      try {
-        final file = File(_pickedImage!.path);
-        await supabase.storage.from(bucket).upload(
-              path,
-              file,
-              fileOptions: const FileOptions(upsert: false),
-            );
-        uploaded = true;
-      } catch (eFile) {
-        throw Exception(
-          'Upload failed.\nBinary error: $eBinary\nFile error: $eFile',
-        );
-      }
+    } catch (e) {
+      throw Exception('Upload failed: $e');
     }
 
-    if (!uploaded) {
-      throw Exception('Upload did not complete.');
-    }
-
-    // 4. Get the public URL (different SDKs return different shapes)
+    // ----------------------------
+    // 3. Get public URL safely
+    // ----------------------------
     dynamic resp;
 
     try {
@@ -145,43 +138,15 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
 
     String publicUrl = '';
 
-    // Case 1 — String
     if (resp is String) {
       publicUrl = resp;
-    }
-
-    // Case 2 — Map (SDK variant: {"publicUrl": "..."} or {"data": {"publicUrl": "..."}})
-    else if (resp is Map) {
-      try {
-        final map = resp;
-
-        // Try publicUrl
-        if (map['publicUrl'] != null) {
-          publicUrl = map['publicUrl'].toString();
-        }
-        // Try nested data.publicUrl
-        else if (map['data'] is Map &&
-            (map['data'] as Map)['publicUrl'] != null) {
-          publicUrl = (map['data'] as Map)['publicUrl'].toString();
-        }
-        // Try uppercase variants
-        else if (map['publicURL'] != null) {
-          publicUrl = map['publicURL'].toString();
-        } else if (map['data'] is Map &&
-            (map['data'] as Map)['publicURL'] != null) {
-          publicUrl = (map['data'] as Map)['publicURL'].toString();
-        }
-        // Worst case — stringified map
-        else {
-          publicUrl = map.toString();
-        }
-      } catch (eMap) {
-        throw Exception('Unexpected getPublicUrl() map format: $eMap');
-      }
-    }
-
-    // Case 3 — Other object → toString fallback
-    else if (resp != null) {
+    } else if (resp is Map) {
+      publicUrl = resp['publicUrl'] ??
+          resp['publicURL'] ??
+          resp['data']?['publicUrl'] ??
+          resp['data']?['publicURL'] ??
+          resp.toString();
+    } else {
       publicUrl = resp.toString();
     }
 
@@ -502,9 +467,17 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
                   ),
                   if (_pickedImage != null) ...[
                     const SizedBox(height: 8),
-                    Image.file(File(_pickedImage!.path),
-                        height: MediaQuery.of(context).size.width * 0.6,
-                        fit: BoxFit.cover),
+                    FutureBuilder<Uint8List>(
+                      future: _pickedImage!.readAsBytes(),
+                      builder: (context, snapshot) {
+                        if (!snapshot.hasData) return const SizedBox();
+                        return Image.memory(
+                          snapshot.data!,
+                          height: MediaQuery.of(context).size.width * 0.6,
+                          fit: BoxFit.cover,
+                        );
+                      },
+                    ),
                   ],
                   const SizedBox(height: 20),
                   SizedBox(

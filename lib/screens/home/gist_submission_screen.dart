@@ -1,6 +1,8 @@
 // lib/screens/home/gist_submission_screen.dart
 
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -57,6 +59,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
   late Future<List<Map<String, dynamic>>> _schoolsFuture;
   bool _isSubmitting = false;
+  Uint8List? _pickedImageBytes;
 
   @override
   void initState() {
@@ -99,9 +102,24 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
   Future<void> _pickImage() async {
     final picker = ImagePicker();
-    final image =
-        await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
-    if (image != null && mounted) setState(() => _pickedImage = image);
+
+    final picked = await picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 80,
+    );
+
+    if (!mounted) return;
+
+    if (picked != null) {
+      Uint8List? bytes;
+      if (kIsWeb) {
+        bytes = await picked.readAsBytes();
+      }
+      setState(() {
+        _pickedImage = picked;
+        if (bytes != null) _pickedImageBytes = bytes;
+      });
+    }
   }
 
   Future<void> _submitGist() async {
@@ -151,26 +169,36 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     }
 
     setState(() => _isSubmitting = true);
-    String? draftGistId;
+    int? draftGistId; // ← now int
 
     try {
       // ---------- 1) Upload image to storage ----------
       const bucket = 'gist-images';
-      final file = File(_pickedImage!.path);
-      final ext = _pickedImage!.path.split('.').last;
+      final ext = _pickedImage!.name.split('.').last;
       final filePath = 'gists/${const Uuid().v4()}.$ext';
 
-      await supabase.storage.from(bucket).upload(filePath, file);
+      // IMPORTANT: Web uses bytes, Mobile uses File
+      if (kIsWeb) {
+        // WEB upload
+        final bytes = await _pickedImage!.readAsBytes();
+        await supabase.storage.from(bucket).uploadBinary(
+              filePath,
+              bytes,
+              fileOptions: const FileOptions(contentType: 'image/*'),
+            );
+      } else {
+        // MOBILE upload
+        final file = File(_pickedImage!.path);
+        await supabase.storage.from(bucket).upload(filePath, file);
+      }
 
-      // get public url (supabase_flutter typically returns String)
       final publicUrl = supabase.storage.from(bucket).getPublicUrl(filePath);
 
       // ---------- 2) Create draft gist (paid: false) ----------
       final now = DateTime.now().toUtc();
-      final startDateStr = now.toIso8601String().split('T').first; // YYYY-MM-DD
+      final startDateStr = now.toIso8601String().split('T').first;
       final numDays = int.tryParse(_durationController.text) ?? 0;
       final pricePerDay = _pricePerDay;
-      final createdAt = now.toIso8601String();
 
       final Map<String, dynamic> draftPayload = {
         'user_id': user.id,
@@ -184,7 +212,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'payment_reference': null,
         'start_date': startDateStr,
         'status': 'draft',
-        'created_at': createdAt,
+        'created_at': now.toIso8601String(),
       };
 
       if (chosenSchoolId != null && chosenSchoolId.isNotEmpty) {
@@ -195,42 +223,20 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       final providedUrl = _urlController.text.trim();
       if (providedUrl.isNotEmpty) draftPayload['url'] = providedUrl;
 
+      // ← FIXED: use .single() and get real int ID
       final insertResp = await supabase
           .from('gists')
           .insert(draftPayload)
           .select('id')
-          .maybeSingle();
+          .single();
 
-      // normalize insert response to get id
-      dynamic returnedId;
-      if (insertResp == null) {
-        throw Exception('Failed to create draft gist (no response).');
-      } else if (insertResp is Map && insertResp.containsKey('id')) {
-        returnedId = insertResp['id'];
-      } else if (insertResp is List &&
-          insertResp.isNotEmpty &&
-          insertResp[0] is Map &&
-          insertResp[0].containsKey('id')) {
-        returnedId = insertResp[0]['id'];
-      } else if (insertResp is Map && insertResp.values.isNotEmpty) {
-        final first = insertResp.values.first;
-        if (first is Map && first.containsKey('id')) returnedId = first['id'];
-      }
+      draftGistId = insertResp['id'] as int; // ← now correctly an int
 
-      if (returnedId == null) {
-        throw Exception('Failed to retrieve draft gist id.');
-      }
-      draftGistId = returnedId.toString();
-
-      // ---------- 3) Prepare payment init (DIRECT PAYSTACK) ----------
+      // ---------- 3) Payment Init ----------
       final totalNaira = (pricePerDay * numDays).toInt();
       if (totalNaira <= 0) {
-        // remove draft if invalid total
-        if (draftGistId != null) {
-          try {
-            await supabase.from('gists').delete().eq('id', draftGistId);
-          } catch (_) {}
-        }
+        await supabase.from('gists').delete().eq('id', draftGistId);
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Enter a valid number of days')),
@@ -241,7 +247,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
       final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
       if (paystackSecretKey == null || paystackSecretKey.isEmpty) {
-        // critical: don't proceed without secret
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Missing Paystack secret key')),
@@ -250,14 +255,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         return;
       }
 
-      // generate a stable reference we'll use for verification
       final reference = 'gist_${const Uuid().v4()}';
 
       final payload = {
-        'amount': totalNaira * 100, // amount in kobo
+        'amount': totalNaira * 100,
         'email': user.email ?? '',
         'reference': reference,
-        'metadata': {'gist_id': draftGistId}
+        'metadata': {'gist_id': draftGistId.toString()}, // ← safe for Paystack
       };
 
       final httpResp = await http.post(
@@ -270,12 +274,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       );
 
       if (httpResp.statusCode < 200 || httpResp.statusCode >= 300) {
-        // cleanup draft if init fails
-        if (draftGistId != null) {
-          try {
-            await supabase.from('gists').delete().eq('id', draftGistId);
-          } catch (_) {}
-        }
+        await supabase.from('gists').delete().eq('id', draftGistId);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -286,39 +285,31 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       }
 
       final respJson = jsonDecode(httpResp.body) as Map<String, dynamic>? ?? {};
-      final authUrl = respJson['data']?['authorization_url'] ??
-          respJson['authorization_url'] ??
-          '';
+      final authUrl = respJson['data']?['authorization_url'] ?? '';
 
-      if (authUrl == null || (authUrl as String).isEmpty) {
-        // cleanup draft if no URL
-        if (draftGistId != null) {
-          try {
-            await supabase.from('gists').delete().eq('id', draftGistId);
-          } catch (_) {}
-        }
+      if (authUrl.isEmpty) {
+        await supabase.from('gists').delete().eq('id', draftGistId);
         if (mounted) {
-          final msg = respJson['message'] ?? 'Failed to initialize payment.';
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Payment init error: $msg')),
+            SnackBar(
+                content: Text(
+                    respJson['message'] ?? 'Failed to initialize payment')),
           );
         }
         return;
       }
 
-      // ---------- 4) Open checkout URL ----------
       final uri = Uri.parse(authUrl.toString());
+
       try {
         bool launched =
             await launchUrl(uri, mode: LaunchMode.externalApplication);
 
-        // fallback: use platform default if external app not available
         if (!launched) {
           launched = await launchUrl(uri, mode: LaunchMode.platformDefault);
         }
 
         if (!launched) {
-          // don't delete draft — allow user to retry manually later
           throw 'No browser available to open Paystack checkout.';
         }
 
@@ -330,25 +321,19 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           );
         }
 
-        // Prompt the user to verify the payment using the reference and the draft id
-        // (this uses your _promptVerify implementation)
+        // ← FIXED: pass int (non-null because we just inserted)
         await _promptVerify(reference, draftGistId, numDays);
       } catch (e) {
-        // do not aggressively delete draft here: allow user to retry verification
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not open the payment page: $e')),
+            SnackBar(content: Text('Could not open payment page: $e')),
           );
         }
       }
     } catch (e) {
-      // try to clean up draft if created and error is terminal
       if (draftGistId != null) {
         try {
-          await Supabase.instance.client
-              .from('gists')
-              .delete()
-              .eq('id', draftGistId);
+          await supabase.from('gists').delete().eq('id', draftGistId);
         } catch (_) {}
       }
       if (mounted) {
@@ -371,7 +356,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   /// Returns true if payment verified and DB patched.
   /// amountPaidUnit: the amount Paystack returned (lowest currency unit, e.g., kobo)
   Future<bool> _verifyPayment(
-      String reference, String gistId, int numberOfDays) async {
+      String reference, int gistId, int numberOfDays) async {
     final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
     if (paystackSecretKey == null || paystackSecretKey.isEmpty) {
       if (mounted) {
@@ -439,13 +424,9 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       final paymentRef = data['reference'] ?? reference;
 
       // 2) Compute end_date from now or from start_date+numberOfDays.
-      // We'll set end_date = now + numberOfDays days (timestamp)
-      // Optionally you can prefer the stored start_date if you set it earlier.
       final now = DateTime.now().toUtc();
       final endDate = now.add(Duration(days: numberOfDays));
 
-      // 3) Patch gist row in Supabase using service role key (client-side we use anon key; patch allowed if policies permit)
-      // Prefer using authenticated update (user must be owner) — here we update paid/status/payment_reference/amount_paid/end_date.
       final supabase = Supabase.instance.client;
 
       final updatePayload = {
@@ -460,20 +441,17 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       final updateResp = await supabase
           .from('gists')
           .update(updatePayload)
-          .eq('id', gistId)
+          .eq('id', gistId) // ← now int → int, perfect
           .select()
           .maybeSingle();
 
-      // Accept a variety of driver responses - success if no exception thrown.
-      // If the update failed (null response or error), handle gracefully:
       if (updateResp == null) {
-        // Could still be success server-side but driver returned null; check by fetching row.
         final check = await supabase
             .from('gists')
             .select('paid, status')
-            .eq('id', gistId)
+            .eq('id', gistId) // ← int
             .maybeSingle();
-        if (check == null || (check is Map && check['paid'] != true)) {
+        if (check == null || (check['paid'] != true)) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
@@ -484,7 +462,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         }
       }
 
-      // success
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -498,18 +475,17 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         final gistType = (await supabase
                 .from('gists')
                 .select('type')
-                .eq('id', gistId)
+                .eq('id', gistId) // ← int
                 .maybeSingle())?['type'] ??
             'global';
         await fn.invoke('send-push-for-gist', body: {
-          'gistId': gistId.toString(),
+          'gistId': gistId.toString(), // ← only here we need string
           'title': 'New gist published!',
           'body': 'Check out the latest gist on Allowance.',
           'type': gistType,
         });
       } catch (e) {
         developer.log('Error invoking Edge Function: $e', name: 'fcm');
-        // non-fatal: continue even if notify fails
       }
 
       return true;
@@ -525,7 +501,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
   /// After launching the checkout URL, call this to prompt the user to Verify (simple UI).
   Future<void> _promptVerify(
-      String reference, String gistId, int numberOfDays) async {
+      String reference, int gistId, int numberOfDays) async {
     // show dialog with Verify button
     final didVerify = await showDialog<bool>(
       context: context,
@@ -579,7 +555,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         }
       } else {
         // good — pop screen or refresh feed
-        // you might navigate back or refresh HomeScreen
         if (mounted) {
           Navigator.of(context)
               .pop(); // close gist submission screen if desired
@@ -737,7 +712,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 ),
                 if (_pickedImage != null) ...[
                   const SizedBox(height: 8),
-                  Image.file(File(_pickedImage!.path), height: 120),
+                  kIsWeb
+                      ? Image.memory(_pickedImageBytes!,
+                          height: 120, fit: BoxFit.cover)
+                      : Image.file(File(_pickedImage!.path),
+                          height: 120, fit: BoxFit.cover),
                 ],
                 const SizedBox(height: 16),
                 Row(
