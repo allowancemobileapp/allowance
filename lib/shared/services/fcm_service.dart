@@ -119,12 +119,20 @@ void registerFcmListeners(BuildContext context) {
   FirebaseMessaging.onMessage.listen((RemoteMessage message) {
     final title = message.notification?.title ?? '';
     final body = message.notification?.body ?? '';
+
     if (title.isNotEmpty || body.isNotEmpty) {
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         SnackBar(
-          content: Text('$title\n$body'),
+          content: Text(
+            '$title\n$body',
+            style: const TextStyle(
+              color: Colors.white, // ← WHITE TEXT (fixed)
+              fontSize: 16,
+            ),
+          ),
           duration: const Duration(seconds: 5),
           backgroundColor: Colors.black87,
+          behavior: SnackBarBehavior.floating,
         ),
       );
     }

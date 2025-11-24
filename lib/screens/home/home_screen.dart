@@ -982,7 +982,8 @@ class _HomeScreenState extends State<HomeScreen> {
       isScrollControlled: true,
       backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
       builder: (sheetContext) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.6,
@@ -1010,33 +1011,60 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               Expanded(
                 child: notifications.isEmpty
-                    ? const Center(child: Text('No notifications yet.'))
+                    ? Center(
+                        child: Text(
+                          'No notifications yet.',
+                          style: TextStyle(
+                            color: _isDarkMode ? Colors.white : Colors.black,
+                          ),
+                        ),
+                      )
                     : ListView.builder(
                         controller: scrollController,
                         itemCount: notifications.length,
                         itemBuilder: (ctx, i) {
                           final notif = notifications[i];
-                          final title = notif['title'] ??
-                              'Notification'; // Use it here or remove if not needed
+                          final title = notif['title'] ?? 'Notification';
                           final body = notif['body'] ?? '';
-                          final data =
-                              notif['data'] ?? {}; // Remove unnecessary cast
+                          final data = notif['data'] ?? {};
                           final gistId = data['gist_id']?.toString();
                           final ticketId = data['ticket_id']?.toString();
+
                           return ListTile(
-                            title: Text(title),
-                            subtitle: Text(body),
+                            title: Text(
+                              title,
+                              style: TextStyle(
+                                color:
+                                    _isDarkMode ? Colors.white : Colors.black,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            subtitle: Text(
+                              body,
+                              style: TextStyle(
+                                color: _isDarkMode
+                                    ? Colors.white70
+                                    : Colors.grey[700],
+                              ),
+                            ),
                             onTap: () async {
                               try {
                                 await supabase.from('notifications').update(
                                     {'read': true}).eq('id', notif['id']);
                               } catch (_) {}
+
                               if (gistId != null) {
-                                Navigator.pushNamed(context, '/gist',
-                                    arguments: {'id': gistId});
+                                Navigator.pushNamed(
+                                  context,
+                                  '/gist',
+                                  arguments: {'id': gistId},
+                                );
                               } else if (ticketId != null) {
-                                Navigator.pushNamed(context, '/ticket',
-                                    arguments: {'id': ticketId});
+                                Navigator.pushNamed(
+                                  context,
+                                  '/ticket',
+                                  arguments: {'id': ticketId},
+                                );
                               }
                             },
                           );
