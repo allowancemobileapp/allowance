@@ -1,4 +1,4 @@
-// lib/screens/home/ticket_screen.dart
+// lib/screens/home/ticket_screen.dart (updated for bottom sheet menu and multi-quantity purchase)
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -8,6 +8,9 @@ import 'package:intl/intl.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
+import 'my_tickets_screen.dart';
+import 'ticket_history_screen.dart';
+import '../../shared/services/ticket_service.dart'; // Add this import for TicketService
 
 class Ticket {
   final int id;
@@ -93,6 +96,42 @@ class _TicketScreenState extends State<TicketScreen> {
     }
   }
 
+  void _showMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[850],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            title:
+                const Text('My Tickets', style: TextStyle(color: Colors.white)),
+            onTap: () {
+              Navigator.pop(ctx);
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const MyTicketsScreen()),
+              );
+            },
+          ),
+          ListTile(
+            title: const Text('History', style: TextStyle(color: Colors.white)),
+            onTap: () {
+              Navigator.pop(ctx);
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const TicketHistoryScreen()),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -104,7 +143,13 @@ class _TicketScreenState extends State<TicketScreen> {
         centerTitle: true,
         leading: const BackButton(color: Colors.white),
         title: Image.asset('assets/images/tickets.png', height: 110),
-        actions: const [SizedBox(width: kToolbarHeight)],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.menu, color: Colors.white),
+            onPressed: _showMenu,
+          ),
+          const SizedBox(width: 16),
+        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -216,6 +261,17 @@ class _TicketCardState extends State<_TicketCard> {
       );
       return;
     }
+
+    final quantity = await _showQuantityDialog();
+    if (quantity == null || quantity <= 0) return;
+
+    if (widget.event.ticketsRemaining < quantity) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Not enough tickets available.')),
+      );
+      return;
+    }
+
     final priceNaira = widget.event.price.toInt();
     if (priceNaira <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -225,6 +281,7 @@ class _TicketCardState extends State<_TicketCard> {
       );
       return;
     }
+
     setState(() => _isProcessing = true);
     final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
     if (paystackSecretKey == null || paystackSecretKey.isEmpty) {
@@ -240,7 +297,7 @@ class _TicketCardState extends State<_TicketCard> {
       final reference =
           'ticket_${widget.event.id}_${DateTime.now().millisecondsSinceEpoch}';
       final payload = {
-        'amount': priceNaira * 100, // amount in kobo
+        'amount': priceNaira * quantity * 100, // in kobo
         'email': user.email ?? '',
         'reference': reference,
         'metadata': {'ticket_id': widget.event.id, 'user_id': user.id}
@@ -269,26 +326,25 @@ class _TicketCardState extends State<_TicketCard> {
       final uri = Uri.parse(authUrl);
       bool launched =
           await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!launched) {
+      if (!launched)
         launched = await launchUrl(uri, mode: LaunchMode.platformDefault);
-      }
       if (!launched)
         throw 'Unable to open the payment page. Please check your browser settings.';
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content: Text('Payment page opened — verify after payment')),
       );
-      await _promptVerify(reference, widget.event.id, priceNaira);
+      await _promptVerify(reference, widget.event.id, priceNaira, quantity);
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Payment error: $e')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Payment error: $e')));
     } finally {
       setState(() => _isProcessing = false);
     }
   }
 
-  Future<void> _promptVerify(String reference, int ticketId, int amount) async {
+  Future<void> _promptVerify(
+      String reference, int ticketId, int amount, int quantity) async {
     final shouldVerify = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -315,7 +371,7 @@ class _TicketCardState extends State<_TicketCard> {
         barrierDismissible: false,
         builder: (_) => const Center(child: CircularProgressIndicator()),
       );
-      final ok = await _verifyPayment(reference, ticketId, amount);
+      final ok = await _verifyPayment(reference, ticketId, amount, quantity);
       if (mounted) Navigator.pop(context);
       if (ok && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -327,10 +383,8 @@ class _TicketCardState extends State<_TicketCard> {
   }
 
   Future<bool> _verifyPayment(
-      String reference, int ticketId, int amount) async {
+      String reference, int ticketId, int amount, int quantity) async {
     final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
-    final supabase = Supabase.instance.client;
-    final user = supabase.auth.currentUser!;
     try {
       final verifyUrl =
           Uri.parse('https://api.paystack.co/transaction/verify/$reference');
@@ -343,18 +397,22 @@ class _TicketCardState extends State<_TicketCard> {
       );
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
       if (resp.statusCode != 200 || data['data']?['status'] != 'success') {
+        // Optional: Insert failed transaction
+        await TicketService.instance.purchaseTickets(
+          ticketId: ticketId,
+          quantity: quantity,
+          paymentReference: reference,
+          amountPaid: amount * quantity,
+          status: 'failed',
+        );
         return false;
       }
-      await supabase.from('ticket_purchases').insert({
-        'user_id': user.id,
-        'ticket_id': ticketId,
-        'payment_reference': reference,
-        'amount_paid': amount * 100,
-      });
-      await supabase
-          .from('tickets')
-          .update({'tickets_remaining': widget.event.ticketsRemaining - 1}).eq(
-              'id', ticketId);
+      await TicketService.instance.purchaseTickets(
+        ticketId: ticketId,
+        quantity: quantity,
+        paymentReference: reference,
+        amountPaid: amount * quantity, // Total in Naira
+      );
       return true;
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -364,6 +422,38 @@ class _TicketCardState extends State<_TicketCard> {
       );
       return false;
     }
+  }
+
+  Future<int?> _showQuantityDialog() async {
+    int qty = 1;
+    return showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('How many tickets?',
+            style: TextStyle(color: Colors.white)),
+        content: StatefulBuilder(
+          builder: (ctx, setState) => Slider(
+            value: qty.toDouble(),
+            min: 1,
+            max: widget.event.ticketsRemaining.clamp(1, 10).toDouble(),
+            divisions: widget.event.ticketsRemaining.clamp(1, 10) - 1,
+            label: qty.toString(),
+            activeColor: widget.themeColor,
+            onChanged: (v) => setState(() => qty = v.round()),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel',
+                  style: TextStyle(color: Colors.white70))),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, qty),
+              child: Text('OK', style: TextStyle(color: widget.themeColor))),
+        ],
+      ),
+    );
   }
 
   @override

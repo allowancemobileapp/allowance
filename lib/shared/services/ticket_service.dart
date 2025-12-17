@@ -75,4 +75,56 @@ class TicketService {
     if (res == null) return null;
     return res as Map<String, dynamic>;
   }
+
+  /// Purchases [quantity] tickets for the given [ticketId].
+  /// Inserts into ticket_purchases and decrements tickets_remaining atomically.
+  /// Returns the list of inserted purchase rows.
+  Future<List<Map<String, dynamic>>> purchaseTickets({
+    required int ticketId,
+    required int quantity,
+    required String paymentReference,
+    required num amountPaid,
+    String status = 'success', // 'success' or 'failed'
+  }) async {
+    final user = _supabase.auth.currentUser;
+    if (user == null) {
+      throw Exception('User not authenticated');
+    }
+
+    // Fetch the ticket to check availability
+    final ticket = await _supabase
+        .from('tickets')
+        .select()
+        .eq('id', ticketId)
+        .maybeSingle();
+
+    if (ticket == null || ticket['tickets_remaining'] < quantity) {
+      throw Exception('Not enough tickets available');
+    }
+
+    // Insert purchases (one row per ticket for easy transfer later)
+    final inserts = List.generate(
+        quantity,
+        (_) => {
+              'user_id': user.id,
+              'ticket_id': ticketId,
+              'payment_reference': paymentReference,
+              'amount_paid': amountPaid / quantity, // per ticket
+              'created_at': DateTime.now().toUtc().toIso8601String(),
+              'status': status,
+            });
+
+    final purchases =
+        await _supabase.from('ticket_purchases').insert(inserts).select();
+
+    // Decrement tickets_remaining (only on success)
+    if (status == 'success') {
+      await _supabase.rpc('decrement_tickets_remaining', params: {
+        'p_ticket_id': ticketId,
+        'p_decrement_by': quantity,
+      });
+    }
+
+    return purchases as List<Map<String, dynamic>>;
+  }
 }
