@@ -87,11 +87,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     final dbType = _typeMap[_selectedGistType];
     switch (dbType) {
       case 'local':
-        return 1000;
+        return 500;
       case 'global':
-        return 3000;
-      default:
         return 1000;
+      default:
+        return 500;
     }
   }
 
