@@ -71,7 +71,8 @@ class _TicketHistoryScreenState extends State<TicketHistoryScreen> {
           if (history.isEmpty) {
             return const Center(
                 child: Text('No transaction history',
-                    style: TextStyle(color: Colors.white70)));
+                    style: TextStyle(color: Colors.white70),
+                    textAlign: TextAlign.center));
           }
           return ListView.builder(
             padding: const EdgeInsets.all(16),
@@ -269,8 +270,11 @@ class _InfoRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final String value;
-  const _InfoRow(
-      {required this.icon, required this.label, required this.value});
+  const _InfoRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -282,16 +286,18 @@ class _InfoRow extends StatelessWidget {
           text: TextSpan(
             text: '$label: ',
             style: const TextStyle(
-                color: Colors.white70,
-                fontWeight: FontWeight.w600,
-                fontSize: 12),
+              color: Colors.white70,
+              fontWeight: FontWeight.w600,
+              fontSize: 12,
+            ),
             children: [
               TextSpan(
                 text: value,
                 style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13),
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
               ),
             ],
           ),
