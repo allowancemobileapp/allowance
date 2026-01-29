@@ -46,15 +46,20 @@ class ApiService {
   }
 
   /// Fetch available options along with vendor name.
-  static Future<List<dynamic>> fetchOptions() async {
+  static Future<List<dynamic>> fetchOptions(String schoolId) async {
+    if (schoolId.isEmpty) {
+      throw Exception('School ID is required to load menu');
+    }
     final response = await http.get(
-      Uri.parse("$baseUrl/options?select=*,vendors(name)"),
+      Uri.parse(
+          "$baseUrl/options?select=*,vendors(name)&vendors.school_id=eq.$schoolId"),
       headers: headers,
     );
     if (response.statusCode == 200) {
       return json.decode(response.body) as List<dynamic>;
     } else {
-      throw Exception("Failed to load options: ${response.statusCode}");
+      throw Exception(
+          "Failed to load menu for school $schoolId: ${response.statusCode} - ${response.body}");
     }
   }
 

@@ -61,6 +61,9 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   bool _isSubmitting = false;
   Uint8List? _pickedImageBytes;
 
+  String? _selectedCategory;
+  final categories = ['Sports', 'Entertainment', 'Official', 'Religion'];
+
   @override
   void initState() {
     super.initState();
@@ -213,6 +216,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'start_date': startDateStr,
         'status': 'draft',
         'created_at': now.toIso8601String(),
+        'category': _selectedCategory,
       };
 
       if (chosenSchoolId != null && chosenSchoolId.isNotEmpty) {
@@ -604,6 +608,23 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   onChanged: (v) =>
                       mounted ? setState(() => _selectedGistType = v) : null,
                   validator: (v) => v == null ? 'Select a gist type' : null,
+                  dropdownColor: Colors.grey[850],
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: _selectedCategory,
+                  items: categories
+                      .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                      .toList(),
+                  onChanged: (val) => setState(() => _selectedCategory = val),
+                  decoration: InputDecoration(
+                    labelText: 'Category',
+                    labelStyle: const TextStyle(color: Colors.white70),
+                    filled: true,
+                    fillColor: fieldFill,
+                    border: OutlineInputBorder(
+                        borderSide: BorderSide(color: widget.themeColor)),
+                  ),
                   dropdownColor: Colors.grey[850],
                 ),
                 const SizedBox(height: 12),

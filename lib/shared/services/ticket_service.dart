@@ -127,4 +127,37 @@ class TicketService {
 
     return purchases as List<Map<String, dynamic>>;
   }
+
+  Future<void> shareTicketToUsername({
+    required String username,
+    required int ticketPurchaseId, // the row in ticket_purchases to transfer
+  }) async {
+    // Step 1: Find recipient user_id by username
+    final profileResp = await _supabase
+        .from('profiles')
+        .select('id')
+        .eq('username', username.trim().toLowerCase())
+        .maybeSingle();
+
+    if (profileResp == null || profileResp['id'] == null) {
+      throw Exception('User @$username not found');
+    }
+
+    final recipientId = profileResp['id'] as String;
+
+    // Step 2: Transfer ownership (update user_id)
+    final updateResp = await _supabase
+        .from('ticket_purchases')
+        .update({'user_id': recipientId})
+        .eq('id', ticketPurchaseId)
+        .eq('user_id',
+            _supabase.auth.currentUser!.id); // security: only own purchases
+
+    if (updateResp == null || (updateResp as List).isEmpty) {
+      throw Exception('Failed to transfer – maybe not your ticket?');
+    }
+
+    // Optional: Show success + trigger notification (your existing trigger will fire)
+    print('Ticket transferred to @$username');
+  }
 }

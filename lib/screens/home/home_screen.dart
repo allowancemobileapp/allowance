@@ -8,6 +8,7 @@ import 'package:allowance/screens/home/favorites_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/screens/home/ticket_screen.dart';
+import 'order_screen.dart';
 import 'package:allowance/services/api_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -34,7 +35,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final List<Map<String, dynamic>> _colorfulTabs = [
     {"label": "Favorites", "icon": BoxIcons.bxs_heart, "color": Colors.orange},
     {"label": "Tickets", "icon": BoxIcons.bxs_chat, "color": Colors.purple},
-    {"label": "Dispatch", "icon": BoxIcons.bxs_truck, "color": Colors.teal},
+    {"label": "Order", "icon": BoxIcons.bxs_truck, "color": Colors.teal},
   ];
 
   List<String> _restaurants = [];
@@ -50,6 +51,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // NEW: track loading vs loaded-with-zero-items
   bool _isGistsLoading = true;
+
+  String _gistFilter = 'All';
 
   // Fallback images (replace with your own public URLs or storage links)
   final List<Map<String, dynamic>> _fallbackGists = [
@@ -109,7 +112,8 @@ class _HomeScreenState extends State<HomeScreen> {
       // Request only paid & active gists from server (server filtering preferred).
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
-          .select('id, title, image_url, type, school_id, url, created_at')
+          .select(
+              'id, title, image_url, type, school_id, url, created_at, category')
           .eq('paid', true)
           .eq('status', 'active')
           .order('created_at', ascending: false)
@@ -508,10 +512,56 @@ class _HomeScreenState extends State<HomeScreen> {
               context,
               MaterialPageRoute(
                   builder: (routeContext) => const TicketScreen()));
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('Dispatch is coming soon',
-                  style: TextStyle(fontFamily: 'SanFrancisco'))));
+        } else if (tab["label"] == "Order") {
+          if (_prefs.subscriptionTier == null ||
+              _prefs.subscriptionTier != "Membership") {
+            showModalBottomSheet(
+              context: context,
+              backgroundColor: Colors.grey[850],
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              builder: (ctx) => Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Subscribe to order custom food – only Plus users can.',
+                      style: TextStyle(color: Colors.white, fontSize: 16),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => SubscriptionScreen(
+                              userPreferences: _prefs,
+                              themeColor: themeColor,
+                            ),
+                          ),
+                        );
+                      },
+                      style:
+                          ElevatedButton.styleFrom(backgroundColor: themeColor),
+                      child: const Text('Subscribe Now',
+                          style: TextStyle(color: Colors.white)),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          } else {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (routeContext) => OrderScreen(userPreferences: _prefs),
+              ),
+            );
+          }
         }
       },
       child: Container(
@@ -562,32 +612,56 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildGistSlideshow() {
+    final filteredGists = _gistFilter == 'All'
+        ? _fetchedGists
+        : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
+
     final String label = _isGistsLoading
         ? "Gist"
-        : (_fetchedGists.isNotEmpty
-            ? (((_fetchedGists[_slideshowIndex]['type'] ?? '')
-                        .toString()
-                        .toLowerCase() ==
-                    'global'
-                ? "Global Gist"
-                : "Gist"))
+        : (filteredGists.isNotEmpty && _slideshowIndex < filteredGists.length
+            ? (filteredGists[_slideshowIndex]['category'] ??
+                'General ${filteredGists[_slideshowIndex]['type']}')
             : "Gist");
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          decoration: BoxDecoration(
-              color: _isDarkMode ? Colors.grey[850] : Colors.grey[300],
-              borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(8),
-                  topRight: Radius.circular(8),
-                  bottomRight: Radius.circular(8))),
-          child: Text(label,
-              style: TextStyle(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        decoration: BoxDecoration(
+          color: _isDarkMode ? Colors.grey[850] : Colors.grey[300],
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(8),
+            topRight: Radius.circular(8),
+            bottomRight: Radius.circular(8),
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
                   fontFamily: 'SanFrancisco',
                   fontSize: 16,
-                  color: themeColor))),
+                  color: themeColor,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            PopupMenuButton<String>(
+              icon: Icon(Icons.filter_list, color: Colors.white),
+              onSelected: (value) {
+                setState(() => _gistFilter = value);
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(value: 'All', child: Text('All')),
+                ...['Sports', 'Entertainment', 'Official', 'Religion']
+                    .map((c) => PopupMenuItem(value: c, child: Text(c))),
+              ],
+            ),
+          ],
+        ),
+      ),
       SizedBox(
           height: MediaQuery.of(context).size.height * 0.36,
           child: _isGistsLoading
@@ -595,17 +669,17 @@ class _HomeScreenState extends State<HomeScreen> {
               : PageView.builder(
                   controller: _pageController,
                   onPageChanged: (i) {
-                    if (_fetchedGists.isNotEmpty) {
+                    if (filteredGists.isNotEmpty) {
                       setState(
-                          () => _slideshowIndex = i % _fetchedGists.length);
+                          () => _slideshowIndex = i % filteredGists.length);
                     }
                   },
                   // allow infinite-like scroll: when list non-empty, itemCount null
-                  itemCount: _fetchedGists.isEmpty ? 0 : null,
+                  itemCount: filteredGists.isEmpty ? 0 : null,
                   itemBuilder: (ctx, idx) {
-                    if (_fetchedGists.isEmpty) return const SizedBox.shrink();
-                    final actualIndex = idx % _fetchedGists.length;
-                    final gist = _fetchedGists[actualIndex];
+                    if (filteredGists.isEmpty) return const SizedBox.shrink();
+                    final actualIndex = idx % filteredGists.length;
+                    final gist = filteredGists[actualIndex];
                     final imageUrl = (gist['image_url'] as String?) ?? '';
                     final gistUrl = (gist['url'] as String?) ?? '';
                     final scale = _slideshowIndex == actualIndex ? 1.0 : 0.9;
@@ -704,9 +778,9 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: Text(
-                  _fetchedGists.isNotEmpty &&
-                          _slideshowIndex < _fetchedGists.length
-                      ? _fetchedGists[_slideshowIndex]['title'] as String? ??
+                  filteredGists.isNotEmpty &&
+                          _slideshowIndex < filteredGists.length
+                      ? filteredGists[_slideshowIndex]['title'] as String? ??
                           'Loading...'
                       : '',
                   style: const TextStyle(

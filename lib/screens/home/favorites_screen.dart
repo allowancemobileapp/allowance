@@ -98,10 +98,12 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   @override
   void initState() {
     super.initState();
+    print(widget.userPreferences.schoolId);
     _favoritedOptionIds = widget.userPreferences.favoritedOptions
         .map((e) => e.toString())
         .toSet();
-    _optionsFuture = ApiService.fetchOptions();
+    _optionsFuture =
+        ApiService.fetchOptions(widget.userPreferences.schoolId ?? '');
     _foodGroupsFuture = ApiService.fetchFoodGroups();
     _deliveryPersonnelFuture = ApiService.fetchDeliveryPersonnel(
       widget.userPreferences.schoolId.toString(),
@@ -382,8 +384,11 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
             return const Center(child: CircularProgressIndicator());
           } else if (snap.hasError) {
             return Center(
-                child: Text(
-                    'Oops! An error occurred while loading your favorites: ${snap.error}. Please try again later.'));
+              child: Text(
+                'Could not load menu: ${snap.error}\nMake sure your school is selected.',
+                style: TextStyle(color: Colors.red),
+              ),
+            );
           } else if (!snap.hasData) {
             return const Center(
                 child:

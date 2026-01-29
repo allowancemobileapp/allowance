@@ -1,5 +1,4 @@
 // lib/screens/home/available_options_screen.dart
-
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -11,13 +10,11 @@ import 'package:url_launcher/url_launcher.dart';
 class AvailableOptionsScreen extends StatefulWidget {
   final UserPreferences userPreferences;
   final List<String> selectedRestaurants;
-
   const AvailableOptionsScreen({
     super.key,
     required this.userPreferences,
     required this.selectedRestaurants,
   });
-
   @override
   State<AvailableOptionsScreen> createState() => _AvailableOptionsScreenState();
 }
@@ -27,27 +24,21 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   late Future<List<dynamic>> _optionsFuture;
   late Future<List<dynamic>> _foodGroupsFuture;
   late Future<List<dynamic>> _deliveryPersonnelFuture;
-
   List<dynamic> _groups = [];
   String _selectedGroup = 'All';
   List<dynamic> _allOptions = [];
-
   // New: real likes from server
   Map<int, int> _likeCounts = {};
   Set<int> _likedOptionIds = {};
-
   // Filter state
   final List<Map<String, dynamic>> _foodSections = [];
   final Set<String> _selectedFoodItems = {};
-
   final supabase = Supabase.instance.client;
-
   Future<void> _loadLikesData() async {
     try {
       // 1) Load all like rows and compute counts (works for signed-out users too)
       final countsResponse =
           await supabase.from('option_likes').select('option_id');
-
       final Map<int, int> counts = {};
       for (var row in countsResponse) {
         // defensive parsing
@@ -57,7 +48,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
         if (id == null) continue;
         counts[id] = (counts[id] ?? 0) + 1;
       }
-
       // 2) If signed in, load which options this user liked
       final user = supabase.auth.currentUser;
       final Set<int> likedIds = <int>{};
@@ -67,7 +57,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               .from('option_likes')
               .select('option_id')
               .eq('user_id', user.id);
-
           for (var row in userLikesResponse) {
             final dynamic val = row['option_id'];
             final id = val is int ? val : int.tryParse(val.toString());
@@ -77,14 +66,12 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
           debugPrint('Failed to load user likes: $e');
         }
       }
-
       // 3) Update UI and local favorites
       if (mounted) {
         setState(() {
           _likeCounts = counts;
           _likedOptionIds = likedIds;
         });
-
         // keep local favorites in sync when user is logged in
         if (user != null) {
           widget.userPreferences.favoritedOptions =
@@ -100,12 +87,12 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   @override
   void initState() {
     super.initState();
-
+    print(widget.userPreferences.schoolId);
     _foodGroupsFuture = ApiService.fetchFoodGroups();
-    _optionsFuture = ApiService.fetchOptions();
+    _optionsFuture =
+        ApiService.fetchOptions(widget.userPreferences.schoolId ?? '');
     _deliveryPersonnelFuture = ApiService.fetchDeliveryPersonnel(
         widget.userPreferences.schoolId.toString());
-
     _foodGroupsFuture.then((foodGroups) {
       final groupsList = <Map<String, dynamic>>[
         {"id": "all", "name": "All"}
@@ -118,7 +105,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
       }
       setState(() => _groups = groupsList);
     });
-
     _optionsFuture.then((value) {
       _allOptions = value;
       _loadLikesData(); // Load likes once options are ready
@@ -133,7 +119,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   }
 
   String getItemName(dynamic item) => item["name"].toString();
-
   double getAdjustedPrice(dynamic item) {
     final price = (item['price'] as num?)?.toDouble() ?? 0;
     switch (item['portion']) {
@@ -152,18 +137,15 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
       final groupId = option["group_id"]?.toString() ?? "";
       final vendorName = option["vendors"]?["name"]?.toString() ?? "";
       if (!widget.selectedRestaurants.contains(vendorName)) return false;
-
       var selGroup = _groups.firstWhere(
         (g) => g["name"] == _selectedGroup,
         orElse: () => {"id": "all"},
       )["id"];
       selGroup = selGroup.toString();
-
       final items = (option["items"] as List<dynamic>? ?? []);
       if (items.any((i) => _selectedFoodItems.contains(i["name"]))) {
         return false;
       }
-
       final total = items.fold<double>(
         0,
         (sum, i) => sum + getAdjustedPrice(i),
@@ -194,26 +176,21 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
     final vendorName = selectedOption['vendors']['name'].toString();
     final items = (selectedOption['items'] as List<dynamic>);
-
     // 🧮 Calculate total
     final total = items
         .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
         .toStringAsFixed(0);
-
     // 📝 Build detailed message
     final message = StringBuffer();
     message.writeln("Hello! I'd like to order from $vendorName:");
     message.writeln("Items:");
-
     for (var i in items) {
       final name = i['name'];
       final price = getAdjustedPrice(i).toStringAsFixed(0);
       final qty = i['quantity'] ?? 1;
       message.writeln("- $name (₦$price × $qty)");
     }
-
     message.writeln("Total: ₦$total");
-
     // 🧾 Show delivery picker modal
     showModalBottomSheet(
       context: context,
@@ -227,7 +204,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               child: Center(child: CircularProgressIndicator()),
             );
           }
-
           final list = snap.data ?? [];
           if (list.isEmpty) {
             return Container(
@@ -246,9 +222,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
               ),
             );
           }
-
           list.shuffle(Random());
-
           return Container(
             decoration: BoxDecoration(
               color: Colors.grey[900],
@@ -304,26 +278,20 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
           (person['whatsapp_url'] ?? person['phone'] ?? person['mobile'] ?? '')
               .toString();
       String phoneOnly = stored.replaceAll(RegExp(r'[^0-9]'), '');
-
       if (phoneOnly.isEmpty) {
         final alt = (person['phone'] ?? person['mobile'] ?? '').toString();
         phoneOnly = alt.replaceAll(RegExp(r'[^0-9]'), '');
       }
-
       final encodedMessage = Uri.encodeComponent(rawMessage);
-
       // ✅ Directly use the native WhatsApp URI first (works best on Android/iOS)
       final whatsappUri =
           Uri.parse('whatsapp://send?phone=$phoneOnly&text=$encodedMessage');
-
       // ✅ Try WhatsApp Business fallback (for users with both installed)
       final whatsappBusinessUri = Uri.parse(
           'whatsapp-business://send?phone=$phoneOnly&text=$encodedMessage');
-
       // ✅ Web fallback (for browsers or desktop)
       final waWebUri =
           Uri.parse('https://wa.me/$phoneOnly?text=$encodedMessage');
-
       if (await canLaunchUrl(whatsappUri)) {
         await launchUrl(whatsappUri, mode: LaunchMode.externalApplication);
         return;
@@ -453,8 +421,11 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
             return const Center(child: CircularProgressIndicator());
           } else if (snap.hasError) {
             return Center(
-                child: Text(
-                    'Oops! An error occurred while loading options: ${snap.error}. Please try again later.'));
+              child: Text(
+                'Could not load menu: ${snap.error}\nMake sure your school is selected.',
+                style: TextStyle(color: Colors.red),
+              ),
+            );
           } else if (snap.hasData) {
             final options = snap.data!;
             return Column(
@@ -509,7 +480,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                       final int optionId = option['id'] as int;
                       final bool isLiked = _likedOptionIds.contains(optionId);
                       final int likeCount = _likeCounts[optionId] ?? 0;
-
                       return TweenAnimationBuilder<Offset>(
                         tween: Tween(
                             begin: const Offset(0, 0.1), end: Offset.zero),
@@ -556,7 +526,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                               onPressed: () =>
                                                   _showDeliveryPicker(option),
                                             ),
-
                                             // ❤️ Like button + like count
                                             Column(
                                               mainAxisSize: MainAxisSize.min,
@@ -587,7 +556,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                                       }
                                                       return;
                                                     }
-
                                                     try {
                                                       if (isLiked) {
                                                         // Unlike
@@ -599,7 +567,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                                                 optionId)
                                                             .eq('user_id',
                                                                 user.id);
-
                                                         if (mounted) {
                                                           setState(() {
                                                             _likedOptionIds
@@ -633,7 +600,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                                           debugPrint(
                                                               'Like insert error (ignored if duplicate): $e');
                                                         }
-
                                                         if (mounted) {
                                                           setState(() {
                                                             _likedOptionIds
@@ -647,7 +613,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
                                                           });
                                                         }
                                                       }
-
                                                       // Sync favorites for Favorites screen
                                                       widget.userPreferences
                                                               .favoritedOptions =
