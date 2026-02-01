@@ -32,10 +32,15 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isBudgetEntered = false;
   bool _vendorBarTapped = false;
   final Color themeColor = const Color(0xFF4CAF50);
+  // 1. Updated _colorfulTabs (changed Order icon to food-related)
   final List<Map<String, dynamic>> _colorfulTabs = [
     {"label": "Favorites", "icon": BoxIcons.bxs_heart, "color": Colors.orange},
     {"label": "Tickets", "icon": BoxIcons.bxs_chat, "color": Colors.purple},
-    {"label": "Order", "icon": BoxIcons.bxs_truck, "color": Colors.teal},
+    {
+      "label": "Order",
+      "icon": BoxIcons.bx_food_menu,
+      "color": Colors.teal
+    }, // ← food icon
   ];
 
   List<String> _restaurants = [];
@@ -611,6 +616,74 @@ class _HomeScreenState extends State<HomeScreen> {
                 selectedRestaurants: _selectedRestaurants)));
   }
 
+  // 2. New method: _showGistFilterSheet()
+  void _showGistFilterSheet() {
+    final categories = [
+      'All',
+      'Sports',
+      'Entertainment',
+      'Official',
+      'Religion'
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.4,
+        expand: false,
+        builder: (_, controller) => StatefulBuilder(
+          builder: (ctx, setSheetState) => Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  'Filter Gists',
+                  style: TextStyle(
+                    color: themeColor,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: ListView.builder(
+                  controller: controller,
+                  itemCount: categories.length,
+                  itemBuilder: (_, i) {
+                    final cat = categories[i];
+                    final selected = _gistFilter == cat;
+                    return RadioListTile<String>(
+                      title: Text(
+                        cat,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 18),
+                      ),
+                      value: cat,
+                      groupValue: _gistFilter,
+                      activeColor: themeColor,
+                      onChanged: (val) {
+                        setState(() => _gistFilter = val!);
+                        Navigator.pop(context);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 3. Updated _buildGistSlideshow() – added megaphone icon + tap to open filter sheet
   Widget _buildGistSlideshow() {
     final filteredGists = _gistFilter == 'All'
         ? _fetchedGists
@@ -623,45 +696,45 @@ class _HomeScreenState extends State<HomeScreen> {
                 'General ${filteredGists[_slideshowIndex]['type']}')
             : "Gist");
 
+    final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
+
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-        decoration: BoxDecoration(
-          color: _isDarkMode ? Colors.grey[850] : Colors.grey[300],
-          borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(8),
-            topRight: Radius.circular(8),
-            bottomRight: Radius.circular(8),
-          ),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                label,
-                style: TextStyle(
-                  fontFamily: 'SanFrancisco',
-                  fontSize: 16,
-                  color: themeColor,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
+      Center(
+        child: GestureDetector(
+          onTap: _showGistFilterSheet, // ← tap bar to open filter sheet
+          child: Container(
+            width: horizontalBarWidth,
+            height: 44,
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            decoration: BoxDecoration(
+              color: Colors.grey[800],
+              borderRadius: BorderRadius.circular(25),
             ),
-            PopupMenuButton<String>(
-              icon: Icon(Icons.filter_list, color: Colors.white),
-              onSelected: (value) {
-                setState(() => _gistFilter = value);
-              },
-              itemBuilder: (context) => [
-                PopupMenuItem(value: 'All', child: Text('All')),
-                ...['Sports', 'Entertainment', 'Official', 'Religion']
-                    .map((c) => PopupMenuItem(value: c, child: Text(c))),
+            child: Row(
+              children: [
+                Icon(BoxIcons.bxs_megaphone,
+                    color: themeColor, size: 20), // ← Gist icon
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontFamily: 'SanFrancisco',
+                      fontSize: 18,
+                      color: themeColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Icon(Icons.chevron_right,
+                    color: themeColor, size: 24), // ← indicates tappable
               ],
             ),
-          ],
+          ),
         ),
       ),
+      // Rest of slideshow unchanged...
       SizedBox(
           height: MediaQuery.of(context).size.height * 0.36,
           child: _isGistsLoading
@@ -674,7 +747,6 @@ class _HomeScreenState extends State<HomeScreen> {
                           () => _slideshowIndex = i % filteredGists.length);
                     }
                   },
-                  // allow infinite-like scroll: when list non-empty, itemCount null
                   itemCount: filteredGists.isEmpty ? 0 : null,
                   itemBuilder: (ctx, idx) {
                     if (filteredGists.isEmpty) return const SizedBox.shrink();
@@ -685,94 +757,90 @@ class _HomeScreenState extends State<HomeScreen> {
                     final scale = _slideshowIndex == actualIndex ? 1.0 : 0.9;
 
                     return Transform.scale(
-                      scale: scale,
-                      child: Padding(
-                        padding: EdgeInsets.only(
-                            right: actualIndex != _slideshowIndex ? 15.0 : 0.0),
-                        child: GestureDetector(
-                          onTap:
-                              () {}, // keeps absorbing taps on the card itself (link icon still works)
-                          child: ClipRRect(
-                            borderRadius:
-                                BorderRadius.circular(24), // ← rounded corners
-                            child: Stack(
-                              children: [
-                                // Full-size background (letterboxing/pillarboxing color)
-                                Positioned.fill(
-                                  child: Container(
-                                    color: _isDarkMode
-                                        ? Colors.grey[750]
-                                        : Colors.grey[300],
-                                  ),
-                                ),
-                                // Image is now always shown with its original aspect ratio, never cropped
-                                Center(
-                                  child: CachedNetworkImage(
-                                    imageUrl: imageUrl,
-                                    fit: BoxFit
-                                        .contain, // ← no cropping, full image visible
-                                    placeholder: (context, url) => Center(
-                                      child: CircularProgressIndicator(
-                                          color: themeColor),
+                        scale: scale,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                              right:
+                                  actualIndex != _slideshowIndex ? 15.0 : 0.0),
+                          child: GestureDetector(
+                            onTap: () {},
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(24),
+                              child: Stack(
+                                children: [
+                                  Positioned.fill(
+                                    child: Container(
+                                      color: _isDarkMode
+                                          ? Colors.grey[750]
+                                          : Colors.grey[300],
                                     ),
-                                    errorWidget: (context, url, error) =>
-                                        Center(
-                                      child: Icon(
-                                        Icons.broken_image,
-                                        color: _isDarkMode
-                                            ? Colors.white54
-                                            : Colors.black54,
-                                        size: 50,
+                                  ),
+                                  Center(
+                                    child: CachedNetworkImage(
+                                      imageUrl: imageUrl,
+                                      fit: BoxFit.contain,
+                                      placeholder: (context, url) => Center(
+                                        child: CircularProgressIndicator(
+                                            color: themeColor),
                                       ),
-                                    ),
-                                  ),
-                                ),
-                                // Link icon (if gist has a url) – made it properly circular + a bit larger
-                                if (gistUrl.isNotEmpty)
-                                  Positioned(
-                                    top: 12,
-                                    right: 12,
-                                    child: Material(
-                                      color: Colors.transparent,
-                                      child: InkWell(
-                                        borderRadius: BorderRadius.circular(30),
-                                        onTap: () async {
-                                          final uri = Uri.tryParse(gistUrl);
-                                          if (uri != null &&
-                                              await canLaunchUrl(uri)) {
-                                            await launchUrl(uri,
-                                                mode: LaunchMode
-                                                    .externalApplication);
-                                          } else {
-                                            if (mounted) {
-                                              ScaffoldMessenger.of(context)
-                                                  .showSnackBar(
-                                                const SnackBar(
-                                                    content: Text(
-                                                        "Sorry, we couldn't open this link.")),
-                                              );
-                                            }
-                                          }
-                                        },
-                                        child: Container(
-                                          padding: const EdgeInsets.all(12),
-                                          decoration: const BoxDecoration(
-                                            color: Colors.black54,
-                                            shape: BoxShape.circle,
-                                          ),
-                                          child: const Icon(Icons.link,
-                                              size: 24, color: Colors.white),
+                                      errorWidget: (context, url, error) =>
+                                          Center(
+                                        child: Icon(
+                                          Icons.broken_image,
+                                          color: _isDarkMode
+                                              ? Colors.white54
+                                              : Colors.black54,
+                                          size: 50,
                                         ),
                                       ),
                                     ),
                                   ),
-                              ],
+                                  if (gistUrl.isNotEmpty)
+                                    Positioned(
+                                      top: 12,
+                                      right: 12,
+                                      child: Material(
+                                        color: Colors.transparent,
+                                        child: InkWell(
+                                          borderRadius:
+                                              BorderRadius.circular(30),
+                                          onTap: () async {
+                                            final uri = Uri.tryParse(gistUrl);
+                                            if (uri != null &&
+                                                await canLaunchUrl(uri)) {
+                                              await launchUrl(uri,
+                                                  mode: LaunchMode
+                                                      .externalApplication);
+                                            } else {
+                                              if (mounted) {
+                                                ScaffoldMessenger.of(context)
+                                                    .showSnackBar(
+                                                  const SnackBar(
+                                                      content: Text(
+                                                          "Sorry, we couldn't open this link.")),
+                                                );
+                                              }
+                                            }
+                                          },
+                                          child: Container(
+                                            padding: const EdgeInsets.all(12),
+                                            decoration: const BoxDecoration(
+                                              color: Colors.black54,
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: const Icon(Icons.link,
+                                                size: 24, color: Colors.white),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
                             ),
                           ),
-                        ),
-                      ),
-                    );
-                  })),
+                        ));
+                  },
+                )),
       const SizedBox(height: 8),
       Center(
           child: Padding(

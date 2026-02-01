@@ -111,32 +111,22 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
     setState(() => _isSaving = true);
 
-    final supabase = Supabase.instance.client; // ← FIXED: was "clientClient"
+    final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
 
     try {
       // 1. Upload avatar first
       final String? newAvatarUrl = await _uploadAvatarIfPicked();
 
-      // 2. Update local UserPreferences
-      widget.userPreferences.fullName =
-          _displayNameController.text.trim().isEmpty
-              ? null
-              : _displayNameController.text.trim();
-
-      widget.userPreferences.username = _usernameController.text.trim().isEmpty
-          ? null
-          : _usernameController.text.trim();
-
-      widget.userPreferences.phoneNumber = _phoneController.text.trim().isEmpty
-          ? null
-          : _phoneController.text.trim();
-
+      // 2. Update local UserPreferences (no longer allowing null for required fields – validation already ensures they are not empty)
+      widget.userPreferences.fullName = _displayNameController.text.trim();
+      widget.userPreferences.username = _usernameController.text.trim();
+      widget.userPreferences.phoneNumber = _phoneController.text.trim();
       widget.userPreferences.weight =
           double.tryParse(_weightController.text.trim());
       widget.userPreferences.height =
           double.tryParse(_heightController.text.trim());
-      widget.userPreferences.age = int.tryParse(_ageController.text.trim());
+      widget.userPreferences.age = int.parse(_ageController.text.trim());
       widget.userPreferences.bloodGroup = _bloodGroup;
 
       if (newAvatarUrl != null) {
@@ -271,26 +261,44 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               ),
               const SizedBox(height: 18),
               TextFormField(
-                  controller: _displayNameController,
-                  decoration: _inputDecoration('Full name'),
-                  style: const TextStyle(color: Colors.white)),
+                controller: _displayNameController,
+                decoration: _inputDecoration('Full name *'),
+                style: const TextStyle(color: Colors.white),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) {
+                    return 'Full name is required';
+                  }
+                  return null;
+                },
+              ),
               const SizedBox(height: 12),
               TextFormField(
-                  controller: _usernameController,
-                  decoration: _inputDecoration('Username (public)'),
-                  style: const TextStyle(color: Colors.white),
-                  validator: (v) {
-                    if (v == null || v.trim().isEmpty)
-                      return 'Enter a username';
-                    if (v.contains(' ')) return 'No spaces allowed';
-                    return null;
-                  }),
+                controller: _usernameController,
+                decoration: _inputDecoration('Username (public) *'),
+                style: const TextStyle(color: Colors.white),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) {
+                    return 'Username is required';
+                  }
+                  if (v.contains(' ')) {
+                    return 'No spaces allowed';
+                  }
+                  return null;
+                },
+              ),
               const SizedBox(height: 12),
               TextFormField(
-                  controller: _phoneController,
-                  decoration: _inputDecoration('Phone number'),
-                  keyboardType: TextInputType.phone,
-                  style: const TextStyle(color: Colors.white)),
+                controller: _phoneController,
+                decoration: _inputDecoration('Phone number *'),
+                keyboardType: TextInputType.phone,
+                style: const TextStyle(color: Colors.white),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) {
+                    return 'Phone number is required';
+                  }
+                  return null;
+                },
+              ),
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -311,10 +319,21 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               ),
               const SizedBox(height: 12),
               TextFormField(
-                  controller: _ageController,
-                  decoration: _inputDecoration('Age'),
-                  keyboardType: TextInputType.number,
-                  style: const TextStyle(color: Colors.white)),
+                controller: _ageController,
+                decoration: _inputDecoration('Age *'),
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: Colors.white),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) {
+                    return 'Age is required';
+                  }
+                  final age = int.tryParse(v);
+                  if (age == null || age <= 0) {
+                    return 'Enter a valid age';
+                  }
+                  return null;
+                },
+              ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
                 value: _bloodGroup,

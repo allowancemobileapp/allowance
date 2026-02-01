@@ -1,6 +1,7 @@
 // lib/screens/home/order_screen.dart
 // ignore_for_file: use_build_context_synchronously
 
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
@@ -18,14 +19,18 @@ class OrderScreen extends StatefulWidget {
 
 class _OrderScreenState extends State<OrderScreen> {
   final supabase = Supabase.instance.client;
+  final Color themeColor = const Color(0xFF4CAF50);
+
   List<Map<String, dynamic>> _vendors = [];
   Map<String, dynamic>? _selectedVendor;
   List<Map<String, dynamic>> _sections = [];
   List<Map<String, dynamic>> _meals = [];
-  final List<Map<String, dynamic>> _cart = []; // Made final as per error
+  final List<Map<String, dynamic>> _cart = [];
   bool _isLoading = true;
   String? _error;
   double _cartTotal = 0.0;
+
+  String _selectedSection = 'All';
 
   @override
   void initState() {
@@ -35,7 +40,6 @@ class _OrderScreenState extends State<OrderScreen> {
 
   Future<void> _fetchVendors() async {
     try {
-      // Current code might be failing here if schoolId is not a valid integer string
       final schoolIdStr = widget.userPreferences.schoolId ?? '';
       final schoolIdInt = int.tryParse(schoolIdStr);
 
@@ -47,10 +51,8 @@ class _OrderScreenState extends State<OrderScreen> {
         return;
       }
 
-      final vendorsRaw = await supabase
-          .from('vendors')
-          .select()
-          .eq('school_id', schoolIdInt); // Ensure it's filtered by school
+      final vendorsRaw =
+          await supabase.from('vendors').select().eq('school_id', schoolIdInt);
 
       setState(() {
         _vendors = List<Map<String, dynamic>>.from(vendorsRaw);
@@ -67,76 +69,129 @@ class _OrderScreenState extends State<OrderScreen> {
   Future<void> _fetchSectionsAndMeals(int vendorId) async {
     setState(() => _isLoading = true);
     try {
-      // Fetch sections (unchanged)
+      debugPrint('Fetching menu for vendorId=$vendorId');
+
+      // Fetch sections/categories
       final sectionsRaw = await supabase
           .from('sections')
-          .select()
+          .select('id, name')
           .order('name', ascending: true);
 
-      // Fetch vendor_menus flat (just ids + price)
+      final Map<int, String> sectionMap = {};
+      for (var s in sectionsRaw) {
+        final id = s['id'] as int?;
+        final name = s['name'] as String?;
+        if (id != null && name != null) {
+          sectionMap[id] = name;
+        }
+      }
+
+      // Fetch vendor_menus flat
       final vendorMenusRaw = await supabase
           .from('vendor_menus')
           .select('id, meal_id, price')
           .eq('vendor_id', vendorId);
 
-      // Fetch all relevant meals + their sections in one query
-      final mealIds =
-          vendorMenusRaw.map((vm) => vm['meal_id']).toSet().toList();
+      if (vendorMenusRaw.isEmpty) {
+        setState(() {
+          _sections = List<Map<String, dynamic>>.from(sectionsRaw);
+          _meals = [];
+          _selectedSection = 'All';
+          _isLoading = false;
+          _error = null;
+        });
+        return;
+      }
+
+      // Get unique meal_ids
+      final Set<int> mealIds = vendorMenusRaw
+          .map((vm) => vm['meal_id'] as int?)
+          .whereType<int>()
+          .toSet();
+
+      // Fetch meals
       final mealsRaw = await supabase
           .from('meals')
-          .select('id, name, section_id, sections(name)')
-          .inFilter('id', mealIds);
+          .select('id, name, section_id')
+          .inFilter('id', mealIds.toList());
 
-      // Map meals to a lookup
-      final mealMap = {for (var m in mealsRaw) m['id']: m};
+      final Map<int, Map<String, dynamic>> mealMap = {
+        for (var m in mealsRaw) m['id'] as int: m
+      };
 
-      // Build final list
-      final mealsList = vendorMenusRaw
-          .map((vm) {
-            final meal = mealMap[vm['meal_id']];
-            if (meal == null) return null;
-            return {
-              'id': vm['id'],
-              'price': vm['price'],
-              'meals': {
-                'id': meal['id'],
-                'name': meal['name'],
-                'section_id': meal['section_id'],
-                'sections': {'name': meal['sections']['name']},
-              }
-            };
-          })
-          .whereType<Map<String, dynamic>>()
-          .toList();
+      // Build meals list with attached section name
+      final List<Map<String, dynamic>> mealsList = [];
+      for (var vm in vendorMenusRaw) {
+        final mealId = vm['meal_id'] as int?;
+        if (mealId == null) continue;
+
+        final meal = mealMap[mealId];
+        if (meal == null) continue;
+
+        final sectionId = meal['section_id'] as int?;
+        final sectionName = sectionMap[sectionId] ?? 'Other';
+
+        mealsList.add({
+          'id': vm['id'],
+          'price': vm['price'],
+          'meals': {
+            'id': meal['id'],
+            'name': meal['name'],
+            'sections': {'name': sectionName},
+          }
+        });
+      }
+
+      // Sort alphabetically
+      mealsList.sort((a, b) {
+        final nameA = a['meals']['name'] ?? '';
+        final nameB = b['meals']['name'] ?? '';
+        return nameA.compareTo(nameB);
+      });
 
       setState(() {
         _sections = List<Map<String, dynamic>>.from(sectionsRaw);
         _meals = mealsList;
+        _selectedSection = 'All';
         _isLoading = false;
         _error = null;
       });
     } catch (e, st) {
-      debugPrint('Error fetching menu: $e\n$st');
+      debugPrint('Error fetching menu: $e');
+      debugPrint('$st');
       setState(() {
-        _error = 'Failed to load menu. Check console.';
+        _error = 'Failed to load menu for this vendor.';
         _isLoading = false;
       });
     }
   }
 
+  List<Map<String, dynamic>> get _filteredMeals {
+    if (_selectedSection == 'All') return _meals;
+    return _meals.where((m) {
+      final sectionName = m['meals']?['sections']?['name'];
+      return sectionName == _selectedSection;
+    }).toList();
+  }
+
   void _addToCart(Map<String, dynamic> meal, int quantity) {
-    final idx =
-        _cart.indexWhere((item) => item['meal_id'] == meal['meals']['id']);
+    final mealId = meal['meals']['id'];
+    final idx = _cart.indexWhere((item) => item['meal_id'] == mealId);
     if (idx != -1) {
-      _cart[idx]['quantity'] = (_cart[idx]['quantity'] ?? 0) + quantity;
+      _cart[idx]['quantity'] += quantity;
     } else {
       _cart.add({
-        'meal_id': meal['meals']['id'],
-        'name': meal['meals']['name'] ?? 'Unnamed', // ✅ FIXED to 'meals.name'
-        'price': (meal['price'] ?? 0.0) as num,
+        'meal_id': mealId,
+        'name': meal['meals']['name'] ?? 'Unnamed',
+        'price': meal['price'] as num,
         'quantity': quantity,
       });
     }
+    _updateCartTotal();
+  }
+
+  void _removeFromCart(int index) {
+    _cart.removeAt(index);
     _updateCartTotal();
   }
 
@@ -146,7 +201,130 @@ class _OrderScreenState extends State<OrderScreen> {
     setState(() {});
   }
 
+  void _showAddItemSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        maxChildSize: 0.95,
+        minChildSize: 0.4,
+        expand: false,
+        builder: (_, controller) {
+          return StatefulBuilder(
+            builder: (sheetCtx, setSheetState) {
+              return Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text(
+                      'Add Item',
+                      style: TextStyle(
+                        color: themeColor,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    height: 50,
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      itemCount: _sections.length + 1,
+                      itemBuilder: (_, i) {
+                        final isAll = i == 0;
+                        final name = isAll ? 'All' : _sections[i - 1]['name'];
+                        final selected = name == _selectedSection;
+                        return GestureDetector(
+                          onTap: () {
+                            setSheetState(() => _selectedSection = name);
+                          },
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 20, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: selected ? themeColor : Colors.grey[800],
+                              borderRadius: BorderRadius.circular(30),
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              name,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: _filteredMeals.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No items in this category',
+                              style: TextStyle(
+                                  color: Colors.white70, fontSize: 16),
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: controller,
+                            padding: const EdgeInsets.all(16),
+                            itemCount: _filteredMeals.length,
+                            itemBuilder: (_, i) {
+                              final meal = _filteredMeals[i];
+                              final name = meal['meals']['name'] ?? 'Unnamed';
+                              final price = meal['price'] ?? 0;
+                              return Card(
+                                color: Colors.grey[800],
+                                margin: const EdgeInsets.symmetric(vertical: 6),
+                                child: ListTile(
+                                  title: Text(
+                                    name,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                    '₦$price',
+                                    style:
+                                        const TextStyle(color: Colors.white70),
+                                  ),
+                                  trailing: IconButton(
+                                    icon: Icon(Icons.add_circle,
+                                        color: themeColor, size: 32),
+                                    onPressed: () {
+                                      _addToCart(meal, 1);
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      ),
+    ).then((_) => setState(() {}));
+  }
+
   void _showDeliveryPersonnel() async {
+    if (_cart.isEmpty) return;
+
     final schoolId = int.tryParse(widget.userPreferences.schoolId ?? '');
     if (schoolId == null) {
       ScaffoldMessenger.of(context)
@@ -154,10 +332,13 @@ class _OrderScreenState extends State<OrderScreen> {
       return;
     }
 
-    final personnel = await supabase
+    final personnelRaw = await supabase
         .from('delivery_personnel')
         .select()
         .eq('school_id', schoolId);
+
+    final List<Map<String, dynamic>> personnel =
+        List<Map<String, dynamic>>.from(personnelRaw);
 
     if (personnel.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -165,43 +346,101 @@ class _OrderScreenState extends State<OrderScreen> {
       return;
     }
 
+    personnel.shuffle(Random());
+
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900], // dark sheet background
-      builder: (ctx) => ListView.builder(
-        itemCount: personnel.length,
-        itemBuilder: (ctx, i) {
-          final person = personnel[i];
-          return ListTile(
-            tileColor: Colors.transparent,
-            title: Text(person['name'] ?? '',
-                style: const TextStyle(color: Colors.white)),
-            subtitle: Text(person['gender'] ?? '',
-                style: const TextStyle(color: Colors.white70)),
-            trailing: IconButton(
-              icon: const Icon(Icons.message, color: Colors.white),
-              onPressed: () => _sendOrderToWhatsApp(person),
+      backgroundColor: Colors.grey[900],
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.4,
+        expand: false,
+        builder: (_, controller) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Select your guy/gal',
+                style: TextStyle(
+                  color: themeColor,
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
             ),
-          );
-        },
+            Expanded(
+              child: ListView.builder(
+                controller: controller,
+                itemCount: personnel.length,
+                itemBuilder: (_, i) {
+                  final person = personnel[i];
+                  return ListTile(
+                    title: Text(
+                      '${person['name']} (${person['gender']})',
+                      style: const TextStyle(color: Colors.white, fontSize: 18),
+                    ),
+                    trailing: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: themeColor,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      onPressed: () => _sendOrderToWhatsApp(person),
+                      child: const Text('Contact',
+                          style: TextStyle(color: Colors.white)),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   void _sendOrderToWhatsApp(Map<String, dynamic> person) async {
-    final orderDetails =
-        _cart.map((item) => '${item['name']} x ${item['quantity']}').join('\n');
-    final message = 'Hello! Order:\n$orderDetails\nTotal: ₦$_cartTotal';
-    final url =
-        'https://wa.me/${person['whatsapp_number']}?text=${Uri.encodeComponent(message)}';
+    final vendorName = _selectedVendor?['name'] ?? 'Vendor';
 
-    if (await canLaunchUrl(Uri.parse(url))) {
-      await launchUrl(Uri.parse(url));
+    final orderLines =
+        _cart.map((item) => '${item['name']} x ${item['quantity']}').toList();
+
+    orderLines.add('Pack x 1');
+
+    final orderDetails = orderLines.join('\n');
+
+    final totalWithPack = _cartTotal + 200;
+
+    final message =
+        'Hello! Custom Order from *$vendorName* on *Allowance*!:\n$orderDetails\n*Total*: ₦${totalWithPack.toStringAsFixed(0)}';
+
+    String phone = (person['whatsapp_url'] ?? person['phone'] ?? '')
+        .toString()
+        .replaceAll(RegExp(r'[^0-9]'), '');
+
+    if (phone.isEmpty) {
+      phone =
+          (person['phone'] ?? '').toString().replaceAll(RegExp(r'[^0-9]'), '');
+    }
+
+    final encodedMessage = Uri.encodeComponent(message);
+    final uri = Uri.parse('https://wa.me/$phone?text=$encodedMessage');
+
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
       _cart.clear();
       _updateCartTotal();
+      if (mounted) Navigator.pop(context);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open WhatsApp.')));
+        const SnackBar(content: Text('Could not open WhatsApp.')),
+      );
     }
   }
 
@@ -209,191 +448,206 @@ class _OrderScreenState extends State<OrderScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.grey[900],
-      appBar: AppBar(title: const Text('Order Custom Food')),
+      appBar: AppBar(
+        backgroundColor: Colors.grey[900],
+        iconTheme: const IconThemeData(color: Colors.white),
+        scrolledUnderElevation: 0,
+        title: Center(
+          child: Image.asset(
+            'assets/images/order.png',
+            height: 90,
+          ),
+        ),
+      ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(
+              child: CircularProgressIndicator(color: Color(0xFF4CAF50)))
           : _error != null
-              ? Center(child: Text(_error!))
+              ? Center(
+                  child: Text(
+                    _error!,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    textAlign: TextAlign.center,
+                  ),
+                )
               : Column(
                   children: [
-                    DropdownButtonFormField<Map<String, dynamic>>(
-                      hint: const Text('Select Vendor',
-                          style: TextStyle(color: Colors.white70)),
-                      value: _selectedVendor,
-                      dropdownColor:
-                          Colors.grey[850], // <- dark dropdown background
-                      style: const TextStyle(
-                          color: Colors.white), // <- items use white text
-                      decoration: InputDecoration(
-                        fillColor: Colors.grey[800],
-                        filled: true,
-                        border: const OutlineInputBorder(),
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: DropdownButtonFormField<Map<String, dynamic>>(
+                        hint: const Text('Select Vendor',
+                            style: TextStyle(color: Colors.white70)),
+                        value: _selectedVendor,
+                        dropdownColor: Colors.grey[850],
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          fillColor: Colors.grey[800],
+                          filled: true,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        items: _vendors
+                            .map((v) => DropdownMenuItem(
+                                value: v,
+                                child: Text(v['name'] ?? '',
+                                    style:
+                                        const TextStyle(color: Colors.white))))
+                            .toList(),
+                        onChanged: (v) {
+                          setState(() {
+                            _selectedVendor = v;
+                            _cart.clear();
+                            _updateCartTotal();
+                          });
+                          if (v != null) {
+                            _fetchSectionsAndMeals(v['id']);
+                          }
+                        },
                       ),
-                      items: _vendors
-                          .map((v) => DropdownMenuItem(
-                              value: v,
-                              child: Text(v['name'] ?? '',
-                                  style: const TextStyle(color: Colors.white))))
-                          .toList(),
-                      onChanged: (v) {
-                        setState(() {
-                          _selectedVendor = v;
-                          _cart.clear();
-                          _updateCartTotal();
-                        });
-                        if (v != null) {
-                          debugPrint('selected vendor id: ${v['id']}');
-                          _fetchSectionsAndMeals(v['id']);
-                        }
-                      },
                     ),
-                    if (_selectedVendor != null)
+                    if (_selectedVendor != null) ...[
                       Expanded(
                         child: _meals.isEmpty
                             ? Center(
-                                child: Text(
-                                    'No menu items available for this vendor',
-                                    style: TextStyle(color: Colors.white70)))
-                            : ListView.builder(
-                                itemCount: _cart.length + 1,
-                                itemBuilder: (ctx, i) {
-                                  if (i == 0) {
-                                    return ListTile(
-                                      title: const Text('Add Item',
-                                          style:
-                                              TextStyle(color: Colors.white)),
-                                      trailing: IconButton(
-                                        icon: const Icon(Icons.add,
-                                            color: Colors.white),
-                                        onPressed: () => _addItemDialog(),
-                                      ),
-                                    );
-                                  }
-                                  final item = _cart[i - 1];
-                                  return ListTile(
-                                    title: Text(item['name'],
-                                        style: const TextStyle(
-                                            color: Colors.white)),
-                                    subtitle: Text(
-                                        'x ${item['quantity']} - ₦${item['price'] * item['quantity']}',
-                                        style: const TextStyle(
-                                            color: Colors.white70)),
-                                    trailing: IconButton(
-                                      icon: const Icon(Icons.remove,
-                                          color: Colors.white),
-                                      onPressed: () {
-                                        setState(() => _cart.removeAt(i - 1));
-                                        _updateCartTotal();
-                                      },
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Text(
+                                      'No menu items available for this vendor',
+                                      style: TextStyle(
+                                          color: Colors.white70, fontSize: 18),
                                     ),
-                                  );
-                                },
+                                    const SizedBox(height: 16),
+                                    ElevatedButton.icon(
+                                      icon: const Icon(Icons.add),
+                                      label: const Text('Add Item'),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: themeColor,
+                                      ),
+                                      onPressed: _showAddItemSheet,
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : ListView(
+                                padding: const EdgeInsets.all(16),
+                                children: [
+                                  Card(
+                                    color: Colors.grey[800]!.withOpacity(0.7),
+                                    elevation: 4,
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 16, vertical: 12),
+                                          child: Row(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Text(
+                                                _selectedVendor?['name'] ??
+                                                    'Vendor',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 20,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                              IconButton(
+                                                icon: const Icon(
+                                                  Icons.delivery_dining,
+                                                  color: Colors.white,
+                                                  size: 30,
+                                                ),
+                                                onPressed: _cart.isNotEmpty
+                                                    ? _showDeliveryPersonnel
+                                                    : null,
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        const Divider(color: Colors.white38),
+                                        if (_cart.isEmpty)
+                                          const Padding(
+                                            padding: EdgeInsets.all(16),
+                                            child: Text(
+                                              'No items in cart yet',
+                                              style: TextStyle(
+                                                  color: Colors.white70),
+                                            ),
+                                          )
+                                        else
+                                          ..._cart.asMap().entries.map((entry) {
+                                            final index = entry.key;
+                                            final item = entry.value;
+                                            return ListTile(
+                                              title: Text(
+                                                '${item['name']} x ${item['quantity']}',
+                                                style: const TextStyle(
+                                                    color: Colors.white),
+                                              ),
+                                              subtitle: Text(
+                                                '₦${(item['price'] * item['quantity']).toStringAsFixed(0)}',
+                                                style: const TextStyle(
+                                                    color: Colors.white70),
+                                              ),
+                                              trailing: IconButton(
+                                                icon: const Icon(
+                                                    Icons.remove_circle,
+                                                    color: Colors.red),
+                                                onPressed: () {
+                                                  _removeFromCart(index);
+                                                },
+                                              ),
+                                            );
+                                          }),
+                                        ListTile(
+                                          leading: const Icon(Icons.add_circle,
+                                              color: Colors.white),
+                                          title: const Text('Add more items',
+                                              style: TextStyle(
+                                                  color: Colors.white)),
+                                          onTap: _showAddItemSheet,
+                                        ),
+                                        Container(
+                                          width: double.infinity,
+                                          color: themeColor,
+                                          padding: const EdgeInsets.symmetric(
+                                              vertical: 12),
+                                          child: Center(
+                                            child: Text(
+                                              'Total: ₦${(_cartTotal + 200).toStringAsFixed(0)}',
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ),
                       ),
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text('Total: ₦$_cartTotal',
-                          style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white)),
-                    ),
+                    ],
                   ],
                 ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _cart.isNotEmpty ? _showDeliveryPersonnel : null,
-        backgroundColor: Colors.green,
-        child: const Icon(Icons.shopping_cart_checkout, color: Colors.white),
-      ),
-    );
-  }
-
-  void _addItemDialog() {
-    String? selectedSection;
-    String? selectedMeal;
-    int quantity = 1;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setState) => AlertDialog(
-          backgroundColor: Colors.grey[800],
-          title: const Text('Add Item', style: TextStyle(color: Colors.white)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              DropdownButtonFormField<String>(
-                dropdownColor: Colors.grey[850],
-                hint: const Text('Category',
-                    style: TextStyle(color: Colors.white70)),
-                value: selectedSection,
-                items: _sections
-                    .map((s) => DropdownMenuItem<String>(
-                        value: s['name'] as String,
-                        child: Text(s['name'] as String,
-                            style: const TextStyle(color: Colors.white))))
-                    .toList(),
-                onChanged: (v) {
-                  setState(() {
-                    selectedSection = v;
-                    selectedMeal = null;
-                  });
-                },
-              ),
-              if (selectedSection != null)
-                DropdownButtonFormField<String>(
-                  dropdownColor: Colors.grey[850],
-                  hint: const Text('Meal',
-                      style: TextStyle(color: Colors.white70)),
-                  value: selectedMeal,
-                  items: _meals
-                      .where((m) =>
-                          m['meals']?['sections']?['name'] ==
-                          selectedSection) // ✅ FIXED TO m['meals']['sections']['name']
-                      .map((m) => DropdownMenuItem<String>(
-                          value: m['meals']['name'] as String,
-                          child: Text(m['meals']['name'] as String,
-                              style: const TextStyle(color: Colors.white))))
-                      .toList(),
-                  onChanged: (v) => setState(() => selectedMeal = v),
-                ),
-              if (selectedMeal != null)
-                Row(
-                  children: [
-                    const Text('Quantity:',
-                        style: TextStyle(color: Colors.white)),
-                    IconButton(
-                        onPressed: () => setState(
-                            () => quantity = (quantity > 1 ? quantity - 1 : 1)),
-                        icon: const Icon(Icons.remove, color: Colors.white)),
-                    Text('$quantity',
-                        style: const TextStyle(color: Colors.white)),
-                    IconButton(
-                        onPressed: () => setState(() => quantity++),
-                        icon: const Icon(Icons.add, color: Colors.white)),
-                  ],
-                ),
-            ],
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Cancel',
-                    style: TextStyle(color: Colors.white))),
-            TextButton(
-              onPressed: selectedMeal != null
-                  ? () {
-                      final meal = _meals.firstWhere(
-                          (m) => m['meals']['name'] == selectedMeal);
-                      _addToCart(meal, quantity);
-                      Navigator.pop(ctx);
-                    }
-                  : null,
-              child: const Text('Add', style: TextStyle(color: Colors.white)),
-            ),
-          ],
-        ),
-      ),
+      floatingActionButton: _cart.isNotEmpty
+          ? FloatingActionButton(
+              backgroundColor: themeColor,
+              onPressed: _showDeliveryPersonnel,
+              child:
+                  const Icon(Icons.shopping_cart_checkout, color: Colors.white),
+            )
+          : null,
     );
   }
 }
