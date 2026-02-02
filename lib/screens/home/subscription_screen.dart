@@ -137,9 +137,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
     final reference = 'sub_${DateTime.now().millisecondsSinceEpoch}';
     final payload = {
-      'amount': 70000, // 700 NGN in kobo
+      'amount': 70000,
       'email': user.email,
       'reference': reference,
+      'plan': 'PLN_2tgtzyaurt8qz0d', // Ensures subscription is created
       'metadata': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id}
     };
 
@@ -152,21 +153,30 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         },
         body: jsonEncode(payload),
       );
-      print('Init response: ${resp.body}'); // Log
+
       if (resp.statusCode != 200) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text('Payment initialization failed: ${resp.body}')));
         setState(() => _isProcessing = false);
         return;
       }
+
       final data = jsonDecode(resp.body)['data'];
-      final authUrl = data['authorization_url'];
-      if (await canLaunch(authUrl)) {
-        await launch(authUrl);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not launch payment page.')));
+      final String? authUrlString = data['authorization_url'];
+
+      if (authUrlString != null) {
+        final Uri url = Uri.parse(authUrlString);
+
+        // Check if the URL can be handled before attempting to launch.
+        // Note: canLaunchUrl returns a Future<bool>.
+        final bool isSupported = await canLaunchUrl(url);
+        if (isSupported) {
+          await launchUrl(url, mode: LaunchMode.externalApplication);
+        } else {
+          throw 'Could not launch $authUrlString';
+        }
       }
+
       // After launch, prompt verify
       await _promptVerify(reference);
     } catch (e) {
@@ -177,12 +187,14 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     }
   }
 
+  /// Prompt user and then poll Paystack for verification.
   Future<void> _promptVerify(String reference) async {
     final verify = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Verify Payment'),
-        content: const Text('Tap Verify after completing payment.'),
+        content: const Text(
+            'Tap Verify after completing payment. We will then check the transaction.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -193,97 +205,101 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         ],
       ),
     );
+
     if (verify == true) {
-      final success = await _verifyPayment(reference);
-      if (success) {
-        setState(() => _currentTier = membershipTier);
-        widget.userPreferences.subscriptionTier = membershipTier;
-        await widget.userPreferences.savePreferences();
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Subscription activated!')));
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text(
-                'Payment not verified. Please try again or contact support.')));
+      setState(() => _isProcessing = true);
+      try {
+        final success = await _pollAndProcessVerification(reference);
+        if (success) {
+          setState(() => _currentTier = membershipTier);
+          widget.userPreferences.subscriptionTier = membershipTier;
+          await widget.userPreferences.savePreferences();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('Subscription activated!'),
+                backgroundColor: Colors.green),
+          );
+          // Navigate home or refresh UI
+          if (mounted) {
+            Navigator.of(context)
+                .pushNamedAndRemoveUntil('/', (route) => false);
+          }
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text(
+                    'Payment not verified. Please try again or contact support.'),
+                backgroundColor: Colors.red),
+          );
+        }
+      } catch (e) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Verification error: $e')));
+      } finally {
+        if (mounted) setState(() => _isProcessing = false);
       }
     }
   }
 
-  Future<bool> _verifyPayment(String reference) async {
-    try {
-      final resp = await http.get(
-        Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
-        headers: {
-          'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
-        },
-      );
-      print('Verify response: ${resp.body}'); // Log
-      if (resp.statusCode != 200) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(
-                'Verify failed with code ${resp.statusCode}: ${resp.body}')));
-        return false;
-      }
-      final body = jsonDecode(resp.body);
-      if (!body['status']) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Verify status false: ${body['message']}')));
-        return false;
-      }
-      final data = body['data'];
-      if (data['status'] != 'success') {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Transaction not success: ${data['status']}')));
-        return false;
-      }
+  /// Polls Paystack's verify endpoint until we get success or timeout, then updates Supabase.
+  /// Returns true if verification + DB update succeeded, false otherwise.
+  Future<bool> _pollAndProcessVerification(String reference,
+      {int maxAttempts = 12,
+      Duration interval = const Duration(seconds: 5)}) async {
+    // Try up to maxAttempts times, waiting `interval` between each attempt.
+    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        final response = await http.get(
+          Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
+          headers: {
+            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
+          },
+        );
 
-      final supabase = Supabase.instance.client;
-      final user = supabase.auth.currentUser!;
-      final metadata = data['metadata'];
-      final planCode = metadata['plan_code'];
+        if (response.statusCode == 200) {
+          final Map<String, dynamic> data = json.decode(response.body);
+          final bool ok = data['status'] == true;
+          final String? txStatus = data['data']?['status'] as String?;
+          if (ok && txStatus == 'success') {
+            // Successful payment — now persist to Supabase and local prefs.
+            final paystackData = data['data'];
+            final customerCode = paystackData['customer']?['customer_code'];
+            final subscriptionCode =
+                paystackData['subscription_code']; // Might be null
 
-      final authCode = data['authorization']['authorization_code'];
-      if (authCode == null) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('No authorization code - use recurring card.')));
-        print('No auth code in transaction.');
-        return false;
-      }
+            final user = Supabase.instance.client.auth.currentUser;
+            if (user != null) {
+              await Supabase.instance.client.from('profiles').update({
+                'subscription_tier': membershipTier,
+                'paystack_customer_code': customerCode,
+                'paystack_subscription_id': subscriptionCode,
+                'updated_at': DateTime.now().toIso8601String(),
+              }).eq('id', user.id);
 
-      final subResp = await http.post(
-        Uri.parse('https://api.paystack.co/subscription'),
-        headers: {
-          'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'customer': data['customer']['customer_code'],
-          'plan': planCode,
-          'authorization': authCode,
-        }),
-      );
-      print('Subscription response: ${subResp.body}'); // Log
-      if (subResp.statusCode != 201) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(
-                'Sub create failed with code ${subResp.statusCode}: ${subResp.body}')));
-        return false;
+              // local prefs update (so UI reflects immediately)
+              widget.userPreferences.subscriptionTier = membershipTier;
+              await widget.userPreferences.savePreferences();
+            }
+
+            return true; // done
+          }
+          // else not yet successful, continue polling
+        } else {
+          // non-200: decide whether to continue polling or break.
+          debugPrint(
+              'Paystack verify returned ${response.statusCode}: ${response.body}');
+        }
+      } catch (e) {
+        debugPrint('Error while verifying transaction: $e');
+        // We continue polling; transient network errors can happen.
       }
 
-      // Store sub id in profiles
-      final subData = jsonDecode(subResp.body)['data'];
-      await supabase.from('profiles').update({
-        'paystack_subscription_id': subData['subscription_code'],
-        'subscription_tier': membershipTier,
-      }).eq('id', user.id);
-
-      return true;
-    } catch (e) {
-      print('Verification error: $e'); // Log
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Verification failed: $e')));
-      return false;
+      // Wait before next attempt (don't block UI).
+      await Future.delayed(interval);
     }
+
+    // If we reach here, we timed out without success.
+    return false;
   }
 
   void _handleTier(String tier) {

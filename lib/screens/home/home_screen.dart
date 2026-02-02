@@ -658,7 +658,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   itemCount: categories.length,
                   itemBuilder: (_, i) {
                     final cat = categories[i];
-                    final selected = _gistFilter == cat;
                     return RadioListTile<String>(
                       title: Text(
                         cat,
@@ -689,19 +688,22 @@ class _HomeScreenState extends State<HomeScreen> {
         ? _fetchedGists
         : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
 
+    // Fixed label: always "Gist" if loading, empty, or no category
     final String label = _isGistsLoading
         ? "Gist"
-        : (filteredGists.isNotEmpty && _slideshowIndex < filteredGists.length
-            ? (filteredGists[_slideshowIndex]['category'] ??
-                'General ${filteredGists[_slideshowIndex]['type']}')
-            : "Gist");
+        : filteredGists.isEmpty
+            ? "Gist"
+            : (filteredGists[_slideshowIndex < filteredGists.length
+                    ? _slideshowIndex
+                    : 0]['category'] as String? ??
+                "Gist");
 
     final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Center(
         child: GestureDetector(
-          onTap: _showGistFilterSheet, // ← tap bar to open filter sheet
+          onTap: _showGistFilterSheet,
           child: Container(
             width: horizontalBarWidth,
             height: 44,
@@ -713,8 +715,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             child: Row(
               children: [
-                Icon(BoxIcons.bxs_megaphone,
-                    color: themeColor, size: 20), // ← Gist icon
+                Icon(BoxIcons.bxs_megaphone, color: themeColor, size: 20),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -727,8 +728,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-                Icon(Icons.chevron_right,
-                    color: themeColor, size: 24), // ← indicates tappable
+                Icon(Icons.chevron_right, color: themeColor, size: 24),
               ],
             ),
           ),

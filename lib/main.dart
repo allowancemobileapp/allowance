@@ -83,6 +83,7 @@ class _AllowanceAppState extends State<AllowanceApp> {
     _authSub = Supabase.instance.client.auth.onAuthStateChange
         .listen((authState) async {
       final session = authState.session;
+      // ignore: unnecessary_null_comparison
       if (session != null && session.user != null) {
         await _userPreferences.loadPreferences();
         _setupFcmAndListeners();
