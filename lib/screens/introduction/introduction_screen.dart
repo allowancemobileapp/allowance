@@ -110,6 +110,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         // 5) Redirect user to EditProfileScreen so they can finish profile before entering Home.
         // We use pushReplacement so they can't go back to Intro with back button.
         if (mounted) {
+          // ignore: unused_local_variable
           final edited = await Navigator.of(context).pushReplacement(
             MaterialPageRoute(
               builder: (_) =>

@@ -57,7 +57,7 @@ class TicketService {
     }
 
     // response is Map<String,dynamic>
-    return response as Map<String, dynamic>;
+    return response;
   }
 
   /// (Optional) helper to decrement tickets_remaining atomically after purchase.
@@ -73,7 +73,7 @@ class TicketService {
 
     // NOTE: The RPC must exist in your DB. If you don't have it, remove this helper.
     if (res == null) return null;
-    return res as Map<String, dynamic>;
+    return res;
   }
 
   /// Purchases [quantity] tickets for the given [ticketId].
@@ -125,7 +125,7 @@ class TicketService {
       });
     }
 
-    return purchases as List<Map<String, dynamic>>;
+    return purchases;
   }
 
   Future<void> shareTicketToUsername({
