@@ -874,20 +874,83 @@ class _HomeScreenState extends State<HomeScreen> {
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         body: SafeArea(
           child: IndexedStack(index: _selectedIndex, children: [
-            SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.only(
-                    left: 16, top: 70, right: 16, bottom: 8),
-                child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      GestureDetector(
-                        onTap: () {
-                          setState(() => _vendorBarTapped = true);
-                          _showRestaurantSelection();
-                        },
-                        child: Container(
+            // ---> Added RefreshIndicator here <---
+            RefreshIndicator(
+              color: themeColor,
+              onRefresh:
+                  _fetchGistsAndStartSlideshow, // Calls your fetch method when dragged
+              child: SingleChildScrollView(
+                physics:
+                    const AlwaysScrollableScrollPhysics(), // Ensures drag-down works even on smaller screens
+                child: Padding(
+                  padding: const EdgeInsets.only(
+                      left: 16, top: 70, right: 16, bottom: 8),
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        GestureDetector(
+                          onTap: () {
+                            setState(() => _vendorBarTapped = true);
+                            _showRestaurantSelection();
+                          },
+                          child: Container(
+                            width: horizontalBarWidth,
+                            height: 44,
+                            decoration: BoxDecoration(
+                                color: _isDarkMode
+                                    ? Colors.grey[800]
+                                    : Colors.grey[200],
+                                borderRadius: BorderRadius.circular(25)),
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Row(children: [
+                              Icon(BoxIcons.bxs_store,
+                                  color: themeColor, size: 20),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                  child: _selectedRestaurants.isNotEmpty
+                                      ? SingleChildScrollView(
+                                          scrollDirection: Axis.horizontal,
+                                          child: Row(
+                                              children: _selectedRestaurants
+                                                  .map((v) => Padding(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .only(
+                                                                right: 12),
+                                                        child: Chip(
+                                                          label: Text(v,
+                                                              style: TextStyle(
+                                                                  fontFamily:
+                                                                      'SanFrancisco',
+                                                                  fontSize: 18 *
+                                                                      vendorBudgetTextSizeFactor,
+                                                                  color: Colors
+                                                                      .white)),
+                                                          backgroundColor:
+                                                              _isDarkMode
+                                                                  ? Colors
+                                                                      .grey[700]
+                                                                  : Colors.grey[
+                                                                      300],
+                                                        ),
+                                                      ))
+                                                  .toList()))
+                                      : Text("Select Vendor",
+                                          style: TextStyle(
+                                              fontFamily: 'SanFrancisco',
+                                              fontSize: 22 *
+                                                  vendorBudgetTextSizeFactor,
+                                              color: Colors.white54))),
+                              !_vendorBarTapped
+                                  ? Icon(BoxIcons.bxs_chevron_down,
+                                      color: themeColor, size: 22)
+                                  : const SizedBox(),
+                            ]),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
                           width: horizontalBarWidth,
                           height: 44,
                           decoration: BoxDecoration(
@@ -897,114 +960,62 @@ class _HomeScreenState extends State<HomeScreen> {
                               borderRadius: BorderRadius.circular(25)),
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           child: Row(children: [
-                            Icon(BoxIcons.bxs_store,
+                            Icon(BoxIcons.bxs_dollar_circle,
                                 color: themeColor, size: 20),
                             const SizedBox(width: 8),
                             Expanded(
-                                child: _selectedRestaurants.isNotEmpty
-                                    ? SingleChildScrollView(
-                                        scrollDirection: Axis.horizontal,
-                                        child: Row(
-                                            children: _selectedRestaurants
-                                                .map((v) => Padding(
-                                                      padding:
-                                                          const EdgeInsets.only(
-                                                              right: 12),
-                                                      child: Chip(
-                                                        label: Text(v,
-                                                            style: TextStyle(
-                                                                fontFamily:
-                                                                    'SanFrancisco',
-                                                                fontSize: 18 *
-                                                                    vendorBudgetTextSizeFactor,
-                                                                color: Colors
-                                                                    .white)),
-                                                        backgroundColor:
-                                                            _isDarkMode
-                                                                ? Colors
-                                                                    .grey[700]
-                                                                : Colors
-                                                                    .grey[300],
-                                                      ),
-                                                    ))
-                                                .toList()))
-                                    : Text("Select Vendor",
-                                        style: TextStyle(
+                                child: TextField(
+                                    controller: _budgetController,
+                                    focusNode: _budgetFocusNode,
+                                    keyboardType: TextInputType.number,
+                                    style: TextStyle(
+                                        fontFamily: 'SanFrancisco',
+                                        fontSize:
+                                            18 * vendorBudgetTextSizeFactor,
+                                        color: Colors.white),
+                                    decoration: InputDecoration(
+                                        hintText: "Enter Budget",
+                                        hintStyle: TextStyle(
                                             fontFamily: 'SanFrancisco',
-                                            fontSize:
-                                                22 * vendorBudgetTextSizeFactor,
-                                            color: Colors.white54))),
-                            !_vendorBarTapped
-                                ? Icon(BoxIcons.bxs_chevron_down,
-                                    color: themeColor, size: 22)
-                                : const SizedBox(),
+                                            color: Colors.white54,
+                                            fontSize: 22 *
+                                                vendorBudgetTextSizeFactor),
+                                        border: InputBorder.none))),
+                            _budgetFocusNode.hasFocus || _isBudgetEntered
+                                ? InkWell(
+                                    onTap: _goToAvailableOptions,
+                                    child: Container(
+                                        decoration: BoxDecoration(
+                                            color: themeColor,
+                                            shape: BoxShape.circle),
+                                        padding: const EdgeInsets.all(6),
+                                        child: const Icon(
+                                            BoxIcons.bxs_chevron_right,
+                                            color: Colors.white,
+                                            size: 22)))
+                                : Icon(BoxIcons.bxs_chevron_right,
+                                    color: themeColor, size: 22),
                           ]),
                         ),
-                      ),
-                      const SizedBox(height: 16),
-                      Container(
-                        width: horizontalBarWidth,
-                        height: 44,
-                        decoration: BoxDecoration(
-                            color: _isDarkMode
-                                ? Colors.grey[800]
-                                : Colors.grey[200],
-                            borderRadius: BorderRadius.circular(25)),
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Row(children: [
-                          Icon(BoxIcons.bxs_dollar_circle,
-                              color: themeColor, size: 20),
-                          const SizedBox(width: 8),
-                          Expanded(
-                              child: TextField(
-                                  controller: _budgetController,
-                                  focusNode: _budgetFocusNode,
-                                  keyboardType: TextInputType.number,
-                                  style: TextStyle(
-                                      fontFamily: 'SanFrancisco',
-                                      fontSize: 18 * vendorBudgetTextSizeFactor,
-                                      color: Colors.white),
-                                  decoration: InputDecoration(
-                                      hintText: "Enter Budget",
-                                      hintStyle: TextStyle(
-                                          fontFamily: 'SanFrancisco',
-                                          color: Colors.white54,
-                                          fontSize:
-                                              22 * vendorBudgetTextSizeFactor),
-                                      border: InputBorder.none))),
-                          _budgetFocusNode.hasFocus || _isBudgetEntered
-                              ? InkWell(
-                                  onTap: _goToAvailableOptions,
-                                  child: Container(
-                                      decoration: BoxDecoration(
-                                          color: themeColor,
-                                          shape: BoxShape.circle),
-                                      padding: const EdgeInsets.all(6),
-                                      child: const Icon(
-                                          BoxIcons.bxs_chevron_right,
-                                          color: Colors.white,
-                                          size: 22)))
-                              : Icon(BoxIcons.bxs_chevron_right,
-                                  color: themeColor, size: 22),
-                        ]),
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                          width: horizontalBarWidth,
-                          height: 50,
-                          child: SingleChildScrollView(
-                              scrollDirection: Axis.horizontal,
-                              child: Row(
-                                  children: _colorfulTabs
-                                      .map((tab) => _buildRectangularTab(tab))
-                                      .toList()))),
-                      const SizedBox(height: 16),
-                      Align(
-                          alignment: Alignment.centerLeft,
-                          child: _buildGistSlideshow()),
-                    ]),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                            width: horizontalBarWidth,
+                            height: 50,
+                            child: SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                    children: _colorfulTabs
+                                        .map((tab) => _buildRectangularTab(tab))
+                                        .toList()))),
+                        const SizedBox(height: 16),
+                        Align(
+                            alignment: Alignment.centerLeft,
+                            child: _buildGistSlideshow()),
+                      ]),
+                ),
               ),
             ),
+
             FavoritesScreen(userPreferences: _prefs),
             SubscriptionScreen(userPreferences: _prefs, themeColor: themeColor),
             ProfileScreen(

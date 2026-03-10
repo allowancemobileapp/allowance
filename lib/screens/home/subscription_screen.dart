@@ -1,3 +1,4 @@
+// lib/screens/home/subscription_screen.dart
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'gist_submission_screen.dart';
@@ -166,12 +167,10 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
       if (authUrlString != null) {
         final Uri url = Uri.parse(authUrlString);
-
-        // Check if the URL can be handled before attempting to launch.
-        // Note: canLaunchUrl returns a Future<bool>.
         final bool isSupported = await canLaunchUrl(url);
         if (isSupported) {
-          await launchUrl(url, mode: LaunchMode.externalApplication);
+          // FIX: Force the browser to open INSIDE the app so the OS doesn't kill the app state
+          await launchUrl(url, mode: LaunchMode.inAppBrowserView);
         } else {
           throw 'Could not launch $authUrlString';
         }

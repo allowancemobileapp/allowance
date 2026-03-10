@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+// ignore: unused_import
 import 'dart:developer' as developer;
 
 /// Constants for table and column names
@@ -474,7 +475,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       }
 
       // NEW: invoke Edge Function here
-      try {
+      /*try {
         final fn = supabase.functions;
         final gistType = (await supabase
                 .from('gists')
@@ -491,6 +492,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       } catch (e) {
         developer.log('Error invoking Edge Function: $e', name: 'fcm');
       }
+      */
 
       return true;
     } catch (e) {
