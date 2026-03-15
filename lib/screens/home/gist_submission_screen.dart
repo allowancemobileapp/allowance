@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -70,6 +71,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     super.initState();
     _selectedSchoolId = widget.schoolId;
     _schoolsFuture = _fetchSchools();
+    _recoverPendingGistPayment(); // ← NEW SAFETY NET
   }
 
   Future<List<Map<String, dynamic>>> _fetchSchools() async {
@@ -126,85 +128,88 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     }
   }
 
+  // ==================== RECOVERY (updated for full safety) ====================
+  Future<void> _recoverPendingGistPayment() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pendingJson = prefs.getString('pending_gist_payment');
+    if (pendingJson == null) return;
+
+    final Map<String, dynamic> data = jsonDecode(pendingJson);
+    final String reference = data['reference'] as String;
+    final int gistId = data['gistId'] as int;
+
+    // We don't need to pass days here because _pollAndVerifyGistPayment already reads it
+    setState(() => _isSubmitting = true);
+
+    final success = await _pollAndVerifyGistPayment(reference, gistId);
+
+    if (success) {
+      await prefs.remove('pending_gist_payment');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('✅ Gist payment recovered and published!'),
+              backgroundColor: Colors.green),
+        );
+        Navigator.of(context).pop(); // close screen
+      }
+    }
+    // If still processing, leave the pending data for next time
+    if (mounted) setState(() => _isSubmitting = false);
+  }
+
+  // ==================== MAIN SUBMIT (auto-verification) ====================
   Future<void> _submitGist() async {
-    // quick validation
     if (!_formKey.currentState!.validate() ||
         _pickedImage == null ||
         _selectedGistType == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Complete form & pick an image')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Complete form & pick an image')));
       return;
     }
 
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
-    if (user == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('You must be logged in to post a gist')),
-        );
-      }
-      return;
-    }
+    if (user == null) return;
 
     final dbType = _typeMap[_selectedGistType];
-    if (dbType == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invalid gist type selected')),
-        );
-      }
-      return;
-    }
+    if (dbType == null) return;
 
     final chosenSchoolId = _selectedSchoolId ?? widget.schoolId;
     if (dbType == 'local' &&
         (chosenSchoolId == null || chosenSchoolId.isEmpty)) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Select the target university for a local gist')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Select university for local gist')));
       return;
     }
 
     setState(() => _isSubmitting = true);
-    int? draftGistId; // ← now int
+    int? draftGistId;
 
     try {
-      // ---------- 1) Upload image to storage ----------
+      // 1. Upload image (your existing code)
       const bucket = 'gist-images';
       final ext = _pickedImage!.name.split('.').last;
       final filePath = 'gists/${const Uuid().v4()}.$ext';
 
-      // IMPORTANT: Web uses bytes, Mobile uses File
       if (kIsWeb) {
-        // WEB upload
         final bytes = await _pickedImage!.readAsBytes();
-        await supabase.storage.from(bucket).uploadBinary(
-              filePath,
-              bytes,
-              fileOptions: const FileOptions(contentType: 'image/*'),
-            );
+        await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
+            fileOptions: const FileOptions(contentType: 'image/*'));
       } else {
-        // MOBILE upload
         final file = File(_pickedImage!.path);
         await supabase.storage.from(bucket).upload(filePath, file);
       }
 
       final publicUrl = supabase.storage.from(bucket).getPublicUrl(filePath);
 
-      // ---------- 2) Create draft gist (paid: false) ----------
-      final now = DateTime.now().toUtc();
-      final startDateStr = now.toIso8601String().split('T').first;
+      // 2. Create draft gist
       final numDays = int.tryParse(_durationController.text) ?? 0;
       final pricePerDay = _pricePerDay;
+      final totalNaira = (pricePerDay * numDays).toInt();
 
-      final Map<String, dynamic> draftPayload = {
+      final draftPayload = {
         'user_id': user.id,
         'type': dbType,
         'title': _titleController.text.trim(),
@@ -213,127 +218,92 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'number_of_days': numDays,
         'price_per_day': pricePerDay,
         'paid': false,
-        'payment_reference': null,
-        'start_date': startDateStr,
         'status': 'draft',
-        'created_at': now.toIso8601String(),
+        'start_date': DateTime.now().toUtc().toIso8601String().split('T').first,
         'category': _selectedCategory,
       };
 
       if (chosenSchoolId != null && chosenSchoolId.isNotEmpty) {
-        final maybeInt = int.tryParse(chosenSchoolId);
-        if (maybeInt != null) draftPayload['school_id'] = maybeInt;
+        draftPayload['school_id'] = int.tryParse(chosenSchoolId);
+      }
+      if (_urlController.text.trim().isNotEmpty) {
+        draftPayload['url'] = _urlController.text.trim();
       }
 
-      final providedUrl = _urlController.text.trim();
-      if (providedUrl.isNotEmpty) draftPayload['url'] = providedUrl;
-
-      // ← FIXED: use .single() and get real int ID
       final insertResp = await supabase
           .from('gists')
           .insert(draftPayload)
           .select('id')
           .single();
+      draftGistId = insertResp['id'] as int;
 
-      draftGistId = insertResp['id'] as int; // ← now correctly an int
-
-      // ---------- 3) Payment Init ----------
-      final totalNaira = (pricePerDay * numDays).toInt();
       if (totalNaira <= 0) {
         await supabase.from('gists').delete().eq('id', draftGistId);
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Enter a valid number of days')),
-          );
-        }
         return;
       }
 
-      final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
-      if (paystackSecretKey == null || paystackSecretKey.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Missing Paystack secret key')),
-          );
-        }
-        return;
-      }
-
+      // 3. Paystack initialize
       final reference = 'gist_${const Uuid().v4()}';
-
       final payload = {
         'amount': totalNaira * 100,
         'email': user.email ?? '',
         'reference': reference,
-        'metadata': {'gist_id': draftGistId.toString()}, // ← safe for Paystack
+        'metadata': {'gist_id': draftGistId.toString()},
       };
 
       final httpResp = await http.post(
         Uri.parse('https://api.paystack.co/transaction/initialize'),
         headers: {
-          'Authorization': 'Bearer $paystackSecretKey',
-          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
+          'Content-Type': 'application/json'
         },
         body: jsonEncode(payload),
       );
 
-      if (httpResp.statusCode < 200 || httpResp.statusCode >= 300) {
+      if (httpResp.statusCode != 200) {
         await supabase.from('gists').delete().eq('id', draftGistId);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content: Text('Payment init failed (${httpResp.statusCode})')),
-          );
-        }
         return;
       }
 
-      final respJson = jsonDecode(httpResp.body) as Map<String, dynamic>? ?? {};
-      final authUrl = respJson['data']?['authorization_url'] ?? '';
+      final authUrl = jsonDecode(httpResp.body)['data']['authorization_url'];
 
-      if (authUrl.isEmpty) {
-        await supabase.from('gists').delete().eq('id', draftGistId);
+      // ←←← SAVE PENDING BEFORE OPENING BROWSER
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          'pending_gist_payment',
+          jsonEncode({
+            'reference': reference,
+            'gistId': draftGistId,
+            'numberOfDays': numDays, // ← ADD THIS LINE
+          }));
+
+      final uri = Uri.parse(authUrl);
+      await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'Payment opened. Complete it — we verify automatically...'),
+            duration: Duration(seconds: 8)),
+      );
+
+      // ←←← AUTOMATIC POLLING
+      final success = await _pollAndVerifyGistPayment(reference, draftGistId);
+
+      if (success) {
+        await prefs.remove('pending_gist_payment');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content: Text(
-                    respJson['message'] ?? 'Failed to initialize payment')),
-          );
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('✅ Gist published!'),
+              backgroundColor: Colors.green));
+          Navigator.of(context).pop();
         }
-        return;
-      }
-
-      final uri = Uri.parse(authUrl.toString());
-
-      try {
-        bool launched =
-            await launchUrl(uri, mode: LaunchMode.externalApplication);
-
-        if (!launched) {
-          launched = await launchUrl(uri, mode: LaunchMode.platformDefault);
-        }
-
-        if (!launched) {
-          throw 'No browser available to open Paystack checkout.';
-        }
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text(
-                    'Payment page opened. After paying, tap Verify to publish your gist.')),
-          );
-        }
-
-        // ← FIXED: pass int (non-null because we just inserted)
-        await _promptVerify(reference, draftGistId, numDays);
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not open payment page: $e')),
-          );
-        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Payment taking a while. We will check again when you return.'),
+          backgroundColor: Colors.orange,
+        ));
       }
     } catch (e) {
       if (draftGistId != null) {
@@ -342,233 +312,65 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         } catch (_) {}
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to submit gist: ${e.toString()}')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
   }
 
-  /// Add these imports at top if not already present
-// import 'package:flutter_dotenv/flutter_dotenv.dart';
-// import 'package:http/http.dart' as http;
-// import 'dart:convert';
-// import 'package:supabase_flutter/supabase_flutter.dart';
+  // ==================== POLLING (now 100% safe even if user leaves screen) ====================
+  Future<bool> _pollAndVerifyGistPayment(String reference, int gistId) async {
+    // Try to get saved numberOfDays from pending data (most reliable)
+    final prefs = await SharedPreferences.getInstance();
+    final pendingJson = prefs.getString('pending_gist_payment');
+    int savedDays = 0;
 
-  /// Verify payment with Paystack and patch the gist row in Supabase.
-  /// Returns true if payment verified and DB patched.
-  /// amountPaidUnit: the amount Paystack returned (lowest currency unit, e.g., kobo)
-  Future<bool> _verifyPayment(
-      String reference, int gistId, int numberOfDays) async {
-    final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
-    if (paystackSecretKey == null || paystackSecretKey.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Missing Paystack secret key')),
-        );
-      }
-      return false;
+    if (pendingJson != null) {
+      try {
+        final data = jsonDecode(pendingJson) as Map<String, dynamic>;
+        savedDays = (data['numberOfDays'] as num?)?.toInt() ?? 0;
+      } catch (_) {}
     }
 
-    try {
-      // 1) Call Paystack verify endpoint
-      final verifyUrl =
-          Uri.parse('https://api.paystack.co/transaction/verify/$reference');
-      final resp = await http.get(
-        verifyUrl,
-        headers: {
-          'Authorization': 'Bearer $paystackSecretKey',
-          'Content-Type': 'application/json',
-        },
-      );
+    // Fallback to controller if nothing saved
+    if (savedDays == 0) {
+      savedDays = int.tryParse(_durationController.text) ?? 0;
+    }
 
-      if (resp.statusCode < 200 || resp.statusCode >= 300) {
-        // not verified
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-                content:
-                    Text('Payment verification failed (${resp.statusCode})')),
-          );
-        }
-        return false;
-      }
+    for (int attempt = 0; attempt < 30; attempt++) {
+      try {
+        final resp = await http.get(
+          Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
+          headers: {
+            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
+          },
+        );
 
-      final Map<String, dynamic> body =
-          jsonDecode(resp.body) as Map<String, dynamic>? ?? {};
-      final bool ok =
-          body['status'] == true || body['status']?.toString() == 'true';
-      final data = body['data'] as Map<String, dynamic>?;
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body);
+          if (data['status'] == true && data['data']?['status'] == 'success') {
+            final amountPaid = data['data']['amount'] as int;
 
-      if (!ok || data == null) {
-        if (mounted) {
-          final msg = body['message'] ?? 'Verification failed';
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Paystack verify error: $msg')),
-          );
-        }
-        return false;
-      }
+            await Supabase.instance.client.from('gists').update({
+              'paid': true,
+              'status': 'active',
+              'payment_reference': reference,
+              'amount_paid': amountPaid,
+              'end_date': DateTime.now()
+                  .add(Duration(days: savedDays)) // ← NOW USES SAVED VALUE
+                  .toIso8601String(),
+              'updated_at': DateTime.now().toIso8601String(),
+            }).eq('id', gistId);
 
-      // Paystack success statuses: check data['status'] == 'success'
-      final txStatus = data['status']?.toString() ?? '';
-      if (txStatus.toLowerCase() != 'success') {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Transaction not successful: $txStatus')),
-          );
-        }
-        return false;
-      }
-
-      final amountPaid = (data['amount'] is int)
-          ? data['amount'] as int
-          : int.tryParse('${data['amount']}') ?? 0;
-      final paymentRef = data['reference'] ?? reference;
-
-      // 2) Compute end_date from now or from start_date+numberOfDays.
-      final now = DateTime.now().toUtc();
-      final endDate = now.add(Duration(days: numberOfDays));
-
-      final supabase = Supabase.instance.client;
-
-      final updatePayload = {
-        'paid': true,
-        'status': 'active',
-        'payment_reference': paymentRef,
-        'amount_paid': amountPaid,
-        'end_date': endDate.toIso8601String(),
-        'updated_at': DateTime.now().toUtc().toIso8601String(),
-      };
-
-      final updateResp = await supabase
-          .from('gists')
-          .update(updatePayload)
-          .eq('id', gistId) // ← now int → int, perfect
-          .select()
-          .maybeSingle();
-
-      if (updateResp == null) {
-        final check = await supabase
-            .from('gists')
-            .select('paid, status')
-            .eq('id', gistId) // ← int
-            .maybeSingle();
-        if (check == null || (check['paid'] != true)) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                  content: Text('Failed to update gist after verification.')),
-            );
+            return true;
           }
-          return false;
         }
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Payment verified — gist is now active!')),
-        );
-      }
-
-      // NEW: invoke Edge Function here
-      /*try {
-        final fn = supabase.functions;
-        final gistType = (await supabase
-                .from('gists')
-                .select('type')
-                .eq('id', gistId) // ← int
-                .maybeSingle())?['type'] ??
-            'global';
-        await fn.invoke('send-push-for-gist', body: {
-          'gistId': gistId.toString(), // ← only here we need string
-          'title': 'New gist published!',
-          'body': 'Check out the latest gist on Allowance.',
-          'type': gistType,
-        });
-      } catch (e) {
-        developer.log('Error invoking Edge Function: $e', name: 'fcm');
-      }
-      */
-
-      return true;
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Verification error: ${e.toString()}')),
-        );
-      }
-      return false;
+      } catch (_) {}
+      await Future.delayed(const Duration(seconds: 4));
     }
-  }
-
-  /// After launching the checkout URL, call this to prompt the user to Verify (simple UI).
-  Future<void> _promptVerify(
-      String reference, int gistId, int numberOfDays) async {
-    // show dialog with Verify button
-    final didVerify = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Complete Payment'),
-        content: const Text(
-            'After completing payment in the browser, tap "Verify" to confirm and publish your gist.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Verify Payment'),
-          ),
-        ],
-      ),
-    );
-
-    if (didVerify == true) {
-      // show a loading indicator while verifying
-      if (!mounted) return;
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => const Center(child: CircularProgressIndicator()),
-      );
-      final ok = await _verifyPayment(reference, gistId, numberOfDays);
-      if (mounted) Navigator.of(context).pop(); // remove loading
-      if (!ok) {
-        // let user retry
-        final retry = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Verification failed'),
-            content: const Text('Could not verify payment. Try again?'),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(false),
-                  child: const Text('No')),
-              TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(true),
-                  child: const Text('Retry')),
-            ],
-          ),
-        );
-        if (retry == true) {
-          await _promptVerify(reference, gistId, numberOfDays);
-        }
-      } else {
-        // good — pop screen or refresh feed
-        if (mounted) {
-          Navigator.of(context)
-              .pop(); // close gist submission screen if desired
-        }
-      }
-    } else {
-      // user cancelled verify — do nothing. Consider deleting draft after X minutes on server.
-    }
+    return false;
   }
 
   @override

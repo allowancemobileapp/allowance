@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const String membershipTier = "Membership"; // Constant for tier name
 
@@ -72,12 +73,46 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     super.initState();
     _currentTier = widget.userPreferences.subscriptionTier ?? "Free";
     _pageController = PageController(viewportFraction: 0.77);
+
+    // ←←← SAFETY NET (friend's idea)
+    _recoverPendingSubscription();
   }
 
   @override
   void dispose() {
     _pageController.dispose();
     super.dispose();
+  }
+
+  Future<void> _recoverPendingSubscription() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pendingRef = prefs.getString('pending_sub_reference');
+    if (pendingRef == null) return;
+
+    setState(() => _isProcessing = true);
+
+    // Check it once. If it's not 'success' yet, we leave it alone.
+    final success =
+        await _pollAndProcessVerification(pendingRef, maxAttempts: 1);
+
+    if (success) {
+      // ✅ SUCCESS: Now we can safely delete it
+      await prefs.remove('pending_sub_reference');
+
+      if (mounted) {
+        setState(() => _currentTier = membershipTier);
+        widget.userPreferences.subscriptionTier = membershipTier;
+        await widget.userPreferences.savePreferences();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('✅ Subscription recovered!'),
+              backgroundColor: Colors.green),
+        );
+      }
+    }
+
+    // If NOT success, we don't call remove. We let it stay for the next time.
+    if (mounted) setState(() => _isProcessing = false);
   }
 
   Future<void> _subscribeToMembership() async {
@@ -115,7 +150,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
             'Content-Type': 'application/json',
           },
           body: jsonEncode(
-              {'email': user.email, 'first_name': '', 'last_name': ''}),
+              {'email': user.email ?? '', 'first_name': '', 'last_name': ''}),
         );
         if (resp.statusCode == 200 || resp.statusCode == 201) {
           final data = jsonDecode(resp.body)['data'];
@@ -141,7 +176,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       'amount': 70000,
       'email': user.email,
       'reference': reference,
-      'plan': 'PLN_2tgtzyaurt8qz0d', // Ensures subscription is created
+      'plan': 'PLN_2tgtzyaurt8qz0d',
       'metadata': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id}
     };
 
@@ -158,7 +193,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       if (resp.statusCode != 200) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text('Payment initialization failed: ${resp.body}')));
-        setState(() => _isProcessing = false);
         return;
       }
 
@@ -167,85 +201,74 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
       if (authUrlString != null) {
         final Uri url = Uri.parse(authUrlString);
-        final bool isSupported = await canLaunchUrl(url);
-        if (isSupported) {
-          // FIX: Force the browser to open INSIDE the app so the OS doesn't kill the app state
+
+        // ←←← SAVE REFERENCE BEFORE BROWSER OPENS
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('pending_sub_reference', reference);
+
+        if (await canLaunchUrl(url)) {
           await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'Payment opened. Complete it in the browser — we verify automatically...'),
+              duration: Duration(seconds: 8),
+            ),
+          );
         } else {
-          throw 'Could not launch $authUrlString';
+          throw 'Could not launch payment page';
         }
       }
 
-      // After launch, prompt verify
-      await _promptVerify(reference);
+      // ←←← AUTOMATIC VERIFICATION POLLING
+      final success = await _pollAndProcessVerification(
+        reference,
+        maxAttempts: 30,
+        interval: const Duration(seconds: 4),
+      );
+
+      if (success) {
+        // ✅ ONLY REMOVE IF SUCCESSFUL
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('pending_sub_reference');
+
+        setState(() => _currentTier = membershipTier);
+        widget.userPreferences.subscriptionTier = membershipTier;
+        await widget.userPreferences.savePreferences();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('✅ Subscription activated!'),
+                backgroundColor: Colors.green),
+          );
+          Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+        }
+      } else {
+        // ❌ IF FAILED/TIMED OUT, KEEP THE REFERENCE!
+        // The "Safety Net" will catch it when they return to this screen later.
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Payment taking a while. You can close this; we will check again when you return.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
     } catch (e) {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Payment error: $e')));
     } finally {
-      setState(() => _isProcessing = false);
-    }
-  }
-
-  /// Prompt user and then poll Paystack for verification.
-  Future<void> _promptVerify(String reference) async {
-    final verify = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Verify Payment'),
-        content: const Text(
-            'Tap Verify after completing payment. We will then check the transaction.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Verify')),
-        ],
-      ),
-    );
-
-    if (verify == true) {
-      setState(() => _isProcessing = true);
-      try {
-        final success = await _pollAndProcessVerification(reference);
-        if (success) {
-          setState(() => _currentTier = membershipTier);
-          widget.userPreferences.subscriptionTier = membershipTier;
-          await widget.userPreferences.savePreferences();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text('Subscription activated!'),
-                backgroundColor: Colors.green),
-          );
-          // Navigate home or refresh UI
-          if (mounted) {
-            Navigator.of(context)
-                .pushNamedAndRemoveUntil('/', (route) => false);
-          }
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text(
-                    'Payment not verified. Please try again or contact support.'),
-                backgroundColor: Colors.red),
-          );
-        }
-      } catch (e) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Verification error: $e')));
-      } finally {
-        if (mounted) setState(() => _isProcessing = false);
-      }
+      if (mounted) setState(() => _isProcessing = false);
     }
   }
 
   /// Polls Paystack's verify endpoint until we get success or timeout, then updates Supabase.
-  /// Returns true if verification + DB update succeeded, false otherwise.
   Future<bool> _pollAndProcessVerification(String reference,
-      {int maxAttempts = 12,
-      Duration interval = const Duration(seconds: 5)}) async {
-    // Try up to maxAttempts times, waiting `interval` between each attempt.
+      {int maxAttempts = 30, // ← UPDATED
+      Duration interval = const Duration(seconds: 4)}) async {
+    // ← UPDATED
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         final response = await http.get(
@@ -260,11 +283,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
           final bool ok = data['status'] == true;
           final String? txStatus = data['data']?['status'] as String?;
           if (ok && txStatus == 'success') {
-            // Successful payment — now persist to Supabase and local prefs.
             final paystackData = data['data'];
             final customerCode = paystackData['customer']?['customer_code'];
-            final subscriptionCode =
-                paystackData['subscription_code']; // Might be null
+            final subscriptionCode = paystackData['subscription_code'];
 
             final user = Supabase.instance.client.auth.currentUser;
             if (user != null) {
@@ -275,29 +296,21 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                 'updated_at': DateTime.now().toIso8601String(),
               }).eq('id', user.id);
 
-              // local prefs update (so UI reflects immediately)
               widget.userPreferences.subscriptionTier = membershipTier;
               await widget.userPreferences.savePreferences();
             }
-
-            return true; // done
+            return true;
           }
-          // else not yet successful, continue polling
         } else {
-          // non-200: decide whether to continue polling or break.
           debugPrint(
               'Paystack verify returned ${response.statusCode}: ${response.body}');
         }
       } catch (e) {
         debugPrint('Error while verifying transaction: $e');
-        // We continue polling; transient network errors can happen.
       }
 
-      // Wait before next attempt (don't block UI).
       await Future.delayed(interval);
     }
-
-    // If we reach here, we timed out without success.
     return false;
   }
 
