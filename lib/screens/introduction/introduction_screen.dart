@@ -26,6 +26,9 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   bool _loading = false;
   bool _isSignUp = false;
 
+  // 1. Add this variable to track visibility
+  bool _obscurePassword = true;
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
@@ -235,21 +238,36 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                       : null,
                 ),
                 const SizedBox(height: 16),
+
+                // 2. Updated Password Field
                 TextFormField(
                   controller: _pwCtl,
-                  decoration: const InputDecoration(
+                  obscureText: _obscurePassword, // Toggle based on state
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
                     labelText: 'Password',
-                    border: OutlineInputBorder(),
+                    border: const OutlineInputBorder(),
                     filled: true,
                     fillColor: Colors.white12,
+                    // Add the eye icon button here
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _obscurePassword
+                            ? Icons.visibility_off
+                            : Icons.visibility,
+                        color: Colors.white70,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _obscurePassword = !_obscurePassword;
+                        });
+                      },
+                    ),
                   ),
-                  style: const TextStyle(color: Colors.white),
-                  obscureText: true,
                   validator: (v) =>
                       (v == null || v.length < 6) ? 'Min 6 characters' : null,
                 ),
 
-                // Username field shown only on Sign Up
                 if (_isSignUp) ...[
                   const SizedBox(height: 16),
                   TextFormField(
@@ -266,7 +284,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                       final s = (v ?? '').trim();
                       if (s.isEmpty) return 'Choose a username';
                       if (s.length < 3) return 'At least 3 characters';
-                      // basic sanity: no spaces
                       if (s.contains(' ')) return 'No spaces allowed';
                       return null;
                     },
