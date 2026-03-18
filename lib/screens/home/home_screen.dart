@@ -14,6 +14,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'dart:developer' as developer;
+import 'package:gal/gal.dart';
 
 class HomeScreen extends StatefulWidget {
   final UserPreferences? userPreferences;
@@ -688,7 +689,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ? _fetchedGists
         : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
 
-    // Fixed label: always "Gist" if loading, empty, or no category
     final String label = _isGistsLoading
         ? "Gist"
         : filteredGists.isEmpty
@@ -734,7 +734,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
       ),
-      // Rest of slideshow unchanged...
       SizedBox(
           height: MediaQuery.of(context).size.height * 0.36,
           child: _isGistsLoading
@@ -762,20 +761,67 @@ class _HomeScreenState extends State<HomeScreen> {
                           padding: EdgeInsets.only(
                               right:
                                   actualIndex != _slideshowIndex ? 15.0 : 0.0),
-                          child: GestureDetector(
-                            onTap: () {},
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(24),
-                              child: Stack(
-                                children: [
-                                  Positioned.fill(
-                                    child: Container(
-                                      color: _isDarkMode
-                                          ? Colors.grey[750]
-                                          : Colors.grey[300],
-                                    ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(24),
+                            child: Stack(
+                              children: [
+                                Positioned.fill(
+                                  child: Container(
+                                    color: _isDarkMode
+                                        ? Colors.grey[750]
+                                        : Colors.grey[300],
                                   ),
-                                  Center(
+                                ),
+                                // --- INTERACTIVE IMAGE AREA ---
+                                GestureDetector(
+                                  onTap: () {
+                                    // 1. ZOOM/ENLARGE FEATURE
+                                    showDialog(
+                                      context: context,
+                                      builder: (context) => Dialog(
+                                        backgroundColor: Colors.black,
+                                        insetPadding: EdgeInsets.zero,
+                                        child: Stack(
+                                          alignment: Alignment.center,
+                                          children: [
+                                            InteractiveViewer(
+                                              panEnabled: true,
+                                              minScale: 0.5,
+                                              maxScale: 4.0,
+                                              child: CachedNetworkImage(
+                                                imageUrl: imageUrl,
+                                                placeholder: (context, url) =>
+                                                    const Center(
+                                                        child:
+                                                            CircularProgressIndicator()),
+                                                errorWidget:
+                                                    (context, url, error) =>
+                                                        const Icon(Icons.error),
+                                              ),
+                                            ),
+                                            Positioned(
+                                              top: 40,
+                                              right: 20,
+                                              child: IconButton(
+                                                icon: const Icon(Icons.close,
+                                                    color: Colors.white,
+                                                    size: 30),
+                                                onPressed: () =>
+                                                    Navigator.pop(context),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                  onLongPress: () {
+                                    // 2. DOWNLOAD FEATURE
+                                    if (imageUrl.isNotEmpty) {
+                                      _downloadGistImage(imageUrl);
+                                    }
+                                  },
+                                  child: Center(
                                     child: CachedNetworkImage(
                                       imageUrl: imageUrl,
                                       fit: BoxFit.contain,
@@ -795,47 +841,47 @@ class _HomeScreenState extends State<HomeScreen> {
                                       ),
                                     ),
                                   ),
-                                  if (gistUrl.isNotEmpty)
-                                    Positioned(
-                                      top: 12,
-                                      right: 12,
-                                      child: Material(
-                                        color: Colors.transparent,
-                                        child: InkWell(
-                                          borderRadius:
-                                              BorderRadius.circular(30),
-                                          onTap: () async {
-                                            final uri = Uri.tryParse(gistUrl);
-                                            if (uri != null &&
-                                                await canLaunchUrl(uri)) {
-                                              await launchUrl(uri,
-                                                  mode: LaunchMode
-                                                      .externalApplication);
-                                            } else {
-                                              if (mounted) {
-                                                ScaffoldMessenger.of(context)
-                                                    .showSnackBar(
-                                                  const SnackBar(
-                                                      content: Text(
-                                                          "Sorry, we couldn't open this link.")),
-                                                );
-                                              }
+                                ),
+                                // --- EXISTING LINK BUTTON ---
+                                if (gistUrl.isNotEmpty)
+                                  Positioned(
+                                    top: 12,
+                                    right: 12,
+                                    child: Material(
+                                      color: Colors.transparent,
+                                      child: InkWell(
+                                        borderRadius: BorderRadius.circular(30),
+                                        onTap: () async {
+                                          final uri = Uri.tryParse(gistUrl);
+                                          if (uri != null &&
+                                              await canLaunchUrl(uri)) {
+                                            await launchUrl(uri,
+                                                mode: LaunchMode
+                                                    .externalApplication);
+                                          } else {
+                                            if (mounted) {
+                                              ScaffoldMessenger.of(context)
+                                                  .showSnackBar(
+                                                const SnackBar(
+                                                    content: Text(
+                                                        "Sorry, we couldn't open this link.")),
+                                              );
                                             }
-                                          },
-                                          child: Container(
-                                            padding: const EdgeInsets.all(12),
-                                            decoration: const BoxDecoration(
-                                              color: Colors.black54,
-                                              shape: BoxShape.circle,
-                                            ),
-                                            child: const Icon(Icons.link,
-                                                size: 24, color: Colors.white),
+                                          }
+                                        },
+                                        child: Container(
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: const BoxDecoration(
+                                            color: Colors.black54,
+                                            shape: BoxShape.circle,
                                           ),
+                                          child: const Icon(Icons.link,
+                                              size: 24, color: Colors.white),
                                         ),
                                       ),
                                     ),
-                                ],
-                              ),
+                                  ),
+                              ],
                             ),
                           ),
                         ));
@@ -857,6 +903,42 @@ class _HomeScreenState extends State<HomeScreen> {
                       color: Colors.white),
                   textAlign: TextAlign.center))),
     ]);
+  }
+
+  // Helper method to download the image
+  Future<void> _downloadGistImage(String imageUrl) async {
+    try {
+      // Check if we have permission to save images
+      final hasAccess = await Gal.hasAccess();
+      if (!hasAccess) {
+        await Gal.requestAccess();
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Downloading to gallery...')),
+      );
+
+      // This package handles the heavy lifting of downloading and saving
+      await Gal.putImage(imageUrl);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ Saved to Gallery/Photos!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❌ Could not save image'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   @override

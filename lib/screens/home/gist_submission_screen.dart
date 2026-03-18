@@ -397,6 +397,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
             child: Column(
               children: [
                 DropdownButtonFormField<String>(
+                  // This style property fixes the text color of the SELECTED item
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontFamily: 'SanFrancisco'),
                   decoration: InputDecoration(
                     labelText: 'Type of Gist',
                     labelStyle: const TextStyle(color: Colors.white70),
@@ -406,19 +411,33 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                         borderSide: BorderSide(color: widget.themeColor)),
                   ),
                   items: _typeMap.keys
-                      .map((g) => DropdownMenuItem(value: g, child: Text(g)))
+                      .map((g) => DropdownMenuItem(
+                            value: g,
+                            // This style fixes the text color of items INSIDE the list
+                            child: Text(g,
+                                style: const TextStyle(color: Colors.white)),
+                          ))
                       .toList(),
                   value: _selectedGistType,
                   onChanged: (v) =>
                       mounted ? setState(() => _selectedGistType = v) : null,
                   validator: (v) => v == null ? 'Select a gist type' : null,
-                  dropdownColor: Colors.grey[850],
+                  dropdownColor:
+                      Colors.grey[850], // Background color of the popup menu
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontFamily: 'SanFrancisco'),
                   value: _selectedCategory,
                   items: categories
-                      .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                      .map((c) => DropdownMenuItem(
+                            value: c,
+                            child: Text(c,
+                                style: const TextStyle(color: Colors.white)),
+                          ))
                       .toList(),
                   onChanged: (val) => setState(() => _selectedCategory = val),
                   decoration: InputDecoration(
@@ -443,6 +462,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                       }
                       final schools = snap.data ?? [];
                       return DropdownButtonFormField<String>(
+                        // 1. This makes the SELECTED text white
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontFamily: 'SanFrancisco'),
                         decoration: InputDecoration(
                           labelText: 'Select University',
                           labelStyle: const TextStyle(color: Colors.white70),
@@ -454,7 +478,14 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                         items: schools.map((s) {
                           final id = s['id']?.toString() ?? '';
                           final name = s['name']?.toString() ?? id;
-                          return DropdownMenuItem(value: id, child: Text(name));
+                          return DropdownMenuItem(
+                            value: id,
+                            // 2. This makes the text INSIDE THE LIST white
+                            child: Text(
+                              name,
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                          );
                         }).toList(),
                         value: _selectedSchoolId,
                         onChanged: (v) => mounted
