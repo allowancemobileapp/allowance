@@ -115,11 +115,13 @@ class _HomeScreenState extends State<HomeScreen> {
     });
 
     try {
-      // Request only paid & active gists from server (server filtering preferred).
+      // UPDATED: Added profiles(username) to the select statement
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
-          .select(
-              'id, title, image_url, type, school_id, url, created_at, category')
+          .select('''
+            id, title, image_url, type, school_id, url, created_at, category,
+            profiles:user_id(username)
+          ''')
           .eq('paid', true)
           .eq('status', 'active')
           .order('created_at', ascending: false)
@@ -129,26 +131,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
       List<Map<String, dynamic>> list = raw;
 
-      // Apply client-side visibility rules:
-      // - if user has selected a school (sid): show global + local for that school
-      // - if no school selected: show only global
-
-      final sidStr = _prefs.schoolId; // stored as String or null
+      final sidStr = _prefs.schoolId;
       final int? sidInt = sidStr != null ? int.tryParse(sidStr) : null;
 
       if (sidStr != null && sidStr.isNotEmpty) {
-        // Filter list to global OR local matching this sid
         list = list.where((g) {
           final type = (g['type'] ?? '').toString().toLowerCase();
           if (type == 'global') return true;
           if (type == 'local') {
             final gSchool = g['school_id'];
             if (gSchool == null) return false;
-
-            // Normalize DB school id to int if possible
             final int? gsInt = int.tryParse(gSchool.toString());
-
-            // Compare ints if both available, otherwise fall back to string compare
             if (gsInt != null && sidInt != null) {
               return gsInt == sidInt;
             } else {
@@ -158,7 +151,6 @@ class _HomeScreenState extends State<HomeScreen> {
           return false;
         }).toList();
       } else {
-        // No school selected -> only global gists
         list = list
             .where(
                 (g) => (g['type'] ?? '').toString().toLowerCase() == 'global')
@@ -171,7 +163,6 @@ class _HomeScreenState extends State<HomeScreen> {
         _isGistsLoading = false;
       });
 
-      // If nothing to show, use fallback placeholders
       if (_fetchedGists.isEmpty) {
         setState(() {
           _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
@@ -772,7 +763,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                         : Colors.grey[300],
                                   ),
                                 ),
-                                // --- INTERACTIVE IMAGE AREA ---
+                                // --- IMAGE INTERACTION AREA ---
                                 GestureDetector(
                                   onTap: () {
                                     // 1. ZOOM/ENLARGE FEATURE
@@ -830,19 +821,13 @@ class _HomeScreenState extends State<HomeScreen> {
                                             color: themeColor),
                                       ),
                                       errorWidget: (context, url, error) =>
-                                          Center(
-                                        child: Icon(
-                                          Icons.broken_image,
-                                          color: _isDarkMode
-                                              ? Colors.white54
-                                              : Colors.black54,
-                                          size: 50,
-                                        ),
+                                          const Center(
+                                        child:
+                                            Icon(Icons.broken_image, size: 50),
                                       ),
                                     ),
                                   ),
                                 ),
-                                // --- EXISTING LINK BUTTON ---
                                 if (gistUrl.isNotEmpty)
                                   Positioned(
                                     top: 12,
@@ -858,15 +843,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                             await launchUrl(uri,
                                                 mode: LaunchMode
                                                     .externalApplication);
-                                          } else {
-                                            if (mounted) {
-                                              ScaffoldMessenger.of(context)
-                                                  .showSnackBar(
-                                                const SnackBar(
-                                                    content: Text(
-                                                        "Sorry, we couldn't open this link.")),
-                                              );
-                                            }
                                           }
                                         },
                                         child: Container(
@@ -891,17 +867,28 @@ class _HomeScreenState extends State<HomeScreen> {
       Center(
           child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Text(
-                  filteredGists.isNotEmpty &&
-                          _slideshowIndex < filteredGists.length
-                      ? filteredGists[_slideshowIndex]['title'] as String? ??
-                          'Loading...'
-                      : '',
+              child: Builder(builder: (context) {
+                if (filteredGists.isEmpty ||
+                    _slideshowIndex >= filteredGists.length) {
+                  return const SizedBox.shrink();
+                }
+                final currentGist = filteredGists[_slideshowIndex];
+                final title = currentGist['title'] as String? ?? '';
+
+                // Fetch username from the joined profile
+                final profileData = currentGist['profiles'];
+                final username =
+                    (profileData is Map) ? profileData['username'] : null;
+
+                return Text(
+                  username != null ? "@$username: $title" : title,
                   style: const TextStyle(
                       fontFamily: 'SanFrancisco',
                       fontSize: 18,
                       color: Colors.white),
-                  textAlign: TextAlign.center))),
+                  textAlign: TextAlign.center,
+                );
+              }))),
     ]);
   }
 
