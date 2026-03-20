@@ -182,7 +182,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
         .toStringAsFixed(0);
     // 📝 Build detailed message
     final message = StringBuffer();
-    message.writeln("Hello! I'd like to order from $vendorName:");
+    message.writeln("Hello! I'd like to order from $vendorName: on Allowance!");
     message.writeln("Items:");
     for (var i in items) {
       final name = i['name'];
