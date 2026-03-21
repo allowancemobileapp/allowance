@@ -223,9 +223,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'category': _selectedCategory,
       };
 
-      if (chosenSchoolId != null && chosenSchoolId.isNotEmpty) {
+      // ONLY attach the school_id if the gist type is 'local'
+      if (dbType == 'local' &&
+          chosenSchoolId != null &&
+          chosenSchoolId.isNotEmpty) {
         draftPayload['school_id'] = int.tryParse(chosenSchoolId);
       }
+
       if (_urlController.text.trim().isNotEmpty) {
         draftPayload['url'] = _urlController.text.trim();
       }
