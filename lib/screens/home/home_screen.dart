@@ -51,7 +51,6 @@ class _HomeScreenState extends State<HomeScreen> {
   final FocusNode _restaurantFocusNode = FocusNode();
   final supabase = Supabase.instance.client;
   late PageController _pageController;
-  int _slideshowIndex = 0;
   Timer? _slideshowTimer;
   List<Map<String, dynamic>> _fetchedGists = [];
 
@@ -469,7 +468,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                child: Text("Please select a school first.",
+                child: Text("Please select a school at the top right corner.",
                     style: TextStyle(
                         fontFamily: 'Montserrat',
                         fontSize: 16,
@@ -680,20 +679,21 @@ class _HomeScreenState extends State<HomeScreen> {
         ? _fetchedGists
         : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
 
+    // Updated label logic since we aren't swiping horizontally anymore
     final String label = _isGistsLoading
         ? "Gist"
         : filteredGists.isEmpty
             ? "Gist"
-            : (filteredGists[_slideshowIndex < filteredGists.length
-                    ? _slideshowIndex
-                    : 0]['category'] as String? ??
-                "Gist");
+            : (_gistFilter == 'All' ? "All Gists" : "$_gistFilter Gists");
 
     final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
 
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Center(
-        child: GestureDetector(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        // --- 1. THE GIST FILTER BAR (Megaphone) ---
+        // This stays pinned right above the scrolling gists
+        GestureDetector(
           onTap: _showGistFilterSheet,
           child: Container(
             width: horizontalBarWidth,
@@ -724,172 +724,170 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
-      ),
-      SizedBox(
-          height: MediaQuery.of(context).size.height * 0.36,
+
+        // --- 2. THE SCROLLABLE VERTICAL GISTS ---
+        Expanded(
           child: _isGistsLoading
               ? Center(child: CircularProgressIndicator(color: themeColor))
-              : PageView.builder(
-                  controller: _pageController,
-                  onPageChanged: (i) {
-                    if (filteredGists.isNotEmpty) {
-                      setState(
-                          () => _slideshowIndex = i % filteredGists.length);
-                    }
-                  },
-                  itemCount: filteredGists.isEmpty ? 0 : null,
-                  itemBuilder: (ctx, idx) {
-                    if (filteredGists.isEmpty) return const SizedBox.shrink();
-                    final actualIndex = idx % filteredGists.length;
-                    final gist = filteredGists[actualIndex];
-                    final imageUrl = (gist['image_url'] as String?) ?? '';
-                    final gistUrl = (gist['url'] as String?) ?? '';
-                    final scale = _slideshowIndex == actualIndex ? 1.0 : 0.9;
+              : RefreshIndicator(
+                  color: themeColor,
+                  onRefresh:
+                      _fetchGistsAndStartSlideshow, // Pull down to refresh!
+                  child: ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.only(bottom: 40, top: 8),
+                    itemCount: filteredGists.isEmpty ? 0 : filteredGists.length,
+                    itemBuilder: (ctx, idx) {
+                      final gist = filteredGists[idx];
+                      final imageUrl = (gist['image_url'] as String?) ?? '';
+                      final gistUrl = (gist['url'] as String?) ?? '';
+                      final title = gist['title'] as String? ?? '';
 
-                    return Transform.scale(
-                        scale: scale,
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                              right:
-                                  actualIndex != _slideshowIndex ? 15.0 : 0.0),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(24),
-                            child: Stack(
-                              children: [
-                                Positioned.fill(
-                                  child: Container(
-                                    color: _isDarkMode
-                                        ? Colors.grey[750]
-                                        : Colors.grey[300],
-                                  ),
-                                ),
-                                // --- IMAGE INTERACTION AREA ---
-                                GestureDetector(
-                                  onTap: () {
-                                    // 1. ZOOM/ENLARGE FEATURE
-                                    showDialog(
-                                      context: context,
-                                      builder: (context) => Dialog(
-                                        backgroundColor: Colors.black,
-                                        insetPadding: EdgeInsets.zero,
-                                        child: Stack(
-                                          alignment: Alignment.center,
-                                          children: [
-                                            InteractiveViewer(
-                                              panEnabled: true,
-                                              minScale: 0.5,
-                                              maxScale: 4.0,
-                                              child: CachedNetworkImage(
-                                                imageUrl: imageUrl,
-                                                placeholder: (context, url) =>
-                                                    const Center(
-                                                        child:
-                                                            CircularProgressIndicator()),
-                                                errorWidget:
-                                                    (context, url, error) =>
+                      final profileData = gist['profiles'];
+                      final username =
+                          (profileData is Map) ? profileData['username'] : null;
+
+                      return Padding(
+                        padding: const EdgeInsets.only(
+                            bottom: 32.0), // Space between gists
+                        child: Column(
+                          children: [
+                            // THE IMAGE BOX
+                            SizedBox(
+                              height: MediaQuery.of(context).size.height * 0.36,
+                              width:
+                                  horizontalBarWidth, // Match the width of the top bars
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(24),
+                                child: Stack(
+                                  children: [
+                                    Positioned.fill(
+                                      child: Container(
+                                        color: _isDarkMode
+                                            ? Colors.grey[750]
+                                            : Colors.grey[300],
+                                      ),
+                                    ),
+                                    GestureDetector(
+                                      onTap: () {
+                                        // ZOOM FEATURE
+                                        showDialog(
+                                          context: context,
+                                          builder: (context) => Dialog(
+                                            backgroundColor: Colors.black,
+                                            insetPadding: EdgeInsets.zero,
+                                            child: Stack(
+                                              alignment: Alignment.center,
+                                              children: [
+                                                InteractiveViewer(
+                                                  panEnabled: true,
+                                                  minScale: 0.5,
+                                                  maxScale: 4.0,
+                                                  child: CachedNetworkImage(
+                                                    imageUrl: imageUrl,
+                                                    placeholder: (context,
+                                                            url) =>
+                                                        const Center(
+                                                            child:
+                                                                CircularProgressIndicator()),
+                                                    errorWidget: (context, url,
+                                                            error) =>
                                                         const Icon(Icons.error),
-                                              ),
+                                                  ),
+                                                ),
+                                                Positioned(
+                                                  top: 40,
+                                                  right: 20,
+                                                  child: IconButton(
+                                                    icon: const Icon(
+                                                        Icons.close,
+                                                        color: Colors.white,
+                                                        size: 30),
+                                                    onPressed: () =>
+                                                        Navigator.pop(context),
+                                                  ),
+                                                ),
+                                              ],
                                             ),
-                                            Positioned(
-                                              top: 40,
-                                              right: 20,
-                                              child: IconButton(
-                                                icon: const Icon(Icons.close,
-                                                    color: Colors.white,
-                                                    size: 30),
-                                                onPressed: () =>
-                                                    Navigator.pop(context),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                  onLongPress: () {
-                                    // 2. DOWNLOAD FEATURE
-                                    if (imageUrl.isNotEmpty) {
-                                      _downloadGistImage(imageUrl);
-                                    }
-                                  },
-                                  child: Center(
-                                    child: CachedNetworkImage(
-                                      imageUrl: imageUrl,
-                                      fit: BoxFit.contain,
-                                      placeholder: (context, url) => Center(
-                                        child: CircularProgressIndicator(
-                                            color: themeColor),
-                                      ),
-                                      errorWidget: (context, url, error) =>
-                                          const Center(
-                                        child:
-                                            Icon(Icons.broken_image, size: 50),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                if (gistUrl.isNotEmpty)
-                                  Positioned(
-                                    top: 12,
-                                    right: 12,
-                                    child: Material(
-                                      color: Colors.transparent,
-                                      child: InkWell(
-                                        borderRadius: BorderRadius.circular(30),
-                                        onTap: () async {
-                                          final uri = Uri.tryParse(gistUrl);
-                                          if (uri != null &&
-                                              await canLaunchUrl(uri)) {
-                                            await launchUrl(uri,
-                                                mode: LaunchMode
-                                                    .externalApplication);
-                                          }
-                                        },
-                                        child: Container(
-                                          padding: const EdgeInsets.all(12),
-                                          decoration: const BoxDecoration(
-                                            color: Colors.black54,
-                                            shape: BoxShape.circle,
                                           ),
-                                          child: const Icon(Icons.link,
-                                              size: 24, color: Colors.white),
+                                        );
+                                      },
+                                      onLongPress: () {
+                                        // DOWNLOAD FEATURE
+                                        if (imageUrl.isNotEmpty)
+                                          _downloadGistImage(imageUrl);
+                                      },
+                                      child: Center(
+                                        child: CachedNetworkImage(
+                                          imageUrl: imageUrl,
+                                          fit: BoxFit
+                                              .cover, // Changed to cover for better vertical feed aesthetics
+                                          placeholder: (context, url) => Center(
+                                              child: CircularProgressIndicator(
+                                                  color: themeColor)),
+                                          errorWidget: (context, url, error) =>
+                                              const Center(
+                                                  child: Icon(
+                                                      Icons.broken_image,
+                                                      size: 50)),
                                         ),
                                       ),
                                     ),
-                                  ),
-                              ],
+                                    if (gistUrl.isNotEmpty)
+                                      Positioned(
+                                        top: 12,
+                                        right: 12,
+                                        child: Material(
+                                          color: Colors.transparent,
+                                          child: InkWell(
+                                            borderRadius:
+                                                BorderRadius.circular(30),
+                                            onTap: () async {
+                                              final uri = Uri.tryParse(gistUrl);
+                                              if (uri != null &&
+                                                  await canLaunchUrl(uri)) {
+                                                await launchUrl(uri,
+                                                    mode: LaunchMode
+                                                        .externalApplication);
+                                              }
+                                            },
+                                            child: Container(
+                                              padding: const EdgeInsets.all(12),
+                                              decoration: const BoxDecoration(
+                                                color: Colors.black54,
+                                                shape: BoxShape.circle,
+                                              ),
+                                              child: const Icon(Icons.link,
+                                                  size: 24,
+                                                  color: Colors.white),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
                             ),
-                          ),
-                        ));
-                  },
-                )),
-      const SizedBox(height: 8),
-      Center(
-          child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Builder(builder: (context) {
-                if (filteredGists.isEmpty ||
-                    _slideshowIndex >= filteredGists.length) {
-                  return const SizedBox.shrink();
-                }
-                final currentGist = filteredGists[_slideshowIndex];
-                final title = currentGist['title'] as String? ?? '';
-
-                // Fetch username from the joined profile
-                final profileData = currentGist['profiles'];
-                final username =
-                    (profileData is Map) ? profileData['username'] : null;
-
-                return Text(
-                  username != null ? "@$username: $title" : title,
-                  style: const TextStyle(
-                      fontFamily: 'SanFrancisco',
-                      fontSize: 18,
-                      color: Colors.white),
-                  textAlign: TextAlign.center,
-                );
-              }))),
-    ]);
+                            const SizedBox(height: 12),
+                            // THE CAPTION
+                            Text(
+                              username != null ? "@$username: $title" : title,
+                              style: const TextStyle(
+                                fontFamily: 'SanFrancisco',
+                                fontSize: 18,
+                                color: Colors.white,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+        ),
+      ],
+    );
   }
 
   // Helper method to download the image
@@ -942,22 +940,20 @@ class _HomeScreenState extends State<HomeScreen> {
         bottomNavigationBar: _buildCustomFooter(bgColor),
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         body: SafeArea(
-          child: IndexedStack(index: _selectedIndex, children: [
-            // ---> Added RefreshIndicator here <---
-            RefreshIndicator(
-              color: themeColor,
-              onRefresh:
-                  _fetchGistsAndStartSlideshow, // Calls your fetch method when dragged
-              child: SingleChildScrollView(
-                physics:
-                    const AlwaysScrollableScrollPhysics(), // Ensures drag-down works even on smaller screens
-                child: Padding(
-                  padding: const EdgeInsets.only(
-                      left: 16, top: 70, right: 16, bottom: 8),
-                  child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      mainAxisAlignment: MainAxisAlignment.center,
+          child: IndexedStack(
+            index: _selectedIndex,
+            children: [
+              // ---> INDEX 0: HOME SCREEN <---
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // --- FIXED TOP BARS (Will NOT scroll) ---
+                  Padding(
+                    padding: const EdgeInsets.only(
+                        left: 16, top: 30, right: 16, bottom: 8),
+                    child: Column(
                       children: [
+                        // 1. Vendor Bar
                         GestureDetector(
                           onTap: () {
                             setState(() => _vendorBarTapped = true);
@@ -977,40 +973,40 @@ class _HomeScreenState extends State<HomeScreen> {
                                   color: themeColor, size: 20),
                               const SizedBox(width: 8),
                               Expanded(
-                                  child: _selectedRestaurants.isNotEmpty
-                                      ? SingleChildScrollView(
-                                          scrollDirection: Axis.horizontal,
-                                          child: Row(
-                                              children: _selectedRestaurants
-                                                  .map((v) => Padding(
-                                                        padding:
-                                                            const EdgeInsets
-                                                                .only(
-                                                                right: 12),
-                                                        child: Chip(
-                                                          label: Text(v,
-                                                              style: TextStyle(
-                                                                  fontFamily:
-                                                                      'SanFrancisco',
-                                                                  fontSize: 18 *
-                                                                      vendorBudgetTextSizeFactor,
-                                                                  color: Colors
-                                                                      .white)),
-                                                          backgroundColor:
-                                                              _isDarkMode
-                                                                  ? Colors
-                                                                      .grey[700]
-                                                                  : Colors.grey[
-                                                                      300],
-                                                        ),
-                                                      ))
-                                                  .toList()))
-                                      : Text("Select Vendor",
-                                          style: TextStyle(
-                                              fontFamily: 'SanFrancisco',
-                                              fontSize: 22 *
-                                                  vendorBudgetTextSizeFactor,
-                                              color: Colors.white54))),
+                                child: _selectedRestaurants.isNotEmpty
+                                    ? SingleChildScrollView(
+                                        scrollDirection: Axis.horizontal,
+                                        child: Row(
+                                            children: _selectedRestaurants
+                                                .map((v) => Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                              right: 12),
+                                                      child: Chip(
+                                                        label: Text(v,
+                                                            style: TextStyle(
+                                                                fontFamily:
+                                                                    'SanFrancisco',
+                                                                fontSize: 18 *
+                                                                    vendorBudgetTextSizeFactor,
+                                                                color: Colors
+                                                                    .white)),
+                                                        backgroundColor:
+                                                            _isDarkMode
+                                                                ? Colors
+                                                                    .grey[700]
+                                                                : Colors
+                                                                    .grey[300],
+                                                      ),
+                                                    ))
+                                                .toList()))
+                                    : Text("Select Vendor",
+                                        style: TextStyle(
+                                            fontFamily: 'SanFrancisco',
+                                            fontSize:
+                                                22 * vendorBudgetTextSizeFactor,
+                                            color: Colors.white54)),
+                              ),
                               !_vendorBarTapped
                                   ? Icon(BoxIcons.bxs_chevron_down,
                                       color: themeColor, size: 22)
@@ -1019,6 +1015,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           ),
                         ),
                         const SizedBox(height: 16),
+
+                        // 2. Budget Bar
                         Container(
                           width: horizontalBarWidth,
                           height: 44,
@@ -1033,23 +1031,24 @@ class _HomeScreenState extends State<HomeScreen> {
                                 color: themeColor, size: 20),
                             const SizedBox(width: 8),
                             Expanded(
-                                child: TextField(
-                                    controller: _budgetController,
-                                    focusNode: _budgetFocusNode,
-                                    keyboardType: TextInputType.number,
-                                    style: TextStyle(
+                              child: TextField(
+                                controller: _budgetController,
+                                focusNode: _budgetFocusNode,
+                                keyboardType: TextInputType.number,
+                                style: TextStyle(
+                                    fontFamily: 'SanFrancisco',
+                                    fontSize: 18 * vendorBudgetTextSizeFactor,
+                                    color: Colors.white),
+                                decoration: InputDecoration(
+                                    hintText: "Enter Budget",
+                                    hintStyle: TextStyle(
                                         fontFamily: 'SanFrancisco',
+                                        color: Colors.white54,
                                         fontSize:
-                                            18 * vendorBudgetTextSizeFactor,
-                                        color: Colors.white),
-                                    decoration: InputDecoration(
-                                        hintText: "Enter Budget",
-                                        hintStyle: TextStyle(
-                                            fontFamily: 'SanFrancisco',
-                                            color: Colors.white54,
-                                            fontSize: 22 *
-                                                vendorBudgetTextSizeFactor),
-                                        border: InputBorder.none))),
+                                            22 * vendorBudgetTextSizeFactor),
+                                    border: InputBorder.none),
+                              ),
+                            ),
                             _budgetFocusNode.hasFocus || _isBudgetEntered
                                 ? InkWell(
                                     onTap: _goToAvailableOptions,
@@ -1067,30 +1066,40 @@ class _HomeScreenState extends State<HomeScreen> {
                           ]),
                         ),
                         const SizedBox(height: 12),
-                        SizedBox(
-                            width: horizontalBarWidth,
-                            height: 50,
-                            child: SingleChildScrollView(
-                                scrollDirection: Axis.horizontal,
-                                child: Row(
-                                    children: _colorfulTabs
-                                        .map((tab) => _buildRectangularTab(tab))
-                                        .toList()))),
-                        const SizedBox(height: 16),
-                        Align(
-                            alignment: Alignment.centerLeft,
-                            child: _buildGistSlideshow()),
-                      ]),
-                ),
-              ),
-            ),
 
-            FavoritesScreen(userPreferences: _prefs),
-            SubscriptionScreen(userPreferences: _prefs, themeColor: themeColor),
-            ProfileScreen(
-                userPreferences: _prefs,
-                onSave: () => setState(() => _selectedIndex = 0)),
-          ]),
+                        // 3. Colorful Tabs
+                        SizedBox(
+                          width: horizontalBarWidth,
+                          height: 50,
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: _colorfulTabs
+                                  .map((tab) => _buildRectangularTab(tab))
+                                  .toList(),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // --- SCROLLABLE GISTS (Takes up remaining screen space) ---
+                  Expanded(
+                    child: _buildGistSlideshow(),
+                  ),
+                ],
+              ),
+
+              // INDEX 1, 2, 3...
+              FavoritesScreen(userPreferences: _prefs),
+              SubscriptionScreen(
+                  userPreferences: _prefs, themeColor: themeColor),
+              ProfileScreen(
+                  userPreferences: _prefs,
+                  onSave: () => setState(() => _selectedIndex = 0)),
+            ],
+          ),
         ),
       ),
     );

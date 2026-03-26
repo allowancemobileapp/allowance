@@ -51,6 +51,8 @@ flutter:
     - assets/images/
     - assets/fonts/
     - assets/images/order.png
+    - assets/images/allowance_logo.png
+    - assets/images/app_icon.png
 
   fonts:
     - family: SanFrancisco

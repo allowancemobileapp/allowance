@@ -343,7 +343,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       savedDays = int.tryParse(_durationController.text) ?? 0;
     }
 
-    for (int attempt = 0; attempt < 30; attempt++) {
+    for (int attempt = 0; attempt < 2; attempt++) {
       try {
         final resp = await http.get(
           Uri.parse('https://api.paystack.co/transaction/verify/$reference'),

@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/home_screen.dart';
-import 'package:allowance/screens/profile/edit_profile_screen.dart'; // <-- new import
+import 'package:allowance/screens/profile/edit_profile_screen.dart';
 
 class IntroductionScreen extends StatefulWidget {
   final VoidCallback onFinishIntro;
@@ -25,10 +25,11 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   final _usernameCtl = TextEditingController();
   bool _loading = false;
   bool _isSignUp = false;
-
-  // 1. Add this variable to track visibility
   bool _obscurePassword = true;
 
+  // ---------------------------------------------------------------------------
+  // RESTORED: YOUR COMPLETE ORIGINAL LOGIC
+  // ---------------------------------------------------------------------------
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _loading = true);
@@ -63,7 +64,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         try {
           final currentUser = supabase.auth.currentUser;
           if (currentUser != null) {
-            // insert only if not exists
             final existing = await supabase
                 .from('profiles')
                 .select('id')
@@ -80,7 +80,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
               if (usernameVal.isNotEmpty) insertMap['username'] = usernameVal;
               await supabase.from('profiles').insert(insertMap);
             } else {
-              // optionally update server profile if server username empty and user provided one
               final profileResp = await supabase
                   .from('profiles')
                   .select()
@@ -99,36 +98,31 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
             }
           }
         } catch (e) {
-          // non-fatal: log and continue to let user edit profile screen fix it
           debugPrint('Profile creation after signup failed (non-fatal): $e');
         }
 
-        // 4) Load preferences (will merge server profile into local prefs if available)
+        // 4) Load preferences
         try {
           await widget.userPreferences.loadPreferences();
         } catch (e) {
           debugPrint('loadPreferences after sign-up failed: $e');
         }
 
-        // 5) Redirect user to EditProfileScreen so they can finish profile before entering Home.
-        // We use pushReplacement so they can't go back to Intro with back button.
+        // 5) Redirect user to EditProfileScreen
         if (mounted) {
-          // ignore: unused_local_variable
-          final edited = await Navigator.of(context).pushReplacement(
+          await Navigator.of(context).pushReplacement(
             MaterialPageRoute(
               builder: (_) =>
                   EditProfileScreen(userPreferences: widget.userPreferences),
             ),
           );
 
-          // After edit screen returns (or user popped), ensure prefs are reloaded and go to Home.
           try {
             await widget.userPreferences.loadPreferences();
           } catch (e) {
             debugPrint('loadPreferences after edit failed: $e');
           }
 
-          // Invoke callback and go to Home
           widget.onFinishIntro();
           if (mounted) {
             Navigator.pushReplacement(
@@ -152,14 +146,12 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           throw AuthException('Authentication failed');
         }
 
-        // Load preferences (merge server profile)
         try {
           await widget.userPreferences.loadPreferences();
         } catch (e) {
           debugPrint('loadPreferences after login failed: $e');
         }
 
-        // Success: go to Home
         widget.onFinishIntro();
         if (mounted) {
           Navigator.pushReplacement(
@@ -196,123 +188,179 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     super.dispose();
   }
 
+  // ---------------------------------------------------------------------------
+  // UI HELPERS
+  // ---------------------------------------------------------------------------
+  Widget _buildTextField({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    bool obscureText = false,
+    TextInputType? keyboardType,
+    Widget? suffixIcon,
+    String? Function(String?)? validator,
+  }) {
+    return TextFormField(
+      controller: controller,
+      obscureText: obscureText,
+      keyboardType: keyboardType,
+      style: const TextStyle(color: Colors.white, fontSize: 16),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(color: Colors.white54),
+        prefixIcon: Icon(icon, color: Colors.white54, size: 22),
+        suffixIcon: suffixIcon,
+        filled: true,
+        fillColor: const Color(0xFF1A1A1A),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: Colors.white24, width: 1),
+        ),
+        errorBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide:
+              BorderSide(color: Colors.redAccent.withOpacity(0.5), width: 1),
+        ),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+      ),
+      validator: validator,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 32.0),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Text(
-                  'Allowance',
-                  style: TextStyle(
-                    fontSize: 36,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 28.0),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 1. App Icon
+                  Center(
+                    child: Image.asset(
+                      'assets/images/app_icon.png',
+                      height: 90,
+                      fit: BoxFit.contain,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  _isSignUp ? 'Create a new account' : 'Log in to your account',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 20, color: Colors.white70),
-                ),
-                const SizedBox(height: 32),
-                TextFormField(
-                  controller: _emailCtl,
-                  decoration: const InputDecoration(
-                    labelText: 'Email',
-                    border: OutlineInputBorder(),
-                    filled: true,
-                    fillColor: Colors.white12,
-                  ),
-                  keyboardType: TextInputType.emailAddress,
-                  style: const TextStyle(color: Colors.white),
-                  validator: (v) => (v == null || !v.contains('@'))
-                      ? 'Enter a valid email'
-                      : null,
-                ),
-                const SizedBox(height: 16),
 
-                // 2. Updated Password Field
-                TextFormField(
-                  controller: _pwCtl,
-                  obscureText: _obscurePassword, // Toggle based on state
-                  style: const TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
-                    labelText: 'Password',
-                    border: const OutlineInputBorder(),
-                    filled: true,
-                    fillColor: Colors.white12,
-                    // Add the eye icon button here
+                  const SizedBox(height: 4),
+
+                  // 2. Allowance Logo - VISUALLY 5X BIGGER
+                  Center(
+                    child: Transform.scale(
+                      scale:
+                          3.0, // <--- Adjust this (e.g., 2.0) if it's too big for the screen
+                      child: Image.asset(
+                        'assets/images/allowance_logo.png',
+                        width: MediaQuery.of(context).size.width * 0.7,
+                        height: 70,
+                        fit: BoxFit.contain,
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  Text(
+                    _isSignUp ? 'Create a new account' : 'Welcome back',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 16, color: Colors.white54),
+                  ),
+                  const SizedBox(height: 48),
+
+                  _buildTextField(
+                    controller: _emailCtl,
+                    label: 'Email',
+                    icon: Icons.email_outlined,
+                    validator: (v) => (v == null || !v.contains('@'))
+                        ? 'Enter valid email'
+                        : null,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildTextField(
+                    controller: _pwCtl,
+                    label: 'Password',
+                    icon: Icons.lock_outline,
+                    obscureText: _obscurePassword,
                     suffixIcon: IconButton(
                       icon: Icon(
-                        _obscurePassword
-                            ? Icons.visibility_off
-                            : Icons.visibility,
-                        color: Colors.white70,
-                      ),
-                      onPressed: () {
-                        setState(() {
-                          _obscurePassword = !_obscurePassword;
-                        });
-                      },
+                          _obscurePassword
+                              ? Icons.visibility_off
+                              : Icons.visibility,
+                          color: Colors.white54),
+                      onPressed: () =>
+                          setState(() => _obscurePassword = !_obscurePassword),
                     ),
+                    validator: (v) =>
+                        (v == null || v.length < 6) ? 'Min 6 characters' : null,
                   ),
-                  validator: (v) =>
-                      (v == null || v.length < 6) ? 'Min 6 characters' : null,
-                ),
-
-                if (_isSignUp) ...[
-                  const SizedBox(height: 16),
-                  TextFormField(
-                    controller: _usernameCtl,
-                    decoration: const InputDecoration(
-                      labelText: 'Username',
-                      border: OutlineInputBorder(),
-                      filled: true,
-                      fillColor: Colors.white12,
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 300),
+                    child: _isSignUp
+                        ? Padding(
+                            padding: const EdgeInsets.only(top: 16.0),
+                            child: _buildTextField(
+                              controller: _usernameCtl,
+                              label: 'Username',
+                              icon: Icons.person_outline,
+                              validator: (v) => (_isSignUp && (v ?? '').isEmpty)
+                                  ? 'Required'
+                                  : null,
+                            ),
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                  const SizedBox(height: 40),
+                  _loading
+                      ? const Center(
+                          child: CircularProgressIndicator(color: Colors.white))
+                      : ElevatedButton(
+                          onPressed: _submit,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16)),
+                          ),
+                          child: Text(_isSignUp ? 'Sign Up' : 'Log In',
+                              style: const TextStyle(
+                                  fontSize: 18, fontWeight: FontWeight.bold)),
+                        ),
+                  const SizedBox(height: 24),
+                  TextButton(
+                    onPressed: () => setState(() => _isSignUp = !_isSignUp),
+                    child: RichText(
+                      text: TextSpan(
+                        text: _isSignUp
+                            ? 'Already have an account? '
+                            : 'Don\'t have an account? ',
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 15),
+                        children: [
+                          TextSpan(
+                              text: _isSignUp ? 'Log In' : 'Sign Up',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold)),
+                        ],
+                      ),
                     ),
-                    style: const TextStyle(color: Colors.white),
-                    validator: (v) {
-                      if (!_isSignUp) return null;
-                      final s = (v ?? '').trim();
-                      if (s.isEmpty) return 'Choose a username';
-                      if (s.length < 3) return 'At least 3 characters';
-                      if (s.contains(' ')) return 'No spaces allowed';
-                      return null;
-                    },
                   ),
                 ],
-
-                const SizedBox(height: 24),
-                _loading
-                    ? const CircularProgressIndicator()
-                    : SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: _submit,
-                          child: Text(_isSignUp ? 'Sign Up' : 'Log In'),
-                        ),
-                      ),
-                const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () => setState(() {
-                    _isSignUp = !_isSignUp;
-                  }),
-                  child: Text(
-                    _isSignUp
-                        ? 'Already have an account? Log In'
-                        : 'Don\'t have an account? Sign Up',
-                    style: const TextStyle(color: Colors.white70),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         ),
