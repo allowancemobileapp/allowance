@@ -36,8 +36,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       "tier": membershipTier,
       "price": "N700/Month",
       "features": [
-        "Order custom chow",
         "Enjoy the ad free life",
+        "Get access to our trusted delivery agents",
       ],
       "cta": "N700/month",
       "imageHeight": 110.0,
@@ -266,8 +266,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   /// Polls Paystack's verify endpoint until we get success or timeout, then updates Supabase.
   Future<bool> _pollAndProcessVerification(String reference,
-      {int maxAttempts = 30, // ← UPDATED
-      Duration interval = const Duration(seconds: 4)}) async {
+      {int maxAttempts = 10, // ← UPDATED
+      Duration interval = const Duration(seconds: 3)}) async {
     // ← UPDATED
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       try {

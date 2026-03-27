@@ -1,5 +1,6 @@
 // lib/screens/home/favorites_screen.dart
 import 'dart:math';
+import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:allowance/models/user_preferences.dart';
@@ -128,16 +129,89 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   }
 
   // --- DELIVERY POPUP ---
+  // --- DELIVERY POPUP (with real paywall) ---
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
+    final isPremium = widget.userPreferences.subscriptionTier == 'Membership';
+
+    if (!isPremium) {
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.grey[900],
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (ctx) => Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
+              const SizedBox(height: 16),
+              const Text(
+                'Subscribe to Allowance Plus',
+                style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'to get access to our trusted and verified delivery agents',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: Colors.white70),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'This protects you from delivery scams in school.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54, fontSize: 14),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(ctx); // close paywall
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SubscriptionScreen(
+                          userPreferences: widget.userPreferences,
+                          themeColor: themeColor,
+                        ),
+                      ),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: themeColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                  child: const Text('Subscribe to Allowance Plus',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Maybe later',
+                    style: TextStyle(color: Colors.white70)),
+              ),
+            ],
+          ),
+        ),
+      );
+      return;
+    }
+
+    // === PREMIUM USER → delivery picker ===
     final vendorName = selectedOption['vendors']['name'].toString();
-    final items = (selectedOption['items'] as List<dynamic>);
-    items.map((i) => i['name'].toString()).join(', ');
+    final items = selectedOption['items'] as List<dynamic>;
     final total = items
         .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
         .toStringAsFixed(0);
-    // 🧾 Build detailed message
+
     final message = StringBuffer();
-    message.writeln("Hello! I'd like to order from $vendorName: on Allowance!");
+    message.writeln("Hello! I'd like to order from $vendorName:");
     message.writeln("Items:");
     for (var i in items) {
       final name = i['name'];
@@ -146,99 +220,93 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       message.writeln("- $name (₦$price × $qty)");
     }
     message.writeln("Total: ₦$total");
+
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
-      builder: (_) => FutureBuilder<List<dynamic>>(
-        future: _deliveryPersonnelFuture,
-        builder: (ctx, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-            return const SizedBox(
-              height: 200,
-              child: Center(child: CircularProgressIndicator()),
-            );
-          }
-          final list = snap.data ?? [];
-          if (list.isEmpty) {
-            return Container(
-              decoration: BoxDecoration(
-                color: Colors.grey[900],
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(16)),
-              ),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.65,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
               padding: const EdgeInsets.all(16),
-              height: 200,
-              child: const Center(
-                child: Text(
-                  'Sorry, no delivery personnel are available right now.',
-                  style: TextStyle(color: Colors.white),
-                ),
-              ),
-            );
-          }
-          list.shuffle(Random());
-          return Container(
-            decoration: BoxDecoration(
-              color: Colors.grey[900],
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(16)),
-            ),
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Select your guy/gal',
-                  style: TextStyle(
+              child: Text(
+                'Select your guy/gal',
+                style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
-                    color: themeColor,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                for (var person in list)
-                  ListTile(
-                    title: Text(
-                      '${person['name']} (${person['gender']})',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                    trailing: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: themeColor,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                      onPressed: () async {
-                        final phone = person['whatsapp_url']
-                            .toString()
-                            .replaceAll("https://wa.me/", "")
-                            .trim();
-                        final encodedMsg =
-                            Uri.encodeComponent(message.toString());
-                        final url = "https://wa.me/$phone?text=$encodedMsg";
-                        final uri = Uri.parse(url);
-                        if (await canLaunchUrl(uri)) {
-                          // ✅ Let Android show WhatsApp / WhatsApp Business chooser
-                          await launchUrl(uri,
-                              mode: LaunchMode.platformDefault);
-                        } else {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text(
-                                  'Unable to open WhatsApp. Please make sure WhatsApp or WhatsApp Business is installed.'),
-                            ),
-                          );
-                        }
-                      },
-                      child: const Text('Contact'),
-                    ),
-                  ),
-              ],
+                    color: themeColor),
+              ),
             ),
-          );
-        },
+            const Divider(height: 1, color: Colors.white24),
+            Expanded(
+              child: FutureBuilder<List<dynamic>>(
+                future: _deliveryPersonnelFuture,
+                builder: (ctx, snap) {
+                  if (snap.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final list = snap.data ?? [];
+                  if (list.isEmpty) {
+                    return const Center(
+                      child: Text('No delivery personnel available',
+                          style: TextStyle(color: Colors.white)),
+                    );
+                  }
+                  list.shuffle(Random());
+                  return ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: list.length,
+                    itemBuilder: (ctx, i) {
+                      final person = list[i];
+                      return ListTile(
+                        title: Text(
+                          '${person['name']} (${person['gender']})',
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                        trailing: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: themeColor,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                          ),
+                          onPressed: () async {
+                            final phone = person['whatsapp_url']
+                                .toString()
+                                .replaceAll("https://wa.me/", "")
+                                .trim();
+                            final encodedMsg =
+                                Uri.encodeComponent(message.toString());
+                            final url = "https://wa.me/$phone?text=$encodedMsg";
+                            final uri = Uri.parse(url);
+                            if (await canLaunchUrl(uri)) {
+                              await launchUrl(uri,
+                                  mode: LaunchMode.platformDefault);
+                            } else {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text('Unable to open WhatsApp.')),
+                              );
+                            }
+                          },
+                          child: const Text('Contact'),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

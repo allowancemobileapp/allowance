@@ -30,7 +30,6 @@ class _HomeScreenState extends State<HomeScreen> {
   final bool _isDarkMode = true;
   final TextEditingController _budgetController = TextEditingController();
   final FocusNode _budgetFocusNode = FocusNode();
-  bool _isBudgetEntered = false;
   bool _vendorBarTapped = false;
   final Color themeColor = const Color(0xFF4CAF50);
   // 1. Updated _colorfulTabs (changed Order icon to food-related)
@@ -86,11 +85,6 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _prefs = widget.userPreferences ?? UserPreferences();
 
-    _budgetController.addListener(() {
-      setState(() {
-        _isBudgetEntered = _budgetController.text.isNotEmpty;
-      });
-    });
     _budgetFocusNode.addListener(() => setState(() {}));
     _pageController = PageController(viewportFraction: 0.85);
     _budgetController.text = _prefs.budget?.toString() ?? "";
@@ -509,55 +503,13 @@ class _HomeScreenState extends State<HomeScreen> {
               MaterialPageRoute(
                   builder: (routeContext) => const TicketScreen()));
         } else if (tab["label"] == "Order") {
-          if (_prefs.subscriptionTier == null ||
-              _prefs.subscriptionTier != "Membership") {
-            showModalBottomSheet(
-              context: context,
-              backgroundColor: Colors.grey[850],
-              shape: const RoundedRectangleBorder(
-                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-              ),
-              builder: (ctx) => Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text(
-                      'Subscribe to order custom food – only Plus users can.',
-                      style: TextStyle(color: Colors.white, fontSize: 16),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => SubscriptionScreen(
-                              userPreferences: _prefs,
-                              themeColor: themeColor,
-                            ),
-                          ),
-                        );
-                      },
-                      style:
-                          ElevatedButton.styleFrom(backgroundColor: themeColor),
-                      child: const Text('Subscribe Now',
-                          style: TextStyle(color: Colors.white)),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          } else {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (routeContext) => OrderScreen(userPreferences: _prefs),
-              ),
-            );
-          }
+          // ✅ Opens OrderScreen directly - completely free (no paywall)
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (routeContext) => OrderScreen(userPreferences: _prefs),
+            ),
+          );
         }
       },
       child: Container(
@@ -580,31 +532,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ]),
       ),
     );
-  }
-
-  void _goToAvailableOptions() async {
-    final budget = double.tryParse(_budgetController.text) ?? 0;
-    if (budget <= 0) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Please enter a valid budget.")));
-      return;
-    }
-    if (_selectedRestaurants.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Please select at least one vendor.")));
-      return;
-    }
-    _prefs.budget = budget;
-    await _prefs.savePreferences();
-    if (!mounted) return;
-    Navigator.push(
-        context,
-        MaterialPageRoute(
-            builder: (routeContext) => AvailableOptionsScreen(
-                userPreferences: _prefs,
-                selectedRestaurants: _selectedRestaurants)));
   }
 
   // 2. New method: _showGistFilterSheet()
@@ -943,17 +870,17 @@ class _HomeScreenState extends State<HomeScreen> {
           child: IndexedStack(
             index: _selectedIndex,
             children: [
-              // ---> INDEX 0: HOME SCREEN <---
+              // INDEX 0: HOME SCREEN
               Column(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  // --- FIXED TOP BARS (Will NOT scroll) ---
+                  // FIXED TOP BARS
                   Padding(
                     padding: const EdgeInsets.only(
                         left: 16, top: 30, right: 16, bottom: 8),
                     child: Column(
                       children: [
-                        // 1. Vendor Bar
+                        // 1. Vendor Bar (unchanged)
                         GestureDetector(
                           onTap: () {
                             setState(() => _vendorBarTapped = true);
@@ -1016,7 +943,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 16),
 
-                        // 2. Budget Bar
+                        // 2. Budget Bar → NOW DIRECTLY OPENS MENU (no payment)
+                        // 2. Budget Bar → NOW DIRECTLY OPENS MENU (clean & free)
                         Container(
                           width: horizontalBarWidth,
                           height: 44,
@@ -1049,25 +977,32 @@ class _HomeScreenState extends State<HomeScreen> {
                                     border: InputBorder.none),
                               ),
                             ),
-                            _budgetFocusNode.hasFocus || _isBudgetEntered
-                                ? InkWell(
-                                    onTap: _goToAvailableOptions,
-                                    child: Container(
-                                        decoration: BoxDecoration(
-                                            color: themeColor,
-                                            shape: BoxShape.circle),
-                                        padding: const EdgeInsets.all(6),
-                                        child: const Icon(
-                                            BoxIcons.bxs_chevron_right,
-                                            color: Colors.white,
-                                            size: 22)))
-                                : Icon(BoxIcons.bxs_chevron_right,
-                                    color: themeColor, size: 22),
+                            // Direct navigation (no payment, no old method)
+                            InkWell(
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => AvailableOptionsScreen(
+                                      userPreferences: _prefs,
+                                      selectedRestaurants: _selectedRestaurants,
+                                    ),
+                                  ),
+                                );
+                              },
+                              child: Container(
+                                  decoration: BoxDecoration(
+                                      color: themeColor,
+                                      shape: BoxShape.circle),
+                                  padding: const EdgeInsets.all(6),
+                                  child: const Icon(BoxIcons.bxs_chevron_right,
+                                      color: Colors.white, size: 22)),
+                            ),
                           ]),
                         ),
                         const SizedBox(height: 12),
 
-                        // 3. Colorful Tabs
+                        // 3. Colorful Tabs (unchanged)
                         SizedBox(
                           width: horizontalBarWidth,
                           height: 50,
@@ -1084,14 +1019,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
 
-                  // --- SCROLLABLE GISTS (Takes up remaining screen space) ---
+                  // Gists slideshow
                   Expanded(
                     child: _buildGistSlideshow(),
                   ),
                 ],
               ),
 
-              // INDEX 1, 2, 3...
+              // Other tabs
               FavoritesScreen(userPreferences: _prefs),
               SubscriptionScreen(
                   userPreferences: _prefs, themeColor: themeColor),

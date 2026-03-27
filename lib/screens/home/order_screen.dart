@@ -2,6 +2,7 @@
 // ignore_for_file: use_build_context_synchronously
 
 import 'dart:math';
+import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
@@ -325,6 +326,82 @@ class _OrderScreenState extends State<OrderScreen> {
   void _showDeliveryPersonnel() async {
     if (_cart.isEmpty) return;
 
+    // ==================== PREMIUM CHECK ====================
+    final isPremium = widget.userPreferences.subscriptionTier == 'Membership';
+
+    if (!isPremium) {
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.grey[900],
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (ctx) => Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
+              const SizedBox(height: 16),
+              const Text(
+                'Subscribe to Allowance Plus',
+                style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'to get access to our trusted and verified delivery agents',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: Colors.white70),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'This protects you from delivery scams in school.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54, fontSize: 14),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(ctx); // close paywall
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SubscriptionScreen(
+                          userPreferences: widget.userPreferences,
+                          themeColor: themeColor,
+                        ),
+                      ),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: themeColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                  child: const Text(
+                    'Subscribe to Allowance Plus',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Maybe later',
+                    style: TextStyle(color: Colors.white70)),
+              ),
+            ],
+          ),
+        ),
+      );
+      return;
+    }
+
+    // ==================== PREMIUM USER → Show Delivery Picker ====================
     final schoolId = int.tryParse(widget.userPreferences.schoolId ?? '');
     if (schoolId == null) {
       ScaffoldMessenger.of(context)
