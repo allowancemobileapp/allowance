@@ -57,6 +57,8 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isGistsLoading = true;
 
   String _gistFilter = 'All';
+  final Map<int, int> _gistLikeCounts = {};
+  final Set<int> _likedGistIds = {};
 
   // Fallback images (replace with your own public URLs or storage links)
   final List<Map<String, dynamic>> _fallbackGists = [
@@ -103,17 +105,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _fetchGistsAndStartSlideshow() async {
-    setState(() {
-      _isGistsLoading = true;
-    });
-
+    setState(() => _isGistsLoading = true);
     try {
-      // UPDATED: Added profiles(username) to the select statement
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
           .select('''
             id, title, image_url, type, school_id, url, created_at, category,
-            profiles:user_id(username)
+            profiles:user_id (username, avatar_url, bio)
           ''')
           .eq('paid', true)
           .eq('status', 'active')
@@ -123,7 +121,6 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
 
       List<Map<String, dynamic>> list = raw;
-
       final sidStr = _prefs.schoolId;
       final int? sidInt = sidStr != null ? int.tryParse(sidStr) : null;
 
@@ -135,11 +132,9 @@ class _HomeScreenState extends State<HomeScreen> {
             final gSchool = g['school_id'];
             if (gSchool == null) return false;
             final int? gsInt = int.tryParse(gSchool.toString());
-            if (gsInt != null && sidInt != null) {
-              return gsInt == sidInt;
-            } else {
-              return gSchool.toString() == sidStr;
-            }
+            return gsInt != null && sidInt != null
+                ? gsInt == sidInt
+                : gSchool.toString() == sidStr;
           }
           return false;
         }).toList();
@@ -156,18 +151,18 @@ class _HomeScreenState extends State<HomeScreen> {
         _isGistsLoading = false;
       });
 
-      if (_fetchedGists.isEmpty) {
-        setState(() {
-          _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
-        });
-      }
+      // Load like counts and user likes
+      await _loadGistLikes();
 
+      if (_fetchedGists.isEmpty) {
+        setState(() => _fetchedGists = List.from(_fallbackGists));
+      }
       if (_fetchedGists.isNotEmpty) _startSlideshow();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _isGistsLoading = false;
-        _fetchedGists = List<Map<String, dynamic>>.from(_fallbackGists);
+        _fetchedGists = List.from(_fallbackGists);
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -177,21 +172,142 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // ── NEW: Load like counts and whether current user liked each gist ──
+  // ── NEW: Load like counts and whether current user liked each gist ──
+  Future<void> _loadGistLikes() async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    try {
+      final gistIds = _fetchedGists.map((g) => g['id'] as int).toList();
+      if (gistIds.isEmpty) return;
+
+      final likesResponse = await supabase
+          .from('gist_likes')
+          .select('gist_id, user_id')
+          .inFilter('gist_id', gistIds);
+
+      _likedGistIds.clear();
+      _gistLikeCounts.clear();
+
+      final Map<int, int> countsMap = {};
+      for (var like in likesResponse) {
+        final gid = like['gist_id'] as int;
+        countsMap[gid] = (countsMap[gid] ?? 0) + 1;
+        if (like['user_id'] == user.id) {
+          _likedGistIds.add(gid);
+        }
+      }
+      _gistLikeCounts.addAll(countsMap);
+    } catch (_) {}
+  }
+
+  // ── NEW: Toggle like ──
+  Future<void> _toggleGistLike(int gistId) async {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    final isLiked = _likedGistIds.contains(gistId);
+
+    try {
+      if (isLiked) {
+        await supabase
+            .from('gist_likes')
+            .delete()
+            .eq('gist_id', gistId)
+            .eq('user_id', user.id);
+        _likedGistIds.remove(gistId);
+        _gistLikeCounts[gistId] = (_gistLikeCounts[gistId] ?? 1) - 1;
+      } else {
+        await supabase
+            .from('gist_likes')
+            .insert({'gist_id': gistId, 'user_id': user.id});
+        _likedGistIds.add(gistId);
+        _gistLikeCounts[gistId] = (_gistLikeCounts[gistId] ?? 0) + 1;
+      }
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('Like error: $e');
+    }
+  }
+
   void _startSlideshow() {
     _slideshowTimer?.cancel();
     if (_fetchedGists.isEmpty) return;
     _slideshowTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (_pageController.hasClients && _fetchedGists.isNotEmpty) {
-        if (_pageController.page != null) {
-          int nextPage = (_pageController.page!.round() + 1);
-          _pageController.animateToPage(
-            nextPage,
+        int nextPage = (_pageController.page?.round() ?? 0) + 1;
+        _pageController.animateToPage(nextPage,
             duration: const Duration(milliseconds: 500),
-            curve: Curves.easeInOut,
-          );
-        }
+            curve: Curves.easeInOut);
       }
     });
+  }
+
+  void _showProfileCard(String username, String? avatarUrl, String? bio) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.45,
+        minChildSize: 0.35,
+        maxChildSize: 0.75,
+        expand: false,
+        builder: (_, scrollController) => Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF1E1E1E),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: ListView(
+            controller: scrollController,
+            padding: const EdgeInsets.all(24),
+            children: [
+              Center(
+                child: CircleAvatar(
+                  radius: 52,
+                  backgroundColor: Colors.grey[800],
+                  backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty
+                      ? NetworkImage(avatarUrl)
+                      : null,
+                  child: avatarUrl == null || avatarUrl.isEmpty
+                      ? Text(
+                          username.isNotEmpty ? username[0].toUpperCase() : '?',
+                          style: const TextStyle(
+                              fontSize: 40, color: Colors.white))
+                      : null,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('@$username',
+                  style: const TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white),
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              Text(bio?.trim().isNotEmpty == true ? bio! : 'No bio yet',
+                  style: TextStyle(
+                      fontSize: 16,
+                      color: bio?.trim().isNotEmpty == true
+                          ? Colors.white70
+                          : Colors.white54,
+                      height: 1.5),
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 32),
+              Align(
+                alignment: Alignment.center,
+                child: TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Close',
+                        style:
+                            TextStyle(color: Color(0xFF4CAF50), fontSize: 18))),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _chooseUniversity() async {
@@ -495,21 +611,15 @@ class _HomeScreenState extends State<HomeScreen> {
           Navigator.push(
               context,
               MaterialPageRoute(
-                  builder: (routeContext) =>
-                      FavoritesScreen(userPreferences: _prefs)));
+                  builder: (_) => FavoritesScreen(userPreferences: _prefs)));
         } else if (tab["label"] == "Tickets") {
+          Navigator.push(
+              context, MaterialPageRoute(builder: (_) => const TicketScreen()));
+        } else if (tab["label"] == "Order") {
           Navigator.push(
               context,
               MaterialPageRoute(
-                  builder: (routeContext) => const TicketScreen()));
-        } else if (tab["label"] == "Order") {
-          // ✅ Opens OrderScreen directly - completely free (no paywall)
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (routeContext) => OrderScreen(userPreferences: _prefs),
-            ),
-          );
+                  builder: (_) => OrderScreen(userPreferences: _prefs)));
         }
       },
       child: Container(
@@ -606,7 +716,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ? _fetchedGists
         : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
 
-    // Updated label logic since we aren't swiping horizontally anymore
     final String label = _isGistsLoading
         ? "Gist"
         : filteredGists.isEmpty
@@ -618,8 +727,6 @@ class _HomeScreenState extends State<HomeScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        // --- 1. THE GIST FILTER BAR (Megaphone) ---
-        // This stays pinned right above the scrolling gists
         GestureDetector(
           onTap: _showGistFilterSheet,
           child: Container(
@@ -628,9 +735,8 @@ class _HomeScreenState extends State<HomeScreen> {
             margin: const EdgeInsets.only(bottom: 8),
             padding: const EdgeInsets.symmetric(horizontal: 16),
             decoration: BoxDecoration(
-              color: Colors.grey[800],
-              borderRadius: BorderRadius.circular(25),
-            ),
+                color: Colors.grey[800],
+                borderRadius: BorderRadius.circular(25)),
             child: Row(
               children: [
                 Icon(BoxIcons.bxs_megaphone, color: themeColor, size: 20),
@@ -639,11 +745,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: Text(
                     label,
                     style: TextStyle(
-                      fontFamily: 'SanFrancisco',
-                      fontSize: 18,
-                      color: themeColor,
-                      fontWeight: FontWeight.bold,
-                    ),
+                        fontFamily: 'SanFrancisco',
+                        fontSize: 18,
+                        color: themeColor,
+                        fontWeight: FontWeight.bold),
                   ),
                 ),
                 Icon(Icons.chevron_right, color: themeColor, size: 24),
@@ -651,15 +756,12 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
-
-        // --- 2. THE SCROLLABLE VERTICAL GISTS ---
         Expanded(
           child: _isGistsLoading
               ? Center(child: CircularProgressIndicator(color: themeColor))
               : RefreshIndicator(
                   color: themeColor,
-                  onRefresh:
-                      _fetchGistsAndStartSlideshow, // Pull down to refresh!
+                  onRefresh: _fetchGistsAndStartSlideshow,
                   child: ListView.builder(
                     physics: const AlwaysScrollableScrollPhysics(),
                     padding: const EdgeInsets.only(bottom: 40, top: 8),
@@ -669,35 +771,46 @@ class _HomeScreenState extends State<HomeScreen> {
                       final imageUrl = (gist['image_url'] as String?) ?? '';
                       final gistUrl = (gist['url'] as String?) ?? '';
                       final title = gist['title'] as String? ?? '';
-
                       final profileData = gist['profiles'];
-                      final username =
-                          (profileData is Map) ? profileData['username'] : null;
+                      final gistId = gist['id'] as int;
+
+                      final username = (profileData is Map)
+                          ? profileData['username'] as String?
+                          : null;
+                      final avatarUrl = (profileData is Map)
+                          ? profileData['avatar_url'] as String?
+                          : null;
+                      final bio = (profileData is Map)
+                          ? profileData['bio'] as String?
+                          : null;
+
+                      final likeCount = _gistLikeCounts[gistId] ?? 0;
+                      final isLiked = _likedGistIds.contains(gistId);
 
                       return Padding(
-                        padding: const EdgeInsets.only(
-                            bottom: 32.0), // Space between gists
+                        padding: const EdgeInsets.only(bottom: 32.0),
                         child: Column(
                           children: [
-                            // THE IMAGE BOX
+                            // --------------------------------------------------
+                            // LATEST LAYOUT: Image with Like Button Overlay
+                            // --------------------------------------------------
                             SizedBox(
                               height: MediaQuery.of(context).size.height * 0.36,
-                              width:
-                                  horizontalBarWidth, // Match the width of the top bars
+                              width: horizontalBarWidth,
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(24),
                                 child: Stack(
                                   children: [
+                                    // 1. Background Placeholder
                                     Positioned.fill(
-                                      child: Container(
-                                        color: _isDarkMode
-                                            ? Colors.grey[750]
-                                            : Colors.grey[300],
-                                      ),
-                                    ),
+                                        child: Container(
+                                            color: _isDarkMode
+                                                ? Colors.grey[750]
+                                                : Colors.grey[300])),
+
+                                    // 2. The Image
                                     GestureDetector(
                                       onTap: () {
-                                        // ZOOM FEATURE
                                         showDialog(
                                           context: context,
                                           builder: (context) => Dialog(
@@ -711,55 +824,41 @@ class _HomeScreenState extends State<HomeScreen> {
                                                   minScale: 0.5,
                                                   maxScale: 4.0,
                                                   child: CachedNetworkImage(
-                                                    imageUrl: imageUrl,
-                                                    placeholder: (context,
-                                                            url) =>
-                                                        const Center(
-                                                            child:
-                                                                CircularProgressIndicator()),
-                                                    errorWidget: (context, url,
-                                                            error) =>
-                                                        const Icon(Icons.error),
-                                                  ),
+                                                      imageUrl: imageUrl),
                                                 ),
                                                 Positioned(
                                                   top: 40,
                                                   right: 20,
                                                   child: IconButton(
-                                                    icon: const Icon(
-                                                        Icons.close,
-                                                        color: Colors.white,
-                                                        size: 30),
-                                                    onPressed: () =>
-                                                        Navigator.pop(context),
-                                                  ),
+                                                      icon: const Icon(
+                                                          Icons.close,
+                                                          color: Colors.white,
+                                                          size: 30),
+                                                      onPressed: () =>
+                                                          Navigator.pop(
+                                                              context)),
                                                 ),
                                               ],
                                             ),
                                           ),
                                         );
                                       },
-                                      onLongPress: () {
-                                        // DOWNLOAD FEATURE
-                                        if (imageUrl.isNotEmpty)
-                                          _downloadGistImage(imageUrl);
-                                      },
+                                      onLongPress: () =>
+                                          _downloadGistImage(imageUrl),
                                       child: Center(
                                         child: CachedNetworkImage(
                                           imageUrl: imageUrl,
-                                          fit: BoxFit
-                                              .cover, // Changed to cover for better vertical feed aesthetics
-                                          placeholder: (context, url) => Center(
-                                              child: CircularProgressIndicator(
-                                                  color: themeColor)),
-                                          errorWidget: (context, url, error) =>
-                                              const Center(
-                                                  child: Icon(
-                                                      Icons.broken_image,
-                                                      size: 50)),
+                                          fit: BoxFit.cover,
+                                          placeholder: (_, __) =>
+                                              const CircularProgressIndicator(),
+                                          errorWidget: (_, __, ___) =>
+                                              const Icon(Icons.broken_image,
+                                                  size: 50),
                                         ),
                                       ),
                                     ),
+
+                                    // 3. Link Icon (Top Right)
                                     if (gistUrl.isNotEmpty)
                                       Positioned(
                                         top: 12,
@@ -781,9 +880,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                             child: Container(
                                               padding: const EdgeInsets.all(12),
                                               decoration: const BoxDecoration(
-                                                color: Colors.black54,
-                                                shape: BoxShape.circle,
-                                              ),
+                                                  color: Colors.black54,
+                                                  shape: BoxShape.circle),
                                               child: const Icon(Icons.link,
                                                   size: 24,
                                                   color: Colors.white),
@@ -791,20 +889,85 @@ class _HomeScreenState extends State<HomeScreen> {
                                           ),
                                         ),
                                       ),
+
+                                    // 4. THE LIKE BUTTON & COUNT (Bottom Right Overlay)
+                                    Positioned(
+                                      bottom:
+                                          12, // Distance from the bottom edge
+                                      right: 12, // Distance from the right edge
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 8, horizontal: 8),
+                                        decoration: BoxDecoration(
+                                          color: Colors
+                                              .black45, // Soft background for readability
+                                          borderRadius:
+                                              BorderRadius.circular(20),
+                                        ),
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            IconButton(
+                                              padding: EdgeInsets.zero,
+                                              constraints:
+                                                  const BoxConstraints(), // Removes excess default padding
+                                              onPressed: () =>
+                                                  _toggleGistLike(gistId),
+                                              icon: Icon(
+                                                isLiked
+                                                    ? Icons.favorite
+                                                    : Icons.favorite_border,
+                                                color: isLiked
+                                                    ? Colors.red
+                                                    : Colors.white,
+                                                size: 28,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              likeCount.toString(),
+                                              style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.bold),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
                                   ],
                                 ),
                               ),
                             ),
+
                             const SizedBox(height: 12),
-                            // THE CAPTION
-                            Text(
-                              username != null ? "@$username: $title" : title,
-                              style: const TextStyle(
-                                fontFamily: 'SanFrancisco',
-                                fontSize: 18,
-                                color: Colors.white,
+
+                            // Username + Title Caption
+                            GestureDetector(
+                              onTap: () => _showProfileCard(
+                                  username ?? '', avatarUrl, bio),
+                              child: RichText(
+                                textAlign: TextAlign.center,
+                                text: TextSpan(
+                                  style: const TextStyle(
+                                      fontFamily: 'SanFrancisco', fontSize: 18),
+                                  children: [
+                                    TextSpan(
+                                      text:
+                                          username != null ? "@$username" : '',
+                                      style: TextStyle(
+                                          color: themeColor,
+                                          fontWeight: FontWeight.bold),
+                                    ),
+                                    TextSpan(
+                                      text:
+                                          username != null ? ": $title" : title,
+                                      style:
+                                          const TextStyle(color: Colors.white),
+                                    ),
+                                  ],
+                                ),
                               ),
-                              textAlign: TextAlign.center,
                             ),
                           ],
                         ),
@@ -943,7 +1106,6 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 16),
 
-                        // 2. Budget Bar → NOW DIRECTLY OPENS MENU (no payment)
                         // 2. Budget Bar → NOW DIRECTLY OPENS MENU (clean & free)
                         Container(
                           width: horizontalBarWidth,
@@ -977,7 +1139,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     border: InputBorder.none),
                               ),
                             ),
-                            // Direct navigation (no payment, no old method)
+                            // Direct navigation (no payment)
                             InkWell(
                               onTap: () {
                                 Navigator.push(
@@ -1002,7 +1164,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 12),
 
-                        // 3. Colorful Tabs (unchanged)
+                        // 3. Colorful Tabs
                         SizedBox(
                           width: horizontalBarWidth,
                           height: 50,
@@ -1019,7 +1181,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
 
-                  // Gists slideshow
+                  // Gists slideshow (now with tappable username → profile card)
                   Expanded(
                     child: _buildGistSlideshow(),
                   ),

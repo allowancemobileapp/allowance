@@ -23,7 +23,6 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   bool _signingOut = false;
 
-  // ← NEW: stable future is created only once
   late Future<Map<String, dynamic>?> _profileFuture;
 
   @override
@@ -32,7 +31,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _profileFuture = _fetchProfile();
   }
 
-  // ← NEW: refresh method so we can reload when needed
   void _refreshProfile() {
     setState(() {
       _profileFuture = _fetchProfile();
@@ -65,7 +63,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
       final supabase = Supabase.instance.client;
       await supabase.auth.signOut();
 
-      // Clear local preferences (so a new user starts fresh)
       await widget.userPreferences.clearLocal();
 
       if (mounted) {
@@ -91,16 +88,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<Map<String, dynamic>?>(
-      future: _profileFuture, // ← now stable, no more reload every 5 seconds
+      future: _profileFuture,
       builder: (context, snapshot) {
-        // Loading state
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
           );
         }
 
-        // Surface errors instead of failing silently
         if (snapshot.hasError) {
           final err = snapshot.error;
           debugPrint('Profile load error: $err');
@@ -119,7 +114,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
         final profile = snapshot.data;
 
-        // If no profile row exists, let user create one
         if (profile == null) {
           final supabase = Supabase.instance.client;
           final user = supabase.auth.currentUser;
@@ -136,7 +130,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     });
                     await widget.userPreferences.loadPreferences();
                     if (!mounted) return;
-                    _refreshProfile(); // ← reload the profile row
+                    _refreshProfile();
                   } catch (e) {
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -151,7 +145,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
           );
         }
 
-        // Normal UI when profile exists — use widget.userPreferences for display values
         final up = widget.userPreferences;
         final avatarUrl = up.avatarUrl;
         final imageProvider = (avatarUrl != null && avatarUrl.isNotEmpty)
@@ -205,11 +198,36 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   const SizedBox(height: 6),
                   Text('@${up.username ?? 'nouser'}',
                       style: const TextStyle(color: Colors.white70)),
+
+                  // ── NEW: BIO DISPLAY ──
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: _card,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      up.bio?.trim().isNotEmpty == true
+                          ? up.bio!
+                          : 'No bio yet • Tap "Edit profile" to add one',
+                      style: TextStyle(
+                        color: up.bio?.trim().isNotEmpty == true
+                            ? Colors.white70
+                            : Colors.white54,
+                        fontSize: 15,
+                        height: 1.4,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  // ── END BIO ──
                 ],
               ),
               const SizedBox(height: 28),
 
-              // Info card
+              // Info card (unchanged except we kept your original style)
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -278,7 +296,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   );
                   if (changed == true) {
                     await widget.userPreferences.loadPreferences();
-                    _refreshProfile(); // ← make sure we show latest server data
+                    _refreshProfile();
                     widget.onSave();
                   }
                 },

@@ -7,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class UserPreferences {
   // core fields
-  String? id; // uuid from auth
+  String? id;
   String? fullName;
   String? username;
   String? avatarUrl;
@@ -17,27 +17,22 @@ class UserPreferences {
   List<String> favoritedOptions = [];
   Map<String, dynamic> preferences = {};
 
-  // additional profile fields requested by screens
-  String? subscriptionTier; // e.g. "Membership", "Tickets", "Gist Us"
+  // additional profile fields
+  String? subscriptionTier;
   String? phoneNumber;
   double? weight;
   double? height;
   int? age;
   String? bloodGroup;
+  String? bio; // ← NEW: Bio field added
 
-  // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-  // THIS IS THE NEW FLAG
-  bool hasCompletedProfile =
-      false; // true only after user finishes EditProfileScreen first time
-  // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+  bool hasCompletedProfile = false;
 
   UserPreferences();
 
-  /// Load from local storage (fast) and then try to load server profile (if signed in)
   Future<void> loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // Your existing full local load (keep this unchanged)
     id = prefs.getString('prefs_id');
     fullName = prefs.getString('prefs_fullName');
     username = prefs.getString('prefs_username');
@@ -48,15 +43,14 @@ class UserPreferences {
         ? prefs.getDouble('prefs_budget')
         : null;
     favoritedOptions = prefs.getStringList('prefs_favoritedOptions') ?? [];
+
     final prefJson = prefs.getString('prefs_preferences');
     if (prefJson != null) {
       try {
         preferences = Map<String, dynamic>.from(jsonDecode(prefJson) as Map);
-      } catch (_) {
-        preferences = {};
-      }
+      } catch (_) {}
     }
-    // extra fields
+
     subscriptionTier = prefs.getString('prefs_subscriptionTier');
     phoneNumber = prefs.getString('prefs_phoneNumber');
     weight = prefs.containsKey('prefs_weight')
@@ -67,33 +61,23 @@ class UserPreferences {
         : null;
     age = prefs.containsKey('prefs_age') ? prefs.getInt('prefs_age') : null;
     bloodGroup = prefs.getString('prefs_bloodGroup');
+    bio = prefs.getString('prefs_bio'); // ← NEW
 
-    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-    // LOAD THE NEW FLAG
     hasCompletedProfile = prefs.getBool('prefs_hasCompletedProfile') ?? false;
-    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
-    // If the user is signed in, attempt to merge/load server profile
-    final supabase = Supabase.instance.client;
-    final user = supabase.auth.currentUser;
+    final user = Supabase.instance.client.auth.currentUser;
     if (user != null) {
       await _loadOrCreateProfile(user.id);
     }
 
-    // Persist any merged changes locally
     await savePreferences();
   }
 
-  /// Save to SharedPreferences and also to Supabase profiles (if signed in)
   Future<void> savePreferences() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
-    // SAVE THE NEW FLAG
     await prefs.setBool('prefs_hasCompletedProfile', hasCompletedProfile);
-    // ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
-    // Local writes
     if (id != null) await prefs.setString('prefs_id', id!);
     if (fullName != null) await prefs.setString('prefs_fullName', fullName!);
     if (username != null) await prefs.setString('prefs_username', username!);
@@ -102,30 +86,22 @@ class UserPreferences {
     if (schoolName != null)
       await prefs.setString('prefs_schoolName', schoolName!);
     if (budget != null) await prefs.setDouble('prefs_budget', budget!);
+    if (bio != null) await prefs.setString('prefs_bio', bio!); // ← NEW
 
     await prefs.setStringList('prefs_favoritedOptions', favoritedOptions);
     await prefs.setString('prefs_preferences', jsonEncode(preferences));
 
-    if (subscriptionTier != null) {
+    if (subscriptionTier != null)
       await prefs.setString('prefs_subscriptionTier', subscriptionTier!);
-    }
-    if (phoneNumber != null) {
+    if (phoneNumber != null)
       await prefs.setString('prefs_phoneNumber', phoneNumber!);
-    }
-    if (weight != null) {
-      await prefs.setDouble('prefs_weight', weight!);
-    }
-    if (height != null) {
-      await prefs.setDouble('prefs_height', height!);
-    }
-    if (age != null) {
-      await prefs.setInt('prefs_age', age!);
-    }
-    if (bloodGroup != null) {
+    if (weight != null) await prefs.setDouble('prefs_weight', weight!);
+    if (height != null) await prefs.setDouble('prefs_height', height!);
+    if (age != null) await prefs.setInt('prefs_age', age!);
+    if (bloodGroup != null)
       await prefs.setString('prefs_bloodGroup', bloodGroup!);
-    }
 
-    // Push to Supabase if logged in
+    // Push to Supabase
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
     if (user != null) {
@@ -134,24 +110,18 @@ class UserPreferences {
 
         final Map<String, dynamic> updates = {};
 
-        if (fullName != null && fullName!.trim().isNotEmpty) {
+        if (fullName != null && fullName!.trim().isNotEmpty)
           updates['full_name'] = fullName!.trim();
-        }
-        if (username != null && username!.trim().isNotEmpty) {
+        if (username != null && username!.trim().isNotEmpty)
           updates['username'] = username!.trim();
-        }
-        if (avatarUrl != null && avatarUrl!.trim().isNotEmpty) {
+        if (avatarUrl != null && avatarUrl!.trim().isNotEmpty)
           updates['avatar_url'] = avatarUrl!.trim();
-        }
-        if (schoolId != null && schoolId!.trim().isNotEmpty) {
+        if (schoolId != null && schoolId!.trim().isNotEmpty)
           updates['school_id'] = schoolId!.trim();
-        }
-        if (schoolName != null && schoolName!.trim().isNotEmpty) {
+        if (schoolName != null && schoolName!.trim().isNotEmpty)
           updates['school_name'] = schoolName!.trim();
-        }
-        if (budget != null) {
-          updates['budget'] = budget;
-        }
+        if (budget != null) updates['budget'] = budget;
+        if (bio != null) updates['bio'] = bio; // ← NEW
 
         updates['favorited_options'] = favoritedOptions;
         updates['preferences'] = preferences;
@@ -170,12 +140,11 @@ class UserPreferences {
           await supabase.from('profiles').update(updates).eq('id', user.id);
         }
       } catch (e) {
-        // Silent fail — local data is already saved
+        // Silent fail
       }
     }
   }
 
-  /// Ensure a profile row exists in `public.profiles`
   Future<void> _ensureProfileExists(String userId) async {
     final supabase = Supabase.instance.client;
     try {
@@ -190,13 +159,13 @@ class UserPreferences {
           'email': Supabase.instance.client.auth.currentUser?.email,
           'created_at': DateTime.now().toUtc().toIso8601String(),
           'favorited_options': <String>[],
+          'bio': null, // ← NEW
         };
         await supabase.from('profiles').insert(insert);
       }
     } catch (_) {}
   }
 
-  /// Load or create profile from Supabase
   Future<void> _loadOrCreateProfile(String userId) async {
     final supabase = Supabase.instance.client;
     try {
@@ -213,18 +182,16 @@ class UserPreferences {
         avatarUrl = resp['avatar_url'] as String?;
         schoolId = resp['school_id'] as String?;
         schoolName = resp['school_name'] as String?;
+        bio = resp['bio'] as String?; // ← NEW
 
-        // Parse favorited_options safely
+        // Parse favorited_options
         final fav = resp['favorited_options'];
         List<String> parsedFavs = [];
         if (fav is List) {
           parsedFavs = fav.map((e) => e.toString()).toList();
         }
-        if (parsedFavs.isNotEmpty) {
-          favoritedOptions = parsedFavs;
-        }
+        if (parsedFavs.isNotEmpty) favoritedOptions = parsedFavs;
 
-        // preferences
         final prefsJson = resp['preferences'];
         if (prefsJson != null) {
           try {
@@ -252,7 +219,7 @@ class UserPreferences {
         return;
       }
 
-      // Create minimal profile if none exists
+      // Create minimal profile
       await supabase.from('profiles').insert({
         'id': userId,
         'full_name': null,
@@ -268,6 +235,7 @@ class UserPreferences {
         'height': null,
         'age': null,
         'blood_group': null,
+        'bio': null, // ← NEW
       });
 
       id = userId;
@@ -278,7 +246,6 @@ class UserPreferences {
     }
   }
 
-  /// Clear local cache on logout
   Future<void> clearLocal() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -290,15 +257,16 @@ class UserPreferences {
     await prefs.remove('prefs_schoolName');
     await prefs.remove('prefs_budget');
     await prefs.remove('prefs_preferences');
-
     await prefs.remove('prefs_subscriptionTier');
     await prefs.remove('prefs_phoneNumber');
     await prefs.remove('prefs_weight');
     await prefs.remove('prefs_height');
     await prefs.remove('prefs_age');
     await prefs.remove('prefs_bloodGroup');
-    await prefs.remove('prefs_hasCompletedProfile'); // ← CLEAR FLAG ON LOGOUT
+    await prefs.remove('prefs_bio'); // ← NEW
+    await prefs.remove('prefs_hasCompletedProfile');
 
+    // Reset in memory
     id = null;
     fullName = null;
     username = null;
@@ -314,6 +282,7 @@ class UserPreferences {
     height = null;
     age = null;
     bloodGroup = null;
-    hasCompletedProfile = false; // ← RESET IN MEMORY
+    bio = null; // ← NEW
+    hasCompletedProfile = false;
   }
 }

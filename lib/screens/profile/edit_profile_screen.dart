@@ -26,6 +26,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   late TextEditingController _weightController;
   late TextEditingController _heightController;
   late TextEditingController _ageController;
+  late TextEditingController _bioController; // ← NEW
 
   String? _bloodGroup;
   XFile? _pickedAvatar;
@@ -57,6 +58,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         text: widget.userPreferences.height?.toString() ?? '');
     _ageController = TextEditingController(
         text: widget.userPreferences.age?.toString() ?? '');
+    _bioController =
+        TextEditingController(text: widget.userPreferences.bio ?? ''); // ← NEW
+
     _bloodGroup = widget.userPreferences.bloodGroup;
   }
 
@@ -68,6 +72,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     _weightController.dispose();
     _heightController.dispose();
     _ageController.dispose();
+    _bioController.dispose(); // ← NEW
     super.dispose();
   }
 
@@ -78,13 +83,12 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     if (f != null && mounted) setState(() => _pickedAvatar = f);
   }
 
-  /// Upload avatar to 'avatars' bucket and return the resolved public URL (or null).
   Future<String?> _uploadAvatarIfPicked() async {
     if (_pickedAvatar == null) return widget.userPreferences.avatarUrl;
 
     final client = Supabase.instance.client;
     final bucket = 'avatars';
-    final ext = _pickedAvatar!.name.split('.').last; // use .name, not .path
+    final ext = _pickedAvatar!.name.split('.').last;
     final filename = 'avatars/${const Uuid().v4()}.$ext';
 
     try {
@@ -96,7 +100,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             fileOptions: FileOptions(upsert: false),
           );
 
-      // Get public URL
       final String publicUrl =
           client.storage.from(bucket).getPublicUrl(filename);
       return publicUrl;
@@ -115,10 +118,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     final user = supabase.auth.currentUser;
 
     try {
-      // 1. Upload avatar first
       final String? newAvatarUrl = await _uploadAvatarIfPicked();
 
-      // 2. Update local UserPreferences (no longer allowing null for required fields – validation already ensures they are not empty)
+      // Update UserPreferences
       widget.userPreferences.fullName = _displayNameController.text.trim();
       widget.userPreferences.username = _usernameController.text.trim();
       widget.userPreferences.phoneNumber = _phoneController.text.trim();
@@ -126,19 +128,18 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           double.tryParse(_weightController.text.trim());
       widget.userPreferences.height =
           double.tryParse(_heightController.text.trim());
-      widget.userPreferences.age = int.parse(_ageController.text.trim());
+      widget.userPreferences.age = int.tryParse(_ageController.text.trim());
       widget.userPreferences.bloodGroup = _bloodGroup;
+      widget.userPreferences.bio = _bioController.text.trim(); // ← NEW
 
       if (newAvatarUrl != null) {
         widget.userPreferences.avatarUrl = newAvatarUrl;
-        setState(() {});
       }
 
-      // 3. Mark profile completed + save locally + server
       widget.userPreferences.hasCompletedProfile = true;
       await widget.userPreferences.savePreferences();
 
-      // 4. Extra upsert to Supabase (safety net)
+      // Extra safety upsert to Supabase
       if (user != null) {
         final Map<String, dynamic> updates = {
           'id': user.id,
@@ -150,6 +151,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           'height': widget.userPreferences.height,
           'age': widget.userPreferences.age,
           'blood_group': widget.userPreferences.bloodGroup,
+          'bio': widget.userPreferences.bio, // ← NEW
           'updated_at': DateTime.now().toUtc().toIso8601String(),
         };
 
@@ -213,16 +215,13 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   Widget build(BuildContext context) {
     final avatarUrl = widget.userPreferences.avatarUrl;
 
-    // ←←← THIS IS THE FINAL FIX FOR AVATAR NOT UPDATING
     ImageProvider? imageProvider;
     if (_pickedAvatar != null) {
       imageProvider = FileImage(File(_pickedAvatar!.path));
     } else if (avatarUrl != null && avatarUrl.isNotEmpty) {
-      // Forces Flutter to reload the new image immediately (bypasses cache)
       imageProvider = NetworkImage(
           '$avatarUrl?ts=${DateTime.now().millisecondsSinceEpoch}');
     }
-    // ←←← END OF FIX
 
     return Scaffold(
       backgroundColor: _bg,
@@ -348,7 +347,19 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                 onChanged: (v) => setState(() => _bloodGroup = v),
                 style: const TextStyle(color: Colors.white),
               ),
+              const SizedBox(height: 12),
+
+              // ── NEW BIO FIELD ──
+              TextFormField(
+                controller: _bioController,
+                decoration: _inputDecoration('Bio (optional)'),
+                style: const TextStyle(color: Colors.white),
+                maxLines: 3,
+                maxLength: 160,
+                textInputAction: TextInputAction.done,
+              ),
               const SizedBox(height: 20),
+
               ElevatedButton(
                 onPressed: _isSaving ? null : _save,
                 style: ElevatedButton.styleFrom(
