@@ -55,13 +55,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   String? _selectedGistType;
   String? _selectedSchoolId;
   final _titleController = TextEditingController();
-  XFile? _pickedImage;
   final _durationController = TextEditingController();
   final _urlController = TextEditingController();
 
   late Future<List<Map<String, dynamic>>> _schoolsFuture;
   bool _isSubmitting = false;
-  Uint8List? _pickedImageBytes;
+  List<XFile> _pickedImages = [];
+  List<Uint8List> _pickedImageBytes = [];
 
   String? _selectedCategory;
   final categories = ['Sports', 'Entertainment', 'Official', 'Religion'];
@@ -71,7 +71,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     super.initState();
     _selectedSchoolId = widget.schoolId;
     _schoolsFuture = _fetchSchools();
-    _recoverPendingGistPayment(); // ← NEW SAFETY NET
+    _recoverPendingGistPayment();
   }
 
   Future<List<Map<String, dynamic>>> _fetchSchools() async {
@@ -106,26 +106,36 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     return _pricePerDay * days;
   }
 
-  Future<void> _pickImage() async {
-    final picker = ImagePicker();
+  Future<void> _pickImages() async {
+    if (_pickedImages.length >= 3) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Maximum 3 images allowed')),
+      );
+      return;
+    }
 
+    final picker = ImagePicker();
     final picked = await picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 80,
     );
 
-    if (!mounted) return;
+    if (picked == null || !mounted) return;
 
-    if (picked != null) {
-      Uint8List? bytes;
-      if (kIsWeb) {
-        bytes = await picked.readAsBytes();
-      }
-      setState(() {
-        _pickedImage = picked;
-        if (bytes != null) _pickedImageBytes = bytes;
-      });
-    }
+    Uint8List? bytes;
+    if (kIsWeb) bytes = await picked.readAsBytes();
+
+    setState(() {
+      _pickedImages.add(picked);
+      if (bytes != null) _pickedImageBytes.add(bytes);
+    });
+  }
+
+  void _removeImage(int index) {
+    setState(() {
+      _pickedImages.removeAt(index);
+      if (kIsWeb) _pickedImageBytes.removeAt(index);
+    });
   }
 
   // ==================== RECOVERY (updated for full safety) ====================
@@ -162,10 +172,10 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   // ==================== MAIN SUBMIT (auto-verification) ====================
   Future<void> _submitGist() async {
     if (!_formKey.currentState!.validate() ||
-        _pickedImage == null ||
+        _pickedImages.isEmpty ||
         _selectedGistType == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Complete form & pick an image')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Complete form & pick at least one image')));
       return;
     }
 
@@ -188,21 +198,29 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     int? draftGistId;
 
     try {
-      // 1. Upload image (your existing code)
+      // 1. Upload all images (max 3)
       const bucket = 'gist-images';
-      final ext = _pickedImage!.name.split('.').last;
-      final filePath = 'gists/${const Uuid().v4()}.$ext';
+      final List<String> uploadedUrls = [];
+      final List<String> uploadedPaths = [];
 
-      if (kIsWeb) {
-        final bytes = await _pickedImage!.readAsBytes();
-        await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
-            fileOptions: const FileOptions(contentType: 'image/*'));
-      } else {
-        final file = File(_pickedImage!.path);
-        await supabase.storage.from(bucket).upload(filePath, file);
+      for (int i = 0; i < _pickedImages.length; i++) {
+        final image = _pickedImages[i];
+        final ext = image.name.split('.').last;
+        final filePath = 'gists/${const Uuid().v4()}.$ext';
+
+        if (kIsWeb) {
+          final bytes = await image.readAsBytes();
+          await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
+              fileOptions: const FileOptions(contentType: 'image/*'));
+        } else {
+          final file = File(image.path);
+          await supabase.storage.from(bucket).upload(filePath, file);
+        }
+
+        final publicUrl = supabase.storage.from(bucket).getPublicUrl(filePath);
+        uploadedUrls.add(publicUrl);
+        uploadedPaths.add(filePath);
       }
-
-      final publicUrl = supabase.storage.from(bucket).getPublicUrl(filePath);
 
       // 2. Create draft gist
       final numDays = int.tryParse(_durationController.text) ?? 0;
@@ -213,8 +231,9 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'user_id': user.id,
         'type': dbType,
         'title': _titleController.text.trim(),
-        'image_url': publicUrl,
-        'image_path': filePath,
+        'image_url': uploadedUrls.first, // backward compatibility
+        'image_urls': uploadedUrls, // ← NEW: array of up to 3 images
+        'image_path': uploadedPaths.first,
         'number_of_days': numDays,
         'price_per_day': pricePerDay,
         'paid': false,
@@ -223,7 +242,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'category': _selectedCategory,
       };
 
-      // ONLY attach the school_id if the gist type is 'local'
       if (dbType == 'local' &&
           chosenSchoolId != null &&
           chosenSchoolId.isNotEmpty) {
@@ -246,7 +264,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         return;
       }
 
-      // 3. Paystack initialize
+      // 3. Paystack initialize (your original payment flow - untouched)
       final reference = 'gist_${const Uuid().v4()}';
       final payload = {
         'amount': totalNaira * 100,
@@ -271,14 +289,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
       final authUrl = jsonDecode(httpResp.body)['data']['authorization_url'];
 
-      // ←←← SAVE PENDING BEFORE OPENING BROWSER
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
           'pending_gist_payment',
           jsonEncode({
             'reference': reference,
             'gistId': draftGistId,
-            'numberOfDays': numDays, // ← ADD THIS LINE
+            'numberOfDays': numDays,
           }));
 
       final uri = Uri.parse(authUrl);
@@ -291,7 +308,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
             duration: Duration(seconds: 8)),
       );
 
-      // ←←← AUTOMATIC POLLING
       final success = await _pollAndVerifyGistPayment(reference, draftGistId);
 
       if (success) {
@@ -400,8 +416,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
             key: _formKey,
             child: Column(
               children: [
+                // Gist Type
                 DropdownButtonFormField<String>(
-                  // This style property fixes the text color of the SELECTED item
                   style: const TextStyle(
                       color: Colors.white,
                       fontSize: 16,
@@ -417,7 +433,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   items: _typeMap.keys
                       .map((g) => DropdownMenuItem(
                             value: g,
-                            // This style fixes the text color of items INSIDE the list
                             child: Text(g,
                                 style: const TextStyle(color: Colors.white)),
                           ))
@@ -426,10 +441,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   onChanged: (v) =>
                       mounted ? setState(() => _selectedGistType = v) : null,
                   validator: (v) => v == null ? 'Select a gist type' : null,
-                  dropdownColor:
-                      Colors.grey[850], // Background color of the popup menu
+                  dropdownColor: Colors.grey[850],
                 ),
                 const SizedBox(height: 12),
+
+                // Category
                 DropdownButtonFormField<String>(
                   style: const TextStyle(
                       color: Colors.white,
@@ -455,6 +471,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   dropdownColor: Colors.grey[850],
                 ),
                 const SizedBox(height: 12),
+
+                // School (for Local Gist)
                 if (_selectedGistType == 'Local Gist') ...[
                   FutureBuilder<List<Map<String, dynamic>>>(
                     future: _schoolsFuture,
@@ -466,7 +484,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                       }
                       final schools = snap.data ?? [];
                       return DropdownButtonFormField<String>(
-                        // 1. This makes the SELECTED text white
                         style: const TextStyle(
                             color: Colors.white,
                             fontSize: 16,
@@ -484,11 +501,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                           final name = s['name']?.toString() ?? id;
                           return DropdownMenuItem(
                             value: id,
-                            // 2. This makes the text INSIDE THE LIST white
-                            child: Text(
-                              name,
-                              style: const TextStyle(color: Colors.white),
-                            ),
+                            child: Text(name,
+                                style: const TextStyle(color: Colors.white)),
                           );
                         }).toList(),
                         value: _selectedSchoolId,
@@ -504,9 +518,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   ),
                   const SizedBox(height: 12),
                 ],
+
+                // Title
                 TextFormField(
                   controller: _titleController,
-                  maxLength: 150,
+                  maxLength: 2000,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     labelText: 'Gist Title',
@@ -520,6 +536,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                       (v == null || v.isEmpty) ? 'Enter a title' : null,
                 ),
                 const SizedBox(height: 12),
+
+                // Optional URL
                 TextFormField(
                   controller: _urlController,
                   style: const TextStyle(color: Colors.white),
@@ -541,6 +559,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   },
                 ),
                 const SizedBox(height: 12),
+
+                // Duration
                 TextFormField(
                   controller: _durationController,
                   keyboardType: TextInputType.number,
@@ -559,26 +579,60 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                     return (n == null || n <= 0) ? 'Enter valid days' : null;
                   },
                 ),
+                const SizedBox(height: 20),
+
+                // MULTIPLE IMAGE PICKER UI
+                const Text('Images (max 3)',
+                    style: TextStyle(color: Colors.white70, fontSize: 16)),
+                const SizedBox(height: 8),
+
+                if (_pickedImages.isNotEmpty)
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: List.generate(_pickedImages.length, (i) {
+                      return Stack(
+                        children: [
+                          kIsWeb
+                              ? Image.memory(_pickedImageBytes[i],
+                                  height: 100, width: 100, fit: BoxFit.cover)
+                              : Image.file(File(_pickedImages[i].path),
+                                  height: 100, width: 100, fit: BoxFit.cover),
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: GestureDetector(
+                              onTap: () => _removeImage(i),
+                              child: const CircleAvatar(
+                                radius: 12,
+                                backgroundColor: Colors.red,
+                                child: Icon(Icons.close,
+                                    size: 16, color: Colors.white),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    }),
+                  ),
+
                 const SizedBox(height: 12),
+
                 OutlinedButton.icon(
-                  icon: const Icon(Icons.image, color: Colors.white),
-                  label: Text(
-                      _pickedImage == null ? 'Upload Image' : 'Change Image',
-                      style: const TextStyle(color: Colors.white)),
+                  icon: const Icon(Icons.add_photo_alternate,
+                      color: Colors.white),
+                  label: Text(_pickedImages.length >= 3
+                      ? 'Maximum reached (3)'
+                      : 'Add Image (${_pickedImages.length}/3)'),
                   style: OutlinedButton.styleFrom(
                       side: BorderSide(color: widget.themeColor),
                       backgroundColor: Colors.transparent),
-                  onPressed: _pickImage,
+                  onPressed: _pickedImages.length >= 3 ? null : _pickImages,
                 ),
-                if (_pickedImage != null) ...[
-                  const SizedBox(height: 8),
-                  kIsWeb
-                      ? Image.memory(_pickedImageBytes!,
-                          height: 120, fit: BoxFit.cover)
-                      : Image.file(File(_pickedImage!.path),
-                          height: 120, fit: BoxFit.cover),
-                ],
-                const SizedBox(height: 16),
+
+                const SizedBox(height: 24),
+
+                // Estimated Price
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -595,6 +649,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   ],
                 ),
                 const SizedBox(height: 20),
+
+                // Submit Button
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(

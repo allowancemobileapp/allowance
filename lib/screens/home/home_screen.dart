@@ -110,7 +110,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
           .select('''
-            id, title, image_url, type, school_id, url, created_at, category,
+            id, title, image_url, image_urls, type, school_id, url, created_at, category,
             profiles:user_id (username, avatar_url, bio)
           ''')
           .eq('paid', true)
@@ -151,7 +151,6 @@ class _HomeScreenState extends State<HomeScreen> {
         _isGistsLoading = false;
       });
 
-      // Load like counts and user likes
       await _loadGistLikes();
 
       if (_fetchedGists.isEmpty) {
@@ -711,6 +710,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // 3. Updated _buildGistSlideshow() – added megaphone icon + tap to open filter sheet
+  // 3. Updated _buildGistSlideshow() – longer titles + "...see more"
   Widget _buildGistSlideshow() {
     final filteredGists = _gistFilter == 'All'
         ? _fetchedGists
@@ -769,6 +769,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     itemBuilder: (ctx, idx) {
                       final gist = filteredGists[idx];
                       final imageUrl = (gist['image_url'] as String?) ?? '';
+                      final imageUrls =
+                          (gist['image_urls'] as List?)?.cast<String>() ?? [];
                       final gistUrl = (gist['url'] as String?) ?? '';
                       final title = gist['title'] as String? ?? '';
                       final profileData = gist['profiles'];
@@ -787,13 +789,17 @@ class _HomeScreenState extends State<HomeScreen> {
                       final likeCount = _gistLikeCounts[gistId] ?? 0;
                       final isLiked = _likedGistIds.contains(gistId);
 
+                      final imagesToShow = imageUrls.isNotEmpty
+                          ? imageUrls
+                          : (imageUrl.isNotEmpty ? [imageUrl] : []);
+
+                      int currentPage = 0;
+
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 32.0),
                         child: Column(
                           children: [
-                            // --------------------------------------------------
-                            // LATEST LAYOUT: Image with Like Button Overlay
-                            // --------------------------------------------------
+                            // CAROUSEL IMAGE AREA
                             SizedBox(
                               height: MediaQuery.of(context).size.height * 0.36,
                               width: horizontalBarWidth,
@@ -801,64 +807,111 @@ class _HomeScreenState extends State<HomeScreen> {
                                 borderRadius: BorderRadius.circular(24),
                                 child: Stack(
                                   children: [
-                                    // 1. Background Placeholder
                                     Positioned.fill(
                                         child: Container(
                                             color: _isDarkMode
                                                 ? Colors.grey[750]
                                                 : Colors.grey[300])),
 
-                                    // 2. The Image
+                                    imagesToShow.isEmpty
+                                        ? Container(
+                                            color: _isDarkMode
+                                                ? Colors.grey[750]
+                                                : Colors.grey[300])
+                                        : PageView.builder(
+                                            itemCount: imagesToShow.length,
+                                            onPageChanged: (page) {
+                                              currentPage = page;
+                                              (context as Element)
+                                                  .markNeedsBuild();
+                                            },
+                                            itemBuilder: (context, i) {
+                                              return CachedNetworkImage(
+                                                imageUrl: imagesToShow[i],
+                                                fit: BoxFit.cover,
+                                                placeholder: (_, __) =>
+                                                    const Center(
+                                                        child:
+                                                            CircularProgressIndicator()),
+                                                errorWidget: (_, __, ___) =>
+                                                    const Icon(
+                                                        Icons.broken_image,
+                                                        size: 50),
+                                              );
+                                            },
+                                          ),
+
+                                    // (1/3) indicator
+                                    if (imagesToShow.length > 1)
+                                      Positioned(
+                                        top: 12,
+                                        left: 12,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 10, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color:
+                                                Colors.black.withOpacity(0.7),
+                                            borderRadius:
+                                                BorderRadius.circular(20),
+                                          ),
+                                          child: Text(
+                                            "${currentPage + 1}/${imagesToShow.length}",
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+
+                                    // Zoom + Long press download
                                     GestureDetector(
                                       onTap: () {
-                                        showDialog(
-                                          context: context,
-                                          builder: (context) => Dialog(
-                                            backgroundColor: Colors.black,
-                                            insetPadding: EdgeInsets.zero,
-                                            child: Stack(
-                                              alignment: Alignment.center,
-                                              children: [
-                                                InteractiveViewer(
-                                                  panEnabled: true,
-                                                  minScale: 0.5,
-                                                  maxScale: 4.0,
-                                                  child: CachedNetworkImage(
-                                                      imageUrl: imageUrl),
-                                                ),
-                                                Positioned(
-                                                  top: 40,
-                                                  right: 20,
-                                                  child: IconButton(
+                                        if (imagesToShow.isNotEmpty) {
+                                          showDialog(
+                                            context: context,
+                                            builder: (context) => Dialog(
+                                              backgroundColor: Colors.black,
+                                              insetPadding: EdgeInsets.zero,
+                                              child: Stack(
+                                                alignment: Alignment.center,
+                                                children: [
+                                                  InteractiveViewer(
+                                                    panEnabled: true,
+                                                    minScale: 0.5,
+                                                    maxScale: 4.0,
+                                                    child: CachedNetworkImage(
+                                                        imageUrl:
+                                                            imagesToShow.first),
+                                                  ),
+                                                  Positioned(
+                                                    top: 40,
+                                                    right: 20,
+                                                    child: IconButton(
                                                       icon: const Icon(
                                                           Icons.close,
                                                           color: Colors.white,
                                                           size: 30),
                                                       onPressed: () =>
                                                           Navigator.pop(
-                                                              context)),
-                                                ),
-                                              ],
+                                                              context),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
-                                          ),
-                                        );
+                                          );
+                                        }
                                       },
-                                      onLongPress: () =>
-                                          _downloadGistImage(imageUrl),
-                                      child: Center(
-                                        child: CachedNetworkImage(
-                                          imageUrl: imageUrl,
-                                          fit: BoxFit.cover,
-                                          placeholder: (_, __) =>
-                                              const CircularProgressIndicator(),
-                                          errorWidget: (_, __, ___) =>
-                                              const Icon(Icons.broken_image,
-                                                  size: 50),
-                                        ),
-                                      ),
+                                      onLongPress: () => _downloadGistImage(
+                                          imagesToShow.isNotEmpty
+                                              ? imagesToShow.first
+                                              : imageUrl),
                                     ),
 
-                                    // 3. Link Icon (Top Right)
+                                    // Link icon
                                     if (gistUrl.isNotEmpty)
                                       Positioned(
                                         top: 12,
@@ -890,27 +943,24 @@ class _HomeScreenState extends State<HomeScreen> {
                                         ),
                                       ),
 
-                                    // 4. THE LIKE BUTTON & COUNT (Bottom Right Overlay)
+                                    // Like button
                                     Positioned(
-                                      bottom:
-                                          12, // Distance from the bottom edge
-                                      right: 12, // Distance from the right edge
+                                      bottom: 12,
+                                      right: 12,
                                       child: Container(
                                         padding: const EdgeInsets.symmetric(
                                             vertical: 8, horizontal: 8),
                                         decoration: BoxDecoration(
-                                          color: Colors
-                                              .black45, // Soft background for readability
-                                          borderRadius:
-                                              BorderRadius.circular(20),
-                                        ),
+                                            color: Colors.black45,
+                                            borderRadius:
+                                                BorderRadius.circular(20)),
                                         child: Column(
                                           mainAxisSize: MainAxisSize.min,
                                           children: [
                                             IconButton(
                                               padding: EdgeInsets.zero,
                                               constraints:
-                                                  const BoxConstraints(), // Removes excess default padding
+                                                  const BoxConstraints(),
                                               onPressed: () =>
                                                   _toggleGistLike(gistId),
                                               icon: Icon(
@@ -923,7 +973,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 size: 28,
                                               ),
                                             ),
-                                            const SizedBox(height: 4),
                                             Text(
                                               likeCount.toString(),
                                               style: const TextStyle(
@@ -942,7 +991,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                             const SizedBox(height: 12),
 
-                            // Username + Title Caption
+                            // Username + Title with "...see more"
                             GestureDetector(
                               onTap: () => _showProfileCard(
                                   username ?? '', avatarUrl, bio),
@@ -960,8 +1009,13 @@ class _HomeScreenState extends State<HomeScreen> {
                                           fontWeight: FontWeight.bold),
                                     ),
                                     TextSpan(
-                                      text:
-                                          username != null ? ": $title" : title,
+                                      text: username != null ? ": " : "",
+                                      style: TextStyle(
+                                          color: themeColor,
+                                          fontWeight: FontWeight.bold),
+                                    ),
+                                    TextSpan(
+                                      text: title,
                                       style:
                                           const TextStyle(color: Colors.white),
                                     ),
@@ -969,6 +1023,52 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                               ),
                             ),
+
+                            // "...see more" if title is long
+                            if (title.length > 90)
+                              GestureDetector(
+                                onTap: () {
+                                  showDialog(
+                                    context: context,
+                                    builder: (context) => AlertDialog(
+                                      backgroundColor: const Color(0xFF1E1E1E),
+                                      title: const Text(
+                                        "Full Gist Title",
+                                        style: TextStyle(color: Colors.white),
+                                      ),
+                                      content: Text(
+                                        title,
+                                        style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 16,
+                                            height: 1.5),
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () =>
+                                              Navigator.pop(context),
+                                          child: const Text(
+                                            "Close",
+                                            style: TextStyle(
+                                                color: Color(0xFF4CAF50)),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                                child: const Padding(
+                                  padding: EdgeInsets.only(top: 4),
+                                  child: Text(
+                                    "...see more",
+                                    style: TextStyle(
+                                      color: Color(0xFF4CAF50),
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                       );
@@ -1287,20 +1387,25 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final user = supabase.auth.currentUser;
       if (user == null) return [];
+
       final resp = await supabase
           .from('notifications')
-          .select()
+          .select('''
+            *,
+            profiles:user_id (username, avatar_url)
+          ''')
           .eq('user_id', user.id)
           .order('sent_at', ascending: false)
           .limit(50);
-      return resp;
+
+      return List<Map<String, dynamic>>.from(resp);
     } catch (e) {
       developer.log('Error fetching notifications: $e', name: 'notifications');
       return [];
     }
   }
 
-  // NEW: show slide-up notifications bottom sheet
+  // NEW: show slide-up notifications bottom sheet WITH PROFILE PHOTOS
   void _showNotifications() async {
     final notifications = await _fetchNotifications();
     if (!mounted) return;
@@ -1358,7 +1463,33 @@ class _HomeScreenState extends State<HomeScreen> {
                           final gistId = data['gist_id']?.toString();
                           final ticketId = data['ticket_id']?.toString();
 
+                          // NEW: Profile photo from joined data
+                          final profile = notif['profiles'];
+                          final avatarUrl = (profile is Map)
+                              ? profile['avatar_url'] as String?
+                              : null;
+                          final username = (profile is Map)
+                              ? profile['username'] as String?
+                              : null;
+
                           return ListTile(
+                            leading: CircleAvatar(
+                              radius: 22,
+                              backgroundColor: Colors.grey[700],
+                              backgroundImage:
+                                  avatarUrl != null && avatarUrl.isNotEmpty
+                                      ? NetworkImage(avatarUrl)
+                                      : null,
+                              child: avatarUrl == null || avatarUrl.isEmpty
+                                  ? Text(
+                                      username?.isNotEmpty == true
+                                          ? username![0].toUpperCase()
+                                          : '?',
+                                      style: const TextStyle(
+                                          fontSize: 18, color: Colors.white),
+                                    )
+                                  : null,
+                            ),
                             title: Text(
                               title,
                               style: TextStyle(
