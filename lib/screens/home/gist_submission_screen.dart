@@ -519,10 +519,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   const SizedBox(height: 12),
                 ],
 
-                // Title
+                // TITLE — NOW RESPECTS PARAGRAPHS (multi-line)
                 TextFormField(
                   controller: _titleController,
                   maxLength: 2000,
+                  maxLines: null, // ← Allows unlimited lines
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.newline,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     labelText: 'Gist Title',

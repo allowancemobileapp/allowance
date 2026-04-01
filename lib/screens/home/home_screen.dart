@@ -772,7 +772,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       final imageUrls =
                           (gist['image_urls'] as List?)?.cast<String>() ?? [];
                       final gistUrl = (gist['url'] as String?) ?? '';
-                      final title = gist['title'] as String? ?? '';
+                      final fullTitle = gist['title'] as String? ?? '';
                       final profileData = gist['profiles'];
                       final gistId = gist['id'] as int;
 
@@ -821,9 +821,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                         : PageView.builder(
                                             itemCount: imagesToShow.length,
                                             onPageChanged: (page) {
-                                              currentPage = page;
-                                              (context as Element)
-                                                  .markNeedsBuild();
+                                              setState(
+                                                  () => currentPage = page);
                                             },
                                             itemBuilder: (context, i) {
                                               return CachedNetworkImage(
@@ -841,7 +840,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                             },
                                           ),
 
-                                    // (1/3) indicator
+                                    // LIVE (1/3) INDICATOR
                                     if (imagesToShow.length > 1)
                                       Positioned(
                                         top: 12,
@@ -850,11 +849,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                           padding: const EdgeInsets.symmetric(
                                               horizontal: 10, vertical: 4),
                                           decoration: BoxDecoration(
-                                            color:
-                                                Colors.black.withOpacity(0.7),
-                                            borderRadius:
-                                                BorderRadius.circular(20),
-                                          ),
+                                              color:
+                                                  Colors.black.withOpacity(0.7),
+                                              borderRadius:
+                                                  BorderRadius.circular(20)),
                                           child: Text(
                                             "${currentPage + 1}/${imagesToShow.length}",
                                             style: const TextStyle(
@@ -866,7 +864,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                         ),
                                       ),
 
-                                    // Zoom + Long press download
+                                    // Zoom gesture (now works on any image)
                                     GestureDetector(
                                       onTap: () {
                                         if (imagesToShow.isNotEmpty) {
@@ -876,15 +874,20 @@ class _HomeScreenState extends State<HomeScreen> {
                                               backgroundColor: Colors.black,
                                               insetPadding: EdgeInsets.zero,
                                               child: Stack(
-                                                alignment: Alignment.center,
                                                 children: [
-                                                  InteractiveViewer(
-                                                    panEnabled: true,
-                                                    minScale: 0.5,
-                                                    maxScale: 4.0,
-                                                    child: CachedNetworkImage(
-                                                        imageUrl:
-                                                            imagesToShow.first),
+                                                  PageView.builder(
+                                                    itemCount:
+                                                        imagesToShow.length,
+                                                    itemBuilder: (context, i) =>
+                                                        InteractiveViewer(
+                                                      panEnabled: true,
+                                                      minScale: 0.5,
+                                                      maxScale: 4.0,
+                                                      child: CachedNetworkImage(
+                                                          imageUrl:
+                                                              imagesToShow[i],
+                                                          fit: BoxFit.contain),
+                                                    ),
                                                   ),
                                                   Positioned(
                                                     top: 40,
@@ -964,22 +967,20 @@ class _HomeScreenState extends State<HomeScreen> {
                                               onPressed: () =>
                                                   _toggleGistLike(gistId),
                                               icon: Icon(
-                                                isLiked
-                                                    ? Icons.favorite
-                                                    : Icons.favorite_border,
-                                                color: isLiked
-                                                    ? Colors.red
-                                                    : Colors.white,
-                                                size: 28,
-                                              ),
+                                                  isLiked
+                                                      ? Icons.favorite
+                                                      : Icons.favorite_border,
+                                                  color: isLiked
+                                                      ? Colors.red
+                                                      : Colors.white,
+                                                  size: 28),
                                             ),
-                                            Text(
-                                              likeCount.toString(),
-                                              style: const TextStyle(
-                                                  color: Colors.white,
-                                                  fontSize: 15,
-                                                  fontWeight: FontWeight.bold),
-                                            ),
+                                            Text(likeCount.toString(),
+                                                style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 15,
+                                                    fontWeight:
+                                                        FontWeight.bold)),
                                           ],
                                         ),
                                       ),
@@ -991,7 +992,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                             const SizedBox(height: 12),
 
-                            // Username + Title with "...see more"
+                            // USERNAME + TITLE
                             GestureDetector(
                               onTap: () => _showProfileCard(
                                   username ?? '', avatarUrl, bio),
@@ -1002,20 +1003,22 @@ class _HomeScreenState extends State<HomeScreen> {
                                       fontFamily: 'SanFrancisco', fontSize: 18),
                                   children: [
                                     TextSpan(
-                                      text:
-                                          username != null ? "@$username" : '',
-                                      style: TextStyle(
-                                          color: themeColor,
-                                          fontWeight: FontWeight.bold),
-                                    ),
+                                        text: username != null
+                                            ? "@$username"
+                                            : '',
+                                        style: TextStyle(
+                                            color: themeColor,
+                                            fontWeight: FontWeight.bold)),
                                     TextSpan(
-                                      text: username != null ? ": " : "",
-                                      style: TextStyle(
-                                          color: themeColor,
-                                          fontWeight: FontWeight.bold),
-                                    ),
+                                        text: username != null ? ": " : "",
+                                        style: TextStyle(
+                                            color: themeColor,
+                                            fontWeight: FontWeight.bold)),
                                     TextSpan(
-                                      text: title,
+                                      // TRUNCATION LOGIC ADDED HERE
+                                      text: fullTitle.length > 100
+                                          ? "${fullTitle.substring(0, 100)}..."
+                                          : fullTitle,
                                       style:
                                           const TextStyle(color: Colors.white),
                                     ),
@@ -1024,49 +1027,73 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             ),
 
-                            // "...see more" if title is long
-                            if (title.length > 90)
+                            // "...see more" → SLIDE-UP POPUP
+                            if (fullTitle.length > 100)
                               GestureDetector(
                                 onTap: () {
-                                  showDialog(
+                                  showModalBottomSheet(
                                     context: context,
-                                    builder: (context) => AlertDialog(
-                                      backgroundColor: const Color(0xFF1E1E1E),
-                                      title: const Text(
-                                        "Full Gist Title",
-                                        style: TextStyle(color: Colors.white),
-                                      ),
-                                      content: Text(
-                                        title,
-                                        style: const TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 16,
-                                            height: 1.5),
-                                      ),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(context),
-                                          child: const Text(
-                                            "Close",
-                                            style: TextStyle(
-                                                color: Color(0xFF4CAF50)),
-                                          ),
+                                    isScrollControlled: true,
+                                    backgroundColor: Colors.transparent,
+                                    builder: (context) =>
+                                        DraggableScrollableSheet(
+                                      initialChildSize: 0.55,
+                                      minChildSize: 0.4,
+                                      maxChildSize: 0.9,
+                                      expand: false,
+                                      builder: (_, scrollController) =>
+                                          Container(
+                                        decoration: const BoxDecoration(
+                                          color: Color(0xFF1E1E1E),
+                                          borderRadius: BorderRadius.vertical(
+                                              top: Radius.circular(24)),
                                         ),
-                                      ],
+                                        child: ListView(
+                                          controller: scrollController,
+                                          padding: const EdgeInsets.all(24),
+                                          children: [
+                                            const Text(
+                                              "Full Gist Title",
+                                              style: TextStyle(
+                                                  fontSize: 22,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Colors.white),
+                                              textAlign: TextAlign.center,
+                                            ),
+                                            const SizedBox(height: 16),
+                                            Text(
+                                              fullTitle.replaceAll('\\n', '\n'),
+                                              style: const TextStyle(
+                                                  color: Colors.white70,
+                                                  fontSize: 16,
+                                                  height: 1.5),
+                                            ),
+                                            const SizedBox(height: 32),
+                                            Align(
+                                              alignment: Alignment.center,
+                                              child: TextButton(
+                                                onPressed: () =>
+                                                    Navigator.pop(context),
+                                                child: const Text('Close',
+                                                    style: TextStyle(
+                                                        color:
+                                                            Color(0xFF4CAF50),
+                                                        fontSize: 18)),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                     ),
                                   );
                                 },
                                 child: const Padding(
                                   padding: EdgeInsets.only(top: 4),
-                                  child: Text(
-                                    "...see more",
-                                    style: TextStyle(
-                                      color: Color(0xFF4CAF50),
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
+                                  child: Text("...see more",
+                                      style: TextStyle(
+                                          color: Color(0xFF4CAF50),
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.bold)),
                                 ),
                               ),
                           ],
@@ -1390,15 +1417,42 @@ class _HomeScreenState extends State<HomeScreen> {
 
       final resp = await supabase
           .from('notifications')
-          .select('''
-            *,
-            profiles:user_id (username, avatar_url)
-          ''')
+          .select()
           .eq('user_id', user.id)
           .order('sent_at', ascending: false)
           .limit(50);
 
-      return List<Map<String, dynamic>>.from(resp);
+      // Add avatar from the gist author
+      final List<Map<String, dynamic>> result = [];
+      for (var notif in resp) {
+        final data = notif['data'] as Map<String, dynamic>? ?? {};
+        final gistId = data['gist_id'];
+
+        String? avatarUrl;
+        String? username;
+
+        if (gistId != null) {
+          try {
+            final gist = await supabase
+                .from('gists')
+                .select('profiles:user_id (username, avatar_url)')
+                .eq('id', gistId)
+                .single();
+
+            final profile = gist['profiles'];
+            if (profile is Map) {
+              avatarUrl = profile['avatar_url'] as String?;
+              username = profile['username'] as String?;
+            }
+          } catch (_) {}
+        }
+
+        notif['avatar_url'] = avatarUrl;
+        notif['username'] = username;
+        result.add(notif);
+      }
+
+      return result;
     } catch (e) {
       developer.log('Error fetching notifications: $e', name: 'notifications');
       return [];
@@ -1463,14 +1517,10 @@ class _HomeScreenState extends State<HomeScreen> {
                           final gistId = data['gist_id']?.toString();
                           final ticketId = data['ticket_id']?.toString();
 
-                          // NEW: Profile photo from joined data
-                          final profile = notif['profiles'];
-                          final avatarUrl = (profile is Map)
-                              ? profile['avatar_url'] as String?
-                              : null;
-                          final username = (profile is Map)
-                              ? profile['username'] as String?
-                              : null;
+                          // CORRECT AVATAR: from the gist's author
+                          // CORRECT AVATAR: from the gist's author
+                          final avatarUrl = notif['avatar_url'] as String?;
+                          final username = notif['username'] as String?;
 
                           return ListTile(
                             leading: CircleAvatar(
@@ -1511,19 +1561,12 @@ class _HomeScreenState extends State<HomeScreen> {
                                 await supabase.from('notifications').update(
                                     {'read': true}).eq('id', notif['id']);
                               } catch (_) {}
-
                               if (gistId != null) {
-                                Navigator.pushNamed(
-                                  context,
-                                  '/gist',
-                                  arguments: {'id': gistId},
-                                );
+                                Navigator.pushNamed(context, '/gist',
+                                    arguments: {'id': gistId});
                               } else if (ticketId != null) {
-                                Navigator.pushNamed(
-                                  context,
-                                  '/ticket',
-                                  arguments: {'id': ticketId},
-                                );
+                                Navigator.pushNamed(context, '/ticket',
+                                    arguments: {'id': ticketId});
                               }
                             },
                           );
