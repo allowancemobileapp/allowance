@@ -3,7 +3,6 @@ import 'dart:async';
 import 'dart:developer' as developer;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:flutter_web_plugins/flutter_web_plugins.dart'; // ← NEW
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -15,16 +14,11 @@ import 'firebase_options.dart';
 import 'models/user_preferences.dart';
 import 'screens/introduction/introduction_screen.dart';
 import 'screens/home/home_screen.dart';
-import 'screens/profile/edit_profile_screen.dart'; // ← ADD THIS IMPORT
-import 'shared/services/fcm_service.dart';
+import 'screens/profile/edit_profile_screen.dart';
+import 'shared/services/fcm_service.dart'; // ← now uncommented
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Use Hash URL strategy for Flutter web
-  if (kIsWeb) {
-    setUrlStrategy(const HashUrlStrategy());
-  }
 
   await dotenv.load(fileName: ".env");
 
@@ -34,15 +28,14 @@ Future<void> main() async {
     throw Exception('SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env');
   }
 
-  // Firebase init
+  // === FIREBASE ENABLED ===
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
-  // Background handler (Android/iOS only — web uses firebase-messaging-sw.js)
   if (!kIsWeb) {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   }
+  // === END FIREBASE ===
 
-  // Supabase init
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
 
   runApp(const AllowanceApp());
@@ -76,17 +69,15 @@ class _AllowanceAppState extends State<AllowanceApp> {
 
     final user = Supabase.instance.client.auth.currentUser;
     if (user != null) {
-      _setupFcmAndListeners();
+      _setupFcmAndListeners(); // ← now uncommented
     }
 
-    // Auth state listener
     _authSub = Supabase.instance.client.auth.onAuthStateChange
         .listen((authState) async {
       final session = authState.session;
-      // ignore: unnecessary_null_comparison
       if (session != null && session.user != null) {
         await _userPreferences.loadPreferences();
-        _setupFcmAndListeners();
+        _setupFcmAndListeners(); // ← now uncommented
         if (mounted) setState(() {});
       } else {
         await _userPreferences.clearLocal();
@@ -96,18 +87,16 @@ class _AllowanceAppState extends State<AllowanceApp> {
   }
 
   Future<void> _setupFcmAndListeners() async {
-    // Save FCM token (mobile + web)
     try {
       if (kIsWeb) {
-        await requestWebPushPermissionAndSaveToken(); // web version
+        await requestWebPushPermissionAndSaveToken();
       } else {
-        await initFcmAndSaveToken(); // mobile version
+        await initFcmAndSaveToken();
       }
     } catch (e) {
       developer.log('FCM token save error: $e', name: 'main');
     }
 
-    // Register foreground / tap listeners (needs context)
     WidgetsBinding.instance.addPostFrameCallback((_) {
       registerFcmListeners(navigatorKey.currentContext ?? context);
     });

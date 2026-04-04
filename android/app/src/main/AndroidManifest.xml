@@ -1,21 +1,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Internet access for API calls -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
-    <!-- ✅ Required for Android 11+ to let Flutter detect and open external apps -->
     <queries>
-        <!-- Existing query for text processing -->
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
 
-        <!-- Allow WhatsApp and WhatsApp Business detection -->
         <package android:name="com.whatsapp" />
         <package android:name="com.whatsapp.w4b" />
 
-        <!-- Allow https://wa.me fallback -->
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data android:scheme="https" />
@@ -25,9 +26,8 @@
     <application
         android:label="allowance"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
-
-        <activity
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true"> <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
@@ -37,12 +37,10 @@
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
 
-            <!-- Flutter’s default theme metadata -->
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
 
-            <!-- Launcher intent -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -50,9 +48,12 @@
         </activity>
 
         <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="high_importance_channel" />
+
+        <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
 
     </application>
-
 </manifest>
