@@ -1,5 +1,6 @@
 // lib/screens/home/home_screen.dart
 import 'dart:async';
+import 'package:allowance/widgets/stories_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:icons_plus/icons_plus.dart';
 import 'package:allowance/models/user_preferences.dart';
@@ -61,24 +62,31 @@ class _HomeScreenState extends State<HomeScreen> {
   final Set<int> _likedGistIds = {};
 
   // Fallback images (replace with your own public URLs or storage links)
+  // Fallback images (now fully compatible with your UI)
   final List<Map<String, dynamic>> _fallbackGists = [
     {
-      'id': 'fallback-1',
+      'id': -1, // negative int so it never conflicts with real gists
       'title': 'Market your brand exclusively on campus',
       'image_url':
-          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/InShot_20251114_172942404.jpg'
+          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/InShot_20251114_172942404.jpg',
+      'category': 'All', // ← IMPORTANT
+      'profiles': {'username': 'Allowance', 'avatar_url': null, 'bio': null},
     },
     {
-      'id': 'fallback-2',
+      'id': -2,
       'title': 'Get the best and tastiest food combos',
       'image_url':
-          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/InShot_20251114_173051467.jpg'
+          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/InShot_20251114_173051467.jpg',
+      'category': 'All',
+      'profiles': {'username': 'Allowance', 'avatar_url': null, 'bio': null},
     },
     {
-      'id': 'fallback-3',
+      'id': -3,
       'title': 'Let the world see your new EP!',
       'image_url':
-          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/file_00000000da98720ab5cdd39756c77926.png'
+          'https://quuazutreaitqoquzolg.supabase.co/storage/v1/object/public/random/file_00000000da98720ab5cdd39756c77926.png',
+      'category': 'All',
+      'profiles': {'username': 'Allowance', 'avatar_url': null, 'bio': null},
     },
   ];
 
@@ -756,6 +764,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ),
+        const StoriesBar(),
+        const SizedBox(height: 6),
         Expanded(
           child: _isGistsLoading
               ? Center(child: CircularProgressIndicator(color: themeColor))
@@ -774,7 +784,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       final gistUrl = (gist['url'] as String?) ?? '';
                       final fullTitle = gist['title'] as String? ?? '';
                       final profileData = gist['profiles'];
-                      final gistId = gist['id'] as int;
+                      final gistId = (gist['id'] is int)
+                          ? gist['id'] as int
+                          : int.tryParse(gist['id'].toString()) ?? 0;
 
                       final username = (profileData is Map)
                           ? profileData['username'] as String?
@@ -1155,6 +1167,42 @@ class _HomeScreenState extends State<HomeScreen> {
           : ThemeData.light().copyWith(scaffoldBackgroundColor: bgColor),
       child: Scaffold(
         bottomNavigationBar: _buildCustomFooter(bgColor),
+
+        // ==================== MODERN MESSENGER-STYLE CHATBOT ICON ====================
+        floatingActionButton: FloatingActionButton(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          child: Container(
+            width: 58,
+            height: 58,
+            decoration: BoxDecoration(
+              color: const Color(0xFF4CAF50),
+              borderRadius: BorderRadius.circular(18),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.2),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: const Icon(
+              Icons.chat_bubble_rounded, // Clean Messenger-style icon
+              color: Colors.white,
+              size: 30,
+            ),
+          ),
+          onPressed: () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Message Chatbot coming soon! 💬'),
+                backgroundColor: Color(0xFF4CAF50),
+              ),
+            );
+          },
+        ),
+        // ==================== END CHATBOT ICON ====================
+
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         body: SafeArea(
           child: IndexedStack(
@@ -1170,7 +1218,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         left: 16, top: 30, right: 16, bottom: 8),
                     child: Column(
                       children: [
-                        // 1. Vendor Bar (unchanged)
+                        // 1. Vendor Bar
                         GestureDetector(
                           onTap: () {
                             setState(() => _vendorBarTapped = true);
@@ -1233,7 +1281,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 16),
 
-                        // 2. Budget Bar → NOW DIRECTLY OPENS MENU (clean & free)
+                        // 2. Budget Bar
                         Container(
                           width: horizontalBarWidth,
                           height: 44,
@@ -1266,7 +1314,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                     border: InputBorder.none),
                               ),
                             ),
-                            // Direct navigation (no payment)
                             InkWell(
                               onTap: () {
                                 Navigator.push(
@@ -1291,7 +1338,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                         const SizedBox(height: 12),
 
-                        // 3. Colorful Tabs
+                        // 3. Colorful Tabs (Gist Bar)
                         SizedBox(
                           width: horizontalBarWidth,
                           height: 50,
@@ -1308,7 +1355,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
 
-                  // Gists slideshow (now with tappable username → profile card)
+                  // Gists slideshow
                   Expanded(
                     child: _buildGistSlideshow(),
                   ),
@@ -1331,24 +1378,35 @@ class _HomeScreenState extends State<HomeScreen> {
 
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
+      // These two lines fix the color-changing issue:
+      scrolledUnderElevation: 0,
+      surfaceTintColor: Colors.transparent,
+
       backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
       elevation: 0,
       centerTitle: true,
       leading: Builder(
-          builder: (appBarContext) => IconButton(
-              icon: const Icon(Icons.notifications, size: 36),
-              onPressed: () {
-                _showNotifications();
-              })),
-      title: Image.asset('assets/images/allowance_logo.png',
-          height: 200, width: 200, fit: BoxFit.contain),
+        builder: (appBarContext) => IconButton(
+          icon: const Icon(Icons.notifications, size: 36),
+          onPressed: () {
+            _showNotifications();
+          },
+        ),
+      ),
+      title: Image.asset(
+        'assets/images/allowance_logo.png',
+        height: 200,
+        width: 200,
+        fit: BoxFit.contain,
+      ),
       actions: [
         IconButton(
-            icon: const Icon(BoxIcons.bxs_map, size: 36),
-            color: _prefs.schoolId?.isNotEmpty == true
-                ? themeColor
-                : (_isDarkMode ? Colors.white54 : Colors.black54),
-            onPressed: _chooseUniversity)
+          icon: const Icon(BoxIcons.bxs_map, size: 36),
+          color: _prefs.schoolId?.isNotEmpty == true
+              ? themeColor
+              : (_isDarkMode ? Colors.white54 : Colors.black54),
+          onPressed: _chooseUniversity,
+        )
       ],
     );
   }
@@ -1422,7 +1480,7 @@ class _HomeScreenState extends State<HomeScreen> {
           .order('sent_at', ascending: false)
           .limit(50);
 
-      // Add avatar from the gist author
+      // Add avatar from the gist author OR from ticket sender
       final List<Map<String, dynamic>> result = [];
       for (var notif in resp) {
         final data = notif['data'] as Map<String, dynamic>? ?? {};
@@ -1432,6 +1490,7 @@ class _HomeScreenState extends State<HomeScreen> {
         String? username;
 
         if (gistId != null) {
+          // === FOR GISTS (your old code - unchanged) ===
           try {
             final gist = await supabase
                 .from('gists')
@@ -1445,8 +1504,14 @@ class _HomeScreenState extends State<HomeScreen> {
               username = profile['username'] as String?;
             }
           } catch (_) {}
+        } else if (data['type'] == 'ticket_transfer' ||
+            data['type'] == 'ticket_gift') {
+          // === NEW: FOR TICKET TRANSFERS / GIFTS ===
+          avatarUrl = data['sender_avatar'] as String?;
+          username = data['sender_username'] as String?;
         }
 
+        // Attach to the notification so your UI can show the avatar
         notif['avatar_url'] = avatarUrl;
         notif['username'] = username;
         result.add(notif);
@@ -1517,29 +1582,63 @@ class _HomeScreenState extends State<HomeScreen> {
                           final gistId = data['gist_id']?.toString();
                           final ticketId = data['ticket_id']?.toString();
 
-                          // CORRECT AVATAR: from the gist's author
-                          // CORRECT AVATAR: from the gist's author
-                          final avatarUrl = notif['avatar_url'] as String?;
-                          final username = notif['username'] as String?;
+                          // ────── IMAGE LOGIC ──────
+                          // 1. For new tickets → use event poster (photo_url)
+                          // 2. For gists / transfers → use avatar (as before)
+                          final String? photoUrl = data['photo_url'] as String?;
+                          final String? avatarUrl =
+                              notif['avatar_url'] as String?;
+                          final String? username = notif['username'] as String?;
+
+                          final String? displayImage = photoUrl ?? avatarUrl;
+
+                          final bool isTicketNotification =
+                              (data['type'] == 'ticket' ||
+                                  data['type'] == 'ticket_transfer');
 
                           return ListTile(
-                            leading: CircleAvatar(
-                              radius: 22,
-                              backgroundColor: Colors.grey[700],
-                              backgroundImage:
-                                  avatarUrl != null && avatarUrl.isNotEmpty
-                                      ? NetworkImage(avatarUrl)
-                                      : null,
-                              child: avatarUrl == null || avatarUrl.isEmpty
-                                  ? Text(
-                                      username?.isNotEmpty == true
-                                          ? username![0].toUpperCase()
-                                          : '?',
-                                      style: const TextStyle(
-                                          fontSize: 18, color: Colors.white),
-                                    )
-                                  : null,
-                            ),
+                            leading: displayImage != null &&
+                                    displayImage.isNotEmpty
+                                ? ClipRRect(
+                                    borderRadius: BorderRadius.circular(8),
+                                    child: CachedNetworkImage(
+                                      imageUrl: displayImage,
+                                      width: 48,
+                                      height: 48,
+                                      fit: BoxFit.cover,
+                                      placeholder: (_, __) => Container(
+                                        width: 48,
+                                        height: 48,
+                                        color: Colors.grey[700],
+                                      ),
+                                      errorWidget: (_, __, ___) => const Icon(
+                                        Icons.broken_image,
+                                        size: 48,
+                                        color: Colors.white70,
+                                      ),
+                                    ),
+                                  )
+                                : CircleAvatar(
+                                    radius: 22,
+                                    backgroundColor: isTicketNotification
+                                        ? const Color(0xFF4CAF50)
+                                        : Colors.grey[700],
+                                    backgroundImage: (displayImage != null &&
+                                            displayImage.isNotEmpty)
+                                        ? NetworkImage(displayImage)
+                                        : null,
+                                    child: (displayImage == null ||
+                                            displayImage.isEmpty)
+                                        ? Text(
+                                            username?.isNotEmpty == true
+                                                ? username![0].toUpperCase()
+                                                : '?',
+                                            style: const TextStyle(
+                                                fontSize: 18,
+                                                color: Colors.white),
+                                          )
+                                        : null,
+                                  ),
                             title: Text(
                               title,
                               style: TextStyle(

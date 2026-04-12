@@ -1,5 +1,6 @@
 // lib/screens/home/my_tickets_screen.dart (updated for themed UI, countdown, buy more implementation, and transfer error message)
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'dart:async';
@@ -23,6 +24,7 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
   void initState() {
     super.initState();
     _myTicketsFuture = _fetchMyTickets();
+    _recoverPendingPayments(); // ← ADD THIS LINE
   }
 
   Future<List<dynamic>> _fetchMyTickets() async {
@@ -191,6 +193,88 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
     );
   }
 
+  // Add this new method
+  Future<void> _recoverPendingPayments() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pendingJson = prefs.getString('pending_ticket_payment');
+    if (pendingJson == null) return;
+
+    try {
+      final data = jsonDecode(pendingJson) as Map<String, dynamic>;
+      final reference = data['reference'] as String;
+      final ticketId = data['ticketId'] as int;
+      final quantity = data['quantity'] as int;
+
+      // Reuse the same polling logic from ticket_screen (we can copy it here or make a shared service later)
+      final success = await _pollAndVerifyTicketPayment(
+          reference, ticketId, quantity); // we'll add this helper below
+
+      if (success) {
+        await prefs.remove('pending_ticket_payment');
+        setState(() => _myTicketsFuture = _fetchMyTickets());
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('✅ Ticket recovered!'),
+                backgroundColor: Colors.green),
+          );
+        }
+      }
+    } catch (_) {}
+  }
+
+  // Add this helper (copy from ticket_screen)
+  Future<bool> _pollAndVerifyTicketPayment(
+      String reference, int ticketId, int quantity) async {
+    for (int attempt = 0; attempt < 25; attempt++) {
+      try {
+        final resp = await http.get(
+          Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
+          headers: {
+            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
+            'Content-Type': 'application/json',
+          },
+        );
+
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body) as Map<String, dynamic>;
+          if (data['status'] == true && data['data']?['status'] == 'success') {
+            final totalNaira = (data['data']['amount'] as int) ~/ 100;
+            final perTicketNaira = (totalNaira / quantity).round();
+
+            final supabase = Supabase.instance.client;
+            final user = supabase.auth.currentUser;
+
+            if (user != null) {
+              // Insert one row per ticket
+              for (int i = 0; i < quantity; i++) {
+                await supabase.from('ticket_purchases').insert({
+                  'user_id': user.id,
+                  'ticket_id': ticketId,
+                  'payment_reference': reference,
+                  'amount_paid': perTicketNaira,
+                  'status': 'success',
+                });
+              }
+
+              // ←←← THIS IS THE FIX: Call the RPC instead of direct UPDATE
+              await supabase.rpc('decrement_tickets_remaining', params: {
+                'p_ticket_id': ticketId,
+                'p_quantity': quantity,
+              });
+            }
+
+            return true;
+          }
+        }
+      } catch (e) {
+        // Optional: you can log the error if you want
+      }
+      await Future.delayed(const Duration(seconds: 4));
+    }
+    return false;
+  }
+
   Future<void> _promptVerify(
       String reference, int ticketId, int amount, int quantity) async {
     final shouldVerify = await showDialog<bool>(
@@ -347,10 +431,15 @@ class _MyTicketsScreenState extends State<MyTicketsScreen> {
 
     final recipientId = recipient['id'] as String;
 
+    // ←←← FIXED: Added .order() before .limit()
     await supabase
         .from('ticket_purchases')
-        .update({'user_id': recipientId}).match(
-            {'ticket_id': ticketId, 'user_id': user.id}).limit(quantity);
+        .update({'user_id': recipientId})
+        .match({'ticket_id': ticketId, 'user_id': user.id})
+        .order('id') // required by Supabase when using limit
+        .limit(quantity);
+
+    // Optional: also reduce owned_quantity if you want to show it immediately
   }
 
   @override

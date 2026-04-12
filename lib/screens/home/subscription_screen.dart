@@ -38,6 +38,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       "features": [
         "Enjoy the ad free life",
         "Get access to our trusted delivery agents",
+        "Post Global Story Gist"
       ],
       "cta": "N700/month",
       "imageHeight": 110.0,

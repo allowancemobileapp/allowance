@@ -230,7 +230,7 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
 
       final payload = {
         'school_id': widget.schoolId,
-        'user_id': user.id,
+        'user_id': user.id, // string is fine
         'name': _nameController.text.trim(),
         'description': _descriptionController.text.trim(),
         'date': dateString,

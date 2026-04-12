@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-// Firebase imports
+// Firebase
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'firebase_options.dart';
@@ -15,7 +15,8 @@ import 'models/user_preferences.dart';
 import 'screens/introduction/introduction_screen.dart';
 import 'screens/home/home_screen.dart';
 import 'screens/profile/edit_profile_screen.dart';
-import 'shared/services/fcm_service.dart'; // ← now uncommented
+import 'shared/services/fcm_service.dart';
+import 'widgets/custom_loading_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,13 +29,11 @@ Future<void> main() async {
     throw Exception('SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env');
   }
 
-  // === FIREBASE ENABLED ===
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   if (!kIsWeb) {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
   }
-  // === END FIREBASE ===
 
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
 
@@ -50,41 +49,44 @@ class AllowanceApp extends StatefulWidget {
 
 class _AllowanceAppState extends State<AllowanceApp> {
   final UserPreferences _userPreferences = UserPreferences();
-  bool _isLoading = true;
+  bool _isInitialized = false;
+
   StreamSubscription<AuthState>? _authSub;
 
   static final GlobalKey<NavigatorState> navigatorKey =
       GlobalKey<NavigatorState>();
-  static BuildContext? navigatorKeyRootContext;
 
   @override
   void initState() {
     super.initState();
-    _init();
+    _initializeApp();
   }
 
-  Future<void> _init() async {
-    await _userPreferences.loadPreferences();
-    setState(() => _isLoading = false);
+  Future<void> _initializeApp() async {
+    try {
+      await _userPreferences.loadPreferences();
 
-    final user = Supabase.instance.client.auth.currentUser;
-    if (user != null) {
-      _setupFcmAndListeners(); // ← now uncommented
-    }
-
-    _authSub = Supabase.instance.client.auth.onAuthStateChange
-        .listen((authState) async {
-      final session = authState.session;
-      // ignore: unnecessary_null_comparison
-      if (session != null && session.user != null) {
-        await _userPreferences.loadPreferences();
-        _setupFcmAndListeners(); // ← now uncommented
-        if (mounted) setState(() {});
-      } else {
-        await _userPreferences.clearLocal();
-        if (mounted) setState(() {});
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user != null) {
+        await _setupFcmAndListeners();
       }
-    });
+
+      _authSub = Supabase.instance.client.auth.onAuthStateChange
+          .listen((authState) async {
+        final session = authState.session;
+        if (session != null && session.user != null) {
+          await _userPreferences.loadPreferences();
+          await _setupFcmAndListeners();
+        } else {
+          await _userPreferences.clearLocal();
+        }
+        if (mounted) setState(() {});
+      });
+    } catch (e) {
+      developer.log('App initialization error: $e', name: 'main');
+    } finally {
+      if (mounted) setState(() => _isInitialized = true);
+    }
   }
 
   Future<void> _setupFcmAndListeners() async {
@@ -95,11 +97,14 @@ class _AllowanceAppState extends State<AllowanceApp> {
         await initFcmAndSaveToken();
       }
     } catch (e) {
-      developer.log('FCM token save error: $e', name: 'main');
+      developer.log('FCM setup error: $e', name: 'main');
     }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      registerFcmListeners(navigatorKey.currentContext ?? context);
+      final context = navigatorKey.currentContext;
+      if (context != null) {
+        registerFcmListeners(context);
+      }
     });
   }
 
@@ -111,29 +116,29 @@ class _AllowanceAppState extends State<AllowanceApp> {
 
   @override
   Widget build(BuildContext context) {
-    navigatorKeyRootContext ??= navigatorKey.currentContext;
-
-    if (_isLoading) {
-      return const MaterialApp(
-        home: Scaffold(body: Center(child: CircularProgressIndicator())),
-      );
-    }
-
-    final user = Supabase.instance.client.auth.currentUser;
-
     return MaterialApp(
       navigatorKey: navigatorKey,
       title: 'Allowance',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.indigo),
-      home: user == null
-          ? IntroductionScreen(
-              onFinishIntro: () {},
-              userPreferences: _userPreferences,
-            )
-          : (_userPreferences.hasCompletedProfile == true
-              ? HomeScreen(userPreferences: _userPreferences)
-              : EditProfileScreen(userPreferences: _userPreferences)),
+      home: _isInitialized
+          ? _buildHome()
+          : const CustomLoadingScreen(), // ← Now safely inside MaterialApp
     );
+  }
+
+  Widget _buildHome() {
+    final user = Supabase.instance.client.auth.currentUser;
+
+    if (user == null) {
+      return IntroductionScreen(
+        onFinishIntro: () {},
+        userPreferences: _userPreferences,
+      );
+    }
+
+    return _userPreferences.hasCompletedProfile == true
+        ? HomeScreen(userPreferences: _userPreferences)
+        : EditProfileScreen(userPreferences: _userPreferences);
   }
 }
