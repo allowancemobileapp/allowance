@@ -35,80 +35,46 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     setState(() => _loading = true);
 
     final supabase = Supabase.instance.client;
+    final usernameVal = _usernameCtl.text.trim();
+    final emailVal = _emailCtl.text.trim();
 
     try {
-      AuthResponse authRes;
+      // 1) PRE-CHECK: Check username availability before starting the Auth process
+      if (_isSignUp) {
+        final existing = await supabase
+            .from('profiles')
+            .select('username')
+            .eq('username', usernameVal)
+            .maybeSingle();
+
+        if (existing != null) {
+          _showError('This username is already taken. Please choose another.');
+          setState(() => _loading = false);
+          return;
+        }
+      }
 
       if (_isSignUp) {
-        // 1) Sign up new user
+        // 2) SIGN UP FLOW
         final signUpRes = await supabase.auth.signUp(
-          email: _emailCtl.text.trim(),
-          password: _pwCtl.text,
-        );
-        if (signUpRes.user == null) {
-          throw AuthException('Sign up failed');
-        }
-
-        // 2) Immediately sign in after sign up
-        authRes = await supabase.auth.signInWithPassword(
-          email: _emailCtl.text.trim(),
+          email: emailVal,
           password: _pwCtl.text,
         );
 
-        if (authRes.user == null) {
-          throw AuthException('Authentication failed after sign up');
-        }
+        if (signUpRes.user == null) throw AuthException('Sign up failed');
 
-        // 3) Defensive: try to create a minimal profile row (non-fatal)
-        final usernameVal = _usernameCtl.text.trim();
-        try {
-          final currentUser = supabase.auth.currentUser;
-          if (currentUser != null) {
-            final existing = await supabase
-                .from('profiles')
-                .select('id')
-                .eq('id', currentUser.id)
-                .maybeSingle();
+        // 3) INITIAL PROFILE UPSERT
+        // Using upsert ensures we create the profile and link it to the Auth ID immediately
+        await supabase.from('profiles').upsert({
+          'id': signUpRes.user!.id,
+          'email': emailVal,
+          'username': usernameVal,
+          'created_at': DateTime.now().toUtc().toIso8601String(),
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        });
 
-            if (existing == null) {
-              final insertMap = {
-                'id': currentUser.id,
-                'email': _emailCtl.text.trim(),
-                'created_at': DateTime.now().toUtc().toIso8601String(),
-                'updated_at': DateTime.now().toUtc().toIso8601String(),
-              };
-              if (usernameVal.isNotEmpty) insertMap['username'] = usernameVal;
-              await supabase.from('profiles').insert(insertMap);
-            } else {
-              final profileResp = await supabase
-                  .from('profiles')
-                  .select()
-                  .eq('id', currentUser.id)
-                  .maybeSingle();
-              if (profileResp != null) {
-                final serverUsername = profileResp['username'] as String?;
-                if ((serverUsername == null || serverUsername.isEmpty) &&
-                    usernameVal.isNotEmpty) {
-                  await supabase.from('profiles').update({
-                    'username': usernameVal,
-                    'updated_at': DateTime.now().toUtc().toIso8601String()
-                  }).eq('id', currentUser.id);
-                }
-              }
-            }
-          }
-        } catch (e) {
-          debugPrint('Profile creation after signup failed (non-fatal): $e');
-        }
+        await widget.userPreferences.loadPreferences();
 
-        // 4) Load preferences
-        try {
-          await widget.userPreferences.loadPreferences();
-        } catch (e) {
-          debugPrint('loadPreferences after sign-up failed: $e');
-        }
-
-        // 5) Redirect user to EditProfileScreen
         if (mounted) {
           await Navigator.of(context).pushReplacement(
             MaterialPageRoute(
@@ -116,43 +82,18 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                   EditProfileScreen(userPreferences: widget.userPreferences),
             ),
           );
-
-          try {
-            await widget.userPreferences.loadPreferences();
-          } catch (e) {
-            debugPrint('loadPreferences after edit failed: $e');
-          }
-
           widget.onFinishIntro();
-          if (mounted) {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(
-                builder: (_) =>
-                    HomeScreen(userPreferences: widget.userPreferences),
-              ),
-            );
-          }
-          return;
         }
       } else {
-        // Log in existing user
-        authRes = await supabase.auth.signInWithPassword(
-          email: _emailCtl.text.trim(),
+        // 4) LOG IN FLOW
+        await supabase.auth.signInWithPassword(
+          email: emailVal,
           password: _pwCtl.text,
         );
 
-        if (authRes.user == null) {
-          throw AuthException('Authentication failed');
-        }
-
-        try {
-          await widget.userPreferences.loadPreferences();
-        } catch (e) {
-          debugPrint('loadPreferences after login failed: $e');
-        }
-
+        await widget.userPreferences.loadPreferences();
         widget.onFinishIntro();
+
         if (mounted) {
           Navigator.pushReplacement(
             context,
@@ -162,22 +103,43 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
             ),
           );
         }
-        return;
       }
-    } on AuthException catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error.message)));
+    } on AuthException catch (e) {
+      // Friendly mapping for common Auth errors
+      String message = e.message;
+      if (message.contains('Invalid login credentials')) {
+        message = 'Incorrect email or password.';
+      } else if (message.contains('User already registered')) {
+        message = 'An account with this email already exists.';
       }
-    } catch (e, st) {
-      debugPrint('Intro submit error: $e\n$st');
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('Error: $e')));
+      _showError(message);
+    } on PostgrestException catch (e) {
+      // Specific check for Postgres unique constraint violation (Code 23505)
+      if (e.code == '23505' || e.message.contains('profiles_username_unique')) {
+        _showError(
+            'That username is already taken. Please try a different one.');
+      } else {
+        _showError('Database error: Unable to save your profile.');
       }
+    } catch (e) {
+      // Final fallback for unexpected issues (Network, etc.)
+      _showError(
+          'Something went wrong. Please check your connection and try again.');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+// Helper to keep code clean
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   @override

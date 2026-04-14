@@ -287,6 +287,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   @override
   Widget build(BuildContext context) {
     final story = _sortedStories[_currentIndex];
+    // ignore: unused_local_variable
     final isVideo = story['media_type'] == 'video';
 
     return Scaffold(
