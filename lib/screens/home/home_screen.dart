@@ -60,6 +60,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String _gistFilter = 'All';
   final Map<int, int> _gistLikeCounts = {};
   final Set<int> _likedGistIds = {};
+  final ScrollController _scrollController = ScrollController(); // The listener
+  bool _showBackToTopButton = false; // The visibility state
 
   // Fallback images (replace with your own public URLs or storage links)
   // Fallback images (now fully compatible with your UI)
@@ -94,7 +96,12 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _prefs = widget.userPreferences ?? UserPreferences();
-
+    _scrollController.addListener(() {
+      setState(() {
+        _showBackToTopButton =
+            _scrollController.offset > 300; // Show after 300 pixels
+      });
+    });
     _budgetFocusNode.addListener(() => setState(() {}));
     _pageController = PageController(viewportFraction: 0.85);
     _budgetController.text = _prefs.budget?.toString() ?? "";
@@ -109,6 +116,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _budgetFocusNode.dispose();
     _restaurantsController.dispose();
     _restaurantFocusNode.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -717,9 +725,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 3. Updated _buildGistSlideshow() – added megaphone icon + tap to open filter sheet
-  // 3. Updated _buildGistSlideshow() – longer titles + "...see more"
-  Widget _buildGistSlideshow() {
+  // ── NEW: Sticky Gist Filter Bar (used by the SliverPersistentHeader) ──
+  Widget _buildGistFilterBar() {
     final filteredGists = _gistFilter == 'All'
         ? _fetchedGists
         : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
@@ -732,390 +739,340 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        GestureDetector(
-          onTap: _showGistFilterSheet,
-          child: Container(
-            width: horizontalBarWidth,
-            height: 44,
-            margin: const EdgeInsets.only(bottom: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            decoration: BoxDecoration(
-                color: Colors.grey[800],
-                borderRadius: BorderRadius.circular(25)),
-            child: Row(
-              children: [
-                Icon(BoxIcons.bxs_megaphone, color: themeColor, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    label,
-                    style: TextStyle(
-                        fontFamily: 'SanFrancisco',
-                        fontSize: 18,
-                        color: themeColor,
-                        fontWeight: FontWeight.bold),
-                  ),
-                ),
-                Icon(Icons.chevron_right, color: themeColor, size: 24),
-              ],
-            ),
-          ),
+    return GestureDetector(
+      onTap: _showGistFilterSheet,
+      child: Container(
+        width: horizontalBarWidth,
+        height: 44,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        decoration: BoxDecoration(
+          color: Colors.grey[800],
+          borderRadius: BorderRadius.circular(25),
         ),
-        const StoriesBar(),
-        const SizedBox(height: 6),
-        Expanded(
-          child: _isGistsLoading
-              ? Center(child: CircularProgressIndicator(color: themeColor))
-              : RefreshIndicator(
-                  color: themeColor,
-                  onRefresh: _fetchGistsAndStartSlideshow,
-                  child: ListView.builder(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    padding: const EdgeInsets.only(bottom: 40, top: 8),
-                    itemCount: filteredGists.isEmpty ? 0 : filteredGists.length,
-                    itemBuilder: (ctx, idx) {
-                      final gist = filteredGists[idx];
-                      final imageUrl = (gist['image_url'] as String?) ?? '';
-                      final imageUrls =
-                          (gist['image_urls'] as List?)?.cast<String>() ?? [];
-                      final gistUrl = (gist['url'] as String?) ?? '';
-                      final fullTitle = gist['title'] as String? ?? '';
-                      final profileData = gist['profiles'];
-                      final gistId = (gist['id'] is int)
-                          ? gist['id'] as int
-                          : int.tryParse(gist['id'].toString()) ?? 0;
+        child: Row(
+          children: [
+            Icon(BoxIcons.bxs_megaphone, color: themeColor, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  fontFamily: 'SanFrancisco',
+                  fontSize: 18,
+                  color: Color(0xFF4CAF50), // themeColor
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            Icon(Icons.chevron_right, color: themeColor, size: 24),
+          ],
+        ),
+      ),
+    );
+  }
 
-                      final username = (profileData is Map)
-                          ? profileData['username'] as String?
-                          : null;
-                      final avatarUrl = (profileData is Map)
-                          ? profileData['avatar_url'] as String?
-                          : null;
-                      final bio = (profileData is Map)
-                          ? profileData['bio'] as String?
-                          : null;
+  // 3. Updated _buildGistSlideshow() – added megaphone icon + tap to open filter sheet
+  // 3. Updated _buildGistSlideshow() – longer titles + "...see more"
+  Widget _buildGistSlideshow() {
+    final filteredGists = _gistFilter == 'All'
+        ? _fetchedGists
+        : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
 
-                      final likeCount = _gistLikeCounts[gistId] ?? 0;
-                      final isLiked = _likedGistIds.contains(gistId);
+    if (_isGistsLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: Color(0xFF4CAF50)),
+      );
+    }
 
-                      final imagesToShow = imageUrls.isNotEmpty
-                          ? imageUrls
-                          : (imageUrl.isNotEmpty ? [imageUrl] : []);
+    return ListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      padding: const EdgeInsets.only(bottom: 40, top: 8),
+      itemCount: filteredGists.isEmpty ? 0 : filteredGists.length,
+      itemBuilder: (ctx, idx) {
+        final gist = filteredGists[idx];
+        final imageUrl = (gist['image_url'] as String?) ?? '';
+        final imageUrls = (gist['image_urls'] as List?)?.cast<String>() ?? [];
+        final gistUrl = (gist['url'] as String?) ?? '';
+        final fullTitle = gist['title'] as String? ?? '';
+        final profileData = gist['profiles'];
+        final gistId = (gist['id'] is int)
+            ? gist['id'] as int
+            : int.tryParse(gist['id'].toString()) ?? 0;
+        final username =
+            (profileData is Map) ? profileData['username'] as String? : null;
+        final avatarUrl =
+            (profileData is Map) ? profileData['avatar_url'] as String? : null;
+        final bio = (profileData is Map) ? profileData['bio'] as String? : null;
+        final likeCount = _gistLikeCounts[gistId] ?? 0;
+        final isLiked = _likedGistIds.contains(gistId);
+        final imagesToShow = imageUrls.isNotEmpty
+            ? imageUrls
+            : (imageUrl.isNotEmpty ? [imageUrl] : []);
+        int currentPage = 0;
 
-                      int currentPage = 0;
-
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 32.0),
-                        child: Column(
-                          children: [
-                            // CAROUSEL IMAGE AREA
-                            SizedBox(
-                              height: MediaQuery.of(context).size.height * 0.36,
-                              width: horizontalBarWidth,
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(24),
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 32.0),
+          child: Column(
+            children: [
+              // CAROUSEL IMAGE AREA
+              SizedBox(
+                height: MediaQuery.of(context).size.height * 0.36,
+                width: MediaQuery.of(context).size.width * 0.85,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(24),
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                          child: Container(
+                              color: _isDarkMode
+                                  ? Colors.grey[750]
+                                  : Colors.grey[300])),
+                      imagesToShow.isEmpty
+                          ? Container(
+                              color: _isDarkMode
+                                  ? Colors.grey[750]
+                                  : Colors.grey[300])
+                          : PageView.builder(
+                              itemCount: imagesToShow.length,
+                              onPageChanged: (page) {
+                                setState(() => currentPage = page);
+                              },
+                              itemBuilder: (context, i) {
+                                return CachedNetworkImage(
+                                  imageUrl: imagesToShow[i],
+                                  fit: BoxFit.cover,
+                                  placeholder: (_, __) => const Center(
+                                      child: CircularProgressIndicator()),
+                                  errorWidget: (_, __, ___) =>
+                                      const Icon(Icons.broken_image, size: 50),
+                                );
+                              },
+                            ),
+                      if (imagesToShow.length > 1)
+                        Positioned(
+                          top: 12,
+                          left: 12,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.7),
+                                borderRadius: BorderRadius.circular(20)),
+                            child: Text(
+                              "${currentPage + 1}/${imagesToShow.length}",
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      // Zoom + Download gesture
+                      GestureDetector(
+                        onTap: () {
+                          if (imagesToShow.isNotEmpty) {
+                            showDialog(
+                              context: context,
+                              builder: (context) => Dialog(
+                                backgroundColor: Colors.black,
+                                insetPadding: EdgeInsets.zero,
                                 child: Stack(
                                   children: [
-                                    Positioned.fill(
-                                        child: Container(
-                                            color: _isDarkMode
-                                                ? Colors.grey[750]
-                                                : Colors.grey[300])),
-
-                                    imagesToShow.isEmpty
-                                        ? Container(
-                                            color: _isDarkMode
-                                                ? Colors.grey[750]
-                                                : Colors.grey[300])
-                                        : PageView.builder(
-                                            itemCount: imagesToShow.length,
-                                            onPageChanged: (page) {
-                                              setState(
-                                                  () => currentPage = page);
-                                            },
-                                            itemBuilder: (context, i) {
-                                              return CachedNetworkImage(
-                                                imageUrl: imagesToShow[i],
-                                                fit: BoxFit.cover,
-                                                placeholder: (_, __) =>
-                                                    const Center(
-                                                        child:
-                                                            CircularProgressIndicator()),
-                                                errorWidget: (_, __, ___) =>
-                                                    const Icon(
-                                                        Icons.broken_image,
-                                                        size: 50),
-                                              );
-                                            },
-                                          ),
-
-                                    // LIVE (1/3) INDICATOR
-                                    if (imagesToShow.length > 1)
-                                      Positioned(
-                                        top: 12,
-                                        left: 12,
-                                        child: Container(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 10, vertical: 4),
-                                          decoration: BoxDecoration(
-                                              color:
-                                                  Colors.black.withOpacity(0.7),
-                                              borderRadius:
-                                                  BorderRadius.circular(20)),
-                                          child: Text(
-                                            "${currentPage + 1}/${imagesToShow.length}",
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ),
+                                    PageView.builder(
+                                      itemCount: imagesToShow.length,
+                                      itemBuilder: (context, i) =>
+                                          InteractiveViewer(
+                                        panEnabled: true,
+                                        minScale: 0.5,
+                                        maxScale: 4.0,
+                                        child: CachedNetworkImage(
+                                            imageUrl: imagesToShow[i],
+                                            fit: BoxFit.contain),
                                       ),
-
-                                    // Zoom gesture (now works on any image)
-                                    GestureDetector(
-                                      onTap: () {
-                                        if (imagesToShow.isNotEmpty) {
-                                          showDialog(
-                                            context: context,
-                                            builder: (context) => Dialog(
-                                              backgroundColor: Colors.black,
-                                              insetPadding: EdgeInsets.zero,
-                                              child: Stack(
-                                                children: [
-                                                  PageView.builder(
-                                                    itemCount:
-                                                        imagesToShow.length,
-                                                    itemBuilder: (context, i) =>
-                                                        InteractiveViewer(
-                                                      panEnabled: true,
-                                                      minScale: 0.5,
-                                                      maxScale: 4.0,
-                                                      child: CachedNetworkImage(
-                                                          imageUrl:
-                                                              imagesToShow[i],
-                                                          fit: BoxFit.contain),
-                                                    ),
-                                                  ),
-                                                  Positioned(
-                                                    top: 40,
-                                                    right: 20,
-                                                    child: IconButton(
-                                                      icon: const Icon(
-                                                          Icons.close,
-                                                          color: Colors.white,
-                                                          size: 30),
-                                                      onPressed: () =>
-                                                          Navigator.pop(
-                                                              context),
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          );
-                                        }
-                                      },
-                                      onLongPress: () => _downloadGistImage(
-                                          imagesToShow.isNotEmpty
-                                              ? imagesToShow.first
-                                              : imageUrl),
                                     ),
-
-                                    // Link icon
-                                    if (gistUrl.isNotEmpty)
-                                      Positioned(
-                                        top: 12,
-                                        right: 12,
-                                        child: Material(
-                                          color: Colors.transparent,
-                                          child: InkWell(
-                                            borderRadius:
-                                                BorderRadius.circular(30),
-                                            onTap: () async {
-                                              final uri = Uri.tryParse(gistUrl);
-                                              if (uri != null &&
-                                                  await canLaunchUrl(uri)) {
-                                                await launchUrl(uri,
-                                                    mode: LaunchMode
-                                                        .externalApplication);
-                                              }
-                                            },
-                                            child: Container(
-                                              padding: const EdgeInsets.all(12),
-                                              decoration: const BoxDecoration(
-                                                  color: Colors.black54,
-                                                  shape: BoxShape.circle),
-                                              child: const Icon(Icons.link,
-                                                  size: 24,
-                                                  color: Colors.white),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-
-                                    // Like button
                                     Positioned(
-                                      bottom: 12,
-                                      right: 12,
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            vertical: 8, horizontal: 8),
-                                        decoration: BoxDecoration(
-                                            color: Colors.black45,
-                                            borderRadius:
-                                                BorderRadius.circular(20)),
-                                        child: Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            IconButton(
-                                              padding: EdgeInsets.zero,
-                                              constraints:
-                                                  const BoxConstraints(),
-                                              onPressed: () =>
-                                                  _toggleGistLike(gistId),
-                                              icon: Icon(
-                                                  isLiked
-                                                      ? Icons.favorite
-                                                      : Icons.favorite_border,
-                                                  color: isLiked
-                                                      ? Colors.red
-                                                      : Colors.white,
-                                                  size: 28),
-                                            ),
-                                            Text(likeCount.toString(),
-                                                style: const TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 15,
-                                                    fontWeight:
-                                                        FontWeight.bold)),
-                                          ],
-                                        ),
+                                      top: 40,
+                                      right: 20,
+                                      child: IconButton(
+                                        icon: const Icon(Icons.close,
+                                            color: Colors.white, size: 30),
+                                        onPressed: () => Navigator.pop(context),
                                       ),
                                     ),
                                   ],
                                 ),
                               ),
-                            ),
-
-                            const SizedBox(height: 12),
-
-                            // USERNAME + TITLE
-                            GestureDetector(
-                              onTap: () => _showProfileCard(
-                                  username ?? '', avatarUrl, bio),
-                              child: RichText(
-                                textAlign: TextAlign.center,
-                                text: TextSpan(
-                                  style: const TextStyle(
-                                      fontFamily: 'SanFrancisco', fontSize: 18),
-                                  children: [
-                                    TextSpan(
-                                        text: username != null
-                                            ? "@$username"
-                                            : '',
-                                        style: TextStyle(
-                                            color: themeColor,
-                                            fontWeight: FontWeight.bold)),
-                                    TextSpan(
-                                        text: username != null ? ": " : "",
-                                        style: TextStyle(
-                                            color: themeColor,
-                                            fontWeight: FontWeight.bold)),
-                                    TextSpan(
-                                      // TRUNCATION LOGIC ADDED HERE
-                                      text: fullTitle.length > 100
-                                          ? "${fullTitle.substring(0, 100)}..."
-                                          : fullTitle,
-                                      style:
-                                          const TextStyle(color: Colors.white),
-                                    ),
-                                  ],
-                                ),
+                            );
+                          }
+                        },
+                        onLongPress: () => _downloadGistImage(
+                            imagesToShow.isNotEmpty
+                                ? imagesToShow.first
+                                : imageUrl),
+                      ),
+                      // Link button
+                      if (gistUrl.isNotEmpty)
+                        Positioned(
+                          top: 12,
+                          right: 12,
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(30),
+                              onTap: () async {
+                                final uri = Uri.tryParse(gistUrl);
+                                if (uri != null && await canLaunchUrl(uri)) {
+                                  await launchUrl(uri,
+                                      mode: LaunchMode.externalApplication);
+                                }
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: const BoxDecoration(
+                                    color: Colors.black54,
+                                    shape: BoxShape.circle),
+                                child: const Icon(Icons.link,
+                                    size: 24, color: Colors.white),
                               ),
                             ),
-
-                            // "...see more" → SLIDE-UP POPUP
-                            if (fullTitle.length > 100)
-                              GestureDetector(
-                                onTap: () {
-                                  showModalBottomSheet(
-                                    context: context,
-                                    isScrollControlled: true,
-                                    backgroundColor: Colors.transparent,
-                                    builder: (context) =>
-                                        DraggableScrollableSheet(
-                                      initialChildSize: 0.55,
-                                      minChildSize: 0.4,
-                                      maxChildSize: 0.9,
-                                      expand: false,
-                                      builder: (_, scrollController) =>
-                                          Container(
-                                        decoration: const BoxDecoration(
-                                          color: Color(0xFF1E1E1E),
-                                          borderRadius: BorderRadius.vertical(
-                                              top: Radius.circular(24)),
-                                        ),
-                                        child: ListView(
-                                          controller: scrollController,
-                                          padding: const EdgeInsets.all(24),
-                                          children: [
-                                            const Text(
-                                              "Full Gist Title",
-                                              style: TextStyle(
-                                                  fontSize: 22,
-                                                  fontWeight: FontWeight.bold,
-                                                  color: Colors.white),
-                                              textAlign: TextAlign.center,
-                                            ),
-                                            const SizedBox(height: 16),
-                                            Text(
-                                              fullTitle.replaceAll('\\n', '\n'),
-                                              style: const TextStyle(
-                                                  color: Colors.white70,
-                                                  fontSize: 16,
-                                                  height: 1.5),
-                                            ),
-                                            const SizedBox(height: 32),
-                                            Align(
-                                              alignment: Alignment.center,
-                                              child: TextButton(
-                                                onPressed: () =>
-                                                    Navigator.pop(context),
-                                                child: const Text('Close',
-                                                    style: TextStyle(
-                                                        color:
-                                                            Color(0xFF4CAF50),
-                                                        fontSize: 18)),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  );
-                                },
-                                child: const Padding(
-                                  padding: EdgeInsets.only(top: 4),
-                                  child: Text("...see more",
-                                      style: TextStyle(
-                                          color: Color(0xFF4CAF50),
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.bold)),
-                                ),
-                              ),
-                          ],
+                          ),
                         ),
-                      );
-                    },
+                      // Like button
+                      Positioned(
+                        bottom: 12,
+                        right: 12,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 8, horizontal: 8),
+                          decoration: BoxDecoration(
+                              color: Colors.black45,
+                              borderRadius: BorderRadius.circular(20)),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                onPressed: () => _toggleGistLike(gistId),
+                                icon: Icon(
+                                    isLiked
+                                        ? Icons.favorite
+                                        : Icons.favorite_border,
+                                    color: isLiked ? Colors.red : Colors.white,
+                                    size: 28),
+                              ),
+                              Text(likeCount.toString(),
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-        ),
-      ],
+              ),
+              const SizedBox(height: 12),
+              // Username + Title
+              GestureDetector(
+                onTap: () => _showProfileCard(username ?? '', avatarUrl, bio),
+                child: RichText(
+                  textAlign: TextAlign.center,
+                  text: TextSpan(
+                    style: const TextStyle(
+                        fontFamily: 'SanFrancisco', fontSize: 18),
+                    children: [
+                      TextSpan(
+                          text: username != null ? "@$username" : '',
+                          style: TextStyle(
+                              color: themeColor, fontWeight: FontWeight.bold)),
+                      TextSpan(
+                          text: username != null ? ": " : "",
+                          style: TextStyle(
+                              color: themeColor, fontWeight: FontWeight.bold)),
+                      TextSpan(
+                        text: fullTitle.length > 100
+                            ? "${fullTitle.substring(0, 100)}..."
+                            : fullTitle,
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // "...see more"
+              if (fullTitle.length > 100)
+                GestureDetector(
+                  onTap: () {
+                    showModalBottomSheet(
+                      context: context,
+                      isScrollControlled: true,
+                      backgroundColor: Colors.transparent,
+                      builder: (context) => DraggableScrollableSheet(
+                        initialChildSize: 0.55,
+                        minChildSize: 0.4,
+                        maxChildSize: 0.9,
+                        expand: false,
+                        builder: (_, scrollController) => Container(
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF1E1E1E),
+                            borderRadius:
+                                BorderRadius.vertical(top: Radius.circular(24)),
+                          ),
+                          child: ListView(
+                            controller: scrollController,
+                            padding: const EdgeInsets.all(24),
+                            children: [
+                              const Text(
+                                "Full Gist Title",
+                                style: TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white),
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                fullTitle.replaceAll('\\n', '\n'),
+                                style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 16,
+                                    height: 1.5),
+                              ),
+                              const SizedBox(height: 32),
+                              Align(
+                                alignment: Alignment.center,
+                                child: TextButton(
+                                  onPressed: () => Navigator.pop(context),
+                                  child: const Text('Close',
+                                      style: TextStyle(
+                                          color: Color(0xFF4CAF50),
+                                          fontSize: 18)),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Padding(
+                    padding: EdgeInsets.only(top: 4),
+                    child: Text("...see more",
+                        style: TextStyle(
+                            color: Color(0xFF4CAF50),
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold)),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -1166,9 +1123,12 @@ class _HomeScreenState extends State<HomeScreen> {
           ? ThemeData.dark().copyWith(scaffoldBackgroundColor: bgColor)
           : ThemeData.light().copyWith(scaffoldBackgroundColor: bgColor),
       child: Scaffold(
+        // 1. RESTORED APP BAR
+        appBar: _selectedIndex == 0 ? _buildAppBar() : null,
+
         bottomNavigationBar: _buildCustomFooter(bgColor),
 
-        // ==================== MODERN MESSENGER-STYLE CHATBOT ICON ====================
+        // 2. YOUR ORIGINAL CHATBOT ICON (Pinned Bottom Right)
         floatingActionButton: FloatingActionButton(
           backgroundColor: Colors.transparent,
           elevation: 0,
@@ -1183,14 +1143,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   color: Colors.black.withOpacity(0.2),
                   blurRadius: 10,
                   offset: const Offset(0, 4),
-                ),
+                )
               ],
             ),
-            child: const Icon(
-              Icons.chat_bubble_rounded, // Clean Messenger-style icon
-              color: Colors.white,
-              size: 30,
-            ),
+            child: const Icon(Icons.chat_bubble_rounded,
+                color: Colors.white, size: 30),
           ),
           onPressed: () {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -1201,174 +1158,204 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           },
         ),
-        // ==================== END CHATBOT ICON ====================
 
-        appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         body: SafeArea(
-          child: IndexedStack(
-            index: _selectedIndex,
+          child: Stack(
             children: [
-              // INDEX 0: HOME SCREEN
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
+              IndexedStack(
+                index: _selectedIndex,
                 children: [
-                  // FIXED TOP BARS
-                  Padding(
-                    padding: const EdgeInsets.only(
-                        left: 16, top: 30, right: 16, bottom: 8),
-                    child: Column(
-                      children: [
-                        // 1. Vendor Bar
-                        GestureDetector(
-                          onTap: () {
-                            setState(() => _vendorBarTapped = true);
-                            _showRestaurantSelection();
-                          },
-                          child: Container(
-                            width: horizontalBarWidth,
-                            height: 44,
-                            decoration: BoxDecoration(
-                                color: _isDarkMode
-                                    ? Colors.grey[800]
-                                    : Colors.grey[200],
-                                borderRadius: BorderRadius.circular(25)),
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Row(children: [
-                              Icon(BoxIcons.bxs_store,
-                                  color: themeColor, size: 20),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: _selectedRestaurants.isNotEmpty
-                                    ? SingleChildScrollView(
+                  RefreshIndicator(
+                    color: themeColor,
+                    onRefresh: _fetchGistsAndStartSlideshow,
+                    child: CustomScrollView(
+                      controller: _scrollController,
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      slivers: [
+                        // --- Section 1: Top bars (Vendor, Budget, Tabs) ---
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.only(
+                                left: 16, top: 20, right: 16, bottom: 8),
+                            child: Column(
+                              children: [
+                                GestureDetector(
+                                  onTap: () {
+                                    setState(() => _vendorBarTapped = true);
+                                    _showRestaurantSelection();
+                                  },
+                                  child: Container(
+                                    width: horizontalBarWidth,
+                                    height: 44,
+                                    decoration: BoxDecoration(
+                                      color: _isDarkMode
+                                          ? Colors.grey[800]
+                                          : Colors.grey[200],
+                                      borderRadius: BorderRadius.circular(25),
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 16),
+                                    child: Row(children: [
+                                      Icon(BoxIcons.bxs_store,
+                                          color: themeColor, size: 20),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                          child: _selectedRestaurants.isNotEmpty
+                                              ? SingleChildScrollView(
+                                                  scrollDirection:
+                                                      Axis.horizontal,
+                                                  child: Row(
+                                                      children: _selectedRestaurants
+                                                          .map((v) => Padding(
+                                                              padding:
+                                                                  const EdgeInsets.only(
+                                                                      right:
+                                                                          12),
+                                                              child: Chip(
+                                                                  label: Text(v,
+                                                                      style: TextStyle(
+                                                                          fontFamily:
+                                                                              'SanFrancisco',
+                                                                          fontSize:
+                                                                              18 * vendorBudgetTextSizeFactor,
+                                                                          color: Colors.white)),
+                                                                  backgroundColor: _isDarkMode ? Colors.grey[700] : Colors.grey[300])))
+                                                          .toList()))
+                                              : Text("Select Vendor", style: TextStyle(fontFamily: 'SanFrancisco', fontSize: 22 * vendorBudgetTextSizeFactor, color: Colors.white54))),
+                                      !_vendorBarTapped
+                                          ? Icon(BoxIcons.bxs_chevron_down,
+                                              color: themeColor, size: 22)
+                                          : const SizedBox(),
+                                    ]),
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                Container(
+                                  width: horizontalBarWidth,
+                                  height: 44,
+                                  decoration: BoxDecoration(
+                                    color: _isDarkMode
+                                        ? Colors.grey[800]
+                                        : Colors.grey[200],
+                                    borderRadius: BorderRadius.circular(25),
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 16),
+                                  child: Row(children: [
+                                    Icon(BoxIcons.bxs_dollar_circle,
+                                        color: themeColor, size: 20),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                        child: TextField(
+                                            controller: _budgetController,
+                                            focusNode: _budgetFocusNode,
+                                            keyboardType: TextInputType.number,
+                                            style: TextStyle(
+                                                fontFamily: 'SanFrancisco',
+                                                fontSize: 18 *
+                                                    vendorBudgetTextSizeFactor,
+                                                color: Colors.white),
+                                            decoration: InputDecoration(
+                                                hintText: "Enter Budget",
+                                                hintStyle: TextStyle(
+                                                    fontFamily: 'SanFrancisco',
+                                                    color: Colors.white54,
+                                                    fontSize: 22 *
+                                                        vendorBudgetTextSizeFactor),
+                                                border: InputBorder.none))),
+                                    InkWell(
+                                        onTap: () => Navigator.push(
+                                            context,
+                                            MaterialPageRoute(
+                                                builder: (_) =>
+                                                    AvailableOptionsScreen(
+                                                        userPreferences: _prefs,
+                                                        selectedRestaurants:
+                                                            _selectedRestaurants))),
+                                        child: Container(
+                                            decoration: BoxDecoration(
+                                                color: themeColor,
+                                                shape: BoxShape.circle),
+                                            padding: const EdgeInsets.all(6),
+                                            child: const Icon(
+                                                BoxIcons.bxs_chevron_right,
+                                                color: Colors.white,
+                                                size: 22))),
+                                  ]),
+                                ),
+                                const SizedBox(height: 12),
+                                SizedBox(
+                                    width: horizontalBarWidth,
+                                    height: 50,
+                                    child: SingleChildScrollView(
                                         scrollDirection: Axis.horizontal,
                                         child: Row(
-                                            children: _selectedRestaurants
-                                                .map((v) => Padding(
-                                                      padding:
-                                                          const EdgeInsets.only(
-                                                              right: 12),
-                                                      child: Chip(
-                                                        label: Text(v,
-                                                            style: TextStyle(
-                                                                fontFamily:
-                                                                    'SanFrancisco',
-                                                                fontSize: 18 *
-                                                                    vendorBudgetTextSizeFactor,
-                                                                color: Colors
-                                                                    .white)),
-                                                        backgroundColor:
-                                                            _isDarkMode
-                                                                ? Colors
-                                                                    .grey[700]
-                                                                : Colors
-                                                                    .grey[300],
-                                                      ),
-                                                    ))
-                                                .toList()))
-                                    : Text("Select Vendor",
-                                        style: TextStyle(
-                                            fontFamily: 'SanFrancisco',
-                                            fontSize:
-                                                22 * vendorBudgetTextSizeFactor,
-                                            color: Colors.white54)),
-                              ),
-                              !_vendorBarTapped
-                                  ? Icon(BoxIcons.bxs_chevron_down,
-                                      color: themeColor, size: 22)
-                                  : const SizedBox(),
-                            ]),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-
-                        // 2. Budget Bar
-                        Container(
-                          width: horizontalBarWidth,
-                          height: 44,
-                          decoration: BoxDecoration(
-                              color: _isDarkMode
-                                  ? Colors.grey[800]
-                                  : Colors.grey[200],
-                              borderRadius: BorderRadius.circular(25)),
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Row(children: [
-                            Icon(BoxIcons.bxs_dollar_circle,
-                                color: themeColor, size: 20),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: TextField(
-                                controller: _budgetController,
-                                focusNode: _budgetFocusNode,
-                                keyboardType: TextInputType.number,
-                                style: TextStyle(
-                                    fontFamily: 'SanFrancisco',
-                                    fontSize: 18 * vendorBudgetTextSizeFactor,
-                                    color: Colors.white),
-                                decoration: InputDecoration(
-                                    hintText: "Enter Budget",
-                                    hintStyle: TextStyle(
-                                        fontFamily: 'SanFrancisco',
-                                        color: Colors.white54,
-                                        fontSize:
-                                            22 * vendorBudgetTextSizeFactor),
-                                    border: InputBorder.none),
-                              ),
-                            ),
-                            InkWell(
-                              onTap: () {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (_) => AvailableOptionsScreen(
-                                      userPreferences: _prefs,
-                                      selectedRestaurants: _selectedRestaurants,
-                                    ),
-                                  ),
-                                );
-                              },
-                              child: Container(
-                                  decoration: BoxDecoration(
-                                      color: themeColor,
-                                      shape: BoxShape.circle),
-                                  padding: const EdgeInsets.all(6),
-                                  child: const Icon(BoxIcons.bxs_chevron_right,
-                                      color: Colors.white, size: 22)),
-                            ),
-                          ]),
-                        ),
-                        const SizedBox(height: 12),
-
-                        // 3. Colorful Tabs (Gist Bar)
-                        SizedBox(
-                          width: horizontalBarWidth,
-                          height: 50,
-                          child: SingleChildScrollView(
-                            scrollDirection: Axis.horizontal,
-                            child: Row(
-                              children: _colorfulTabs
-                                  .map((tab) => _buildRectangularTab(tab))
-                                  .toList(),
+                                            children: _colorfulTabs
+                                                .map((tab) =>
+                                                    _buildRectangularTab(tab))
+                                                .toList()))),
+                              ],
                             ),
                           ),
                         ),
+
+                        // --- Section 2: STICKY GIST BAR + STORIES ---
+                        SliverPersistentHeader(
+                          pinned: true,
+                          delegate: _GistBarHeaderDelegate(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _buildGistFilterBar(),
+                                const SizedBox(height: 10),
+                                const StoriesBar(),
+                              ],
+                            ),
+                          ),
+                        ),
+
+                        // --- Section 3: Gists list ---
+                        SliverToBoxAdapter(child: _buildGistSlideshow()),
                       ],
                     ),
                   ),
-
-                  // Gists slideshow
-                  Expanded(
-                    child: _buildGistSlideshow(),
-                  ),
+                  FavoritesScreen(userPreferences: _prefs),
+                  SubscriptionScreen(
+                      userPreferences: _prefs, themeColor: themeColor),
+                  ProfileScreen(
+                      userPreferences: _prefs,
+                      onSave: () => setState(() => _selectedIndex = 0)),
                 ],
               ),
 
-              // Other tabs
-              FavoritesScreen(userPreferences: _prefs),
-              SubscriptionScreen(
-                  userPreferences: _prefs, themeColor: themeColor),
-              ProfileScreen(
-                  userPreferences: _prefs,
-                  onSave: () => setState(() => _selectedIndex = 0)),
+              // 3. THE NEW SCROLL-TO-TOP BUTTON (Centralized)
+              if (_showBackToTopButton)
+                Positioned(
+                  bottom: 20,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Opacity(
+                      opacity: 0.5,
+                      child: GestureDetector(
+                        onTap: () {
+                          _scrollController.animateTo(0,
+                              duration: const Duration(milliseconds: 600),
+                              curve: Curves.easeInOut);
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: themeColor,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.arrow_upward,
+                              color: Colors.white, size: 28),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -1678,4 +1665,36 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
+}
+
+// ── NEW: Delegate for sticky Gist Bar ──
+class _GistBarHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final Widget child;
+
+  _GistBarHeaderDelegate({required this.child});
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return Container(
+      color: Theme.of(context)
+          .scaffoldBackgroundColor, // Prevents gists from showing behind the bar
+      child: Center(
+        child: SizedBox(
+          width: MediaQuery.of(context).size.width,
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  @override
+  double get maxExtent => 160.0;
+
+  @override
+  double get minExtent => 160.0;
+
+  @override
+  bool shouldRebuild(covariant SliverPersistentHeaderDelegate oldDelegate) =>
+      true;
 }

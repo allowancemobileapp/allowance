@@ -35,49 +35,33 @@ class _CustomLoadingScreenState extends State<CustomLoadingScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900], // your app's dark background
+      backgroundColor: Colors.grey[900],
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Stack(
-              alignment: Alignment.center,
-              children: [
-                // Spinner ring (green accent)
-                SizedBox(
-                  width: 160,
-                  height: 160,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 14,
-                    valueColor: const AlwaysStoppedAnimation(Color(0xFF4CAF50)),
-                    backgroundColor: Colors.grey[800],
+            // Just the breathing circular logo (no spinner, no white border)
+            AnimatedBuilder(
+              animation: _scaleAnimation,
+              builder: (_, child) => Transform.scale(
+                scale: _scaleAnimation.value,
+                child: child,
+              ),
+              child: Container(
+                width: 120, // slightly bigger now that it's the only element
+                height: 120,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  image: const DecorationImage(
+                    image: AssetImage('assets/images/app_icon.png'),
+                    fit: BoxFit.cover,
                   ),
                 ),
-                // Breathing app icon
-                AnimatedBuilder(
-                  animation: _scaleAnimation,
-                  builder: (_, child) => Transform.scale(
-                    scale: _scaleAnimation.value,
-                    child: child,
-                  ),
-                  child: Container(
-                    width: 100,
-                    height: 100,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 6),
-                      image: const DecorationImage(
-                        image: AssetImage('assets/images/app_icon.png'),
-                        fit: BoxFit.cover,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
             const SizedBox(height: 40),
             const Text(
-              "Allowance",
+              "allowance",
               style: TextStyle(
                 fontSize: 34,
                 fontWeight: FontWeight.bold,

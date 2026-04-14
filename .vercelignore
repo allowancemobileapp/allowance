@@ -1,0 +1,17 @@
+# The biggest culprits
+.dart_tool/
+.pub-cache/
+.pub/
+
+# Mobile/Desktop junk Vercel doesn't need
+android/
+ios/
+windows/
+linux/
+macos/
+
+# Build artifacts (EXCEPT web)
+build/app/
+build/ios/
+build/kotlin/
+build/unit_test_assets/
