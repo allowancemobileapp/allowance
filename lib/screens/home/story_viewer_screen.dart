@@ -28,6 +28,10 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   late List<double> _progressValues;
   Timer? _progressTimer;
   bool _isPaused = false;
+  // === ADD THESE NEW FIELDS (right after `bool _isPaused = false;`) ===
+  VideoPlayerController? _preloadedController;
+  int? _preloadedIndex;
+  bool _isTransitioning = false;
 
   // For correct chronological order (earliest → latest)
   late final List<dynamic> _sortedStories;
@@ -71,6 +75,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     });
   }
 
+  // === REPLACE YOUR _playCurrentStory METHOD WITH THIS ===
   void _playCurrentStory() {
     _videoController?.removeListener(_videoProgressListener);
     _videoController?.dispose();
@@ -78,11 +83,42 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
     final story = _sortedStories[_currentIndex];
     if (story['media_type'] == 'video') {
-      _videoController = VideoPlayerController.network(story['media_url'])
-        ..initialize().then((_) {
-          if (mounted && !_isPaused) _videoController!.play();
-        });
+      // Use preloaded controller if available → instant play, no blank/loading
+      if (_preloadedIndex == _currentIndex && _preloadedController != null) {
+        _videoController = _preloadedController;
+        _preloadedController = null;
+        _preloadedIndex = null;
+        if (!_isPaused) {
+          _videoController!.play();
+        }
+      } else {
+        // Fallback (first story or going backwards)
+        _videoController = VideoPlayerController.network(story['media_url'])
+          ..initialize().then((_) {
+            if (mounted && !_isPaused) _videoController!.play();
+          });
+      }
     }
+
+    // Preload the NEXT story’s video right now (this is what removes the break)
+    _preloadNext();
+  }
+
+  // === ADD THIS NEW METHOD (place it right after _playCurrentStory) ===
+  void _preloadNext() {
+    // Clean up old preload
+    _preloadedController?.dispose();
+    _preloadedController = null;
+    _preloadedIndex = null;
+
+    if (_currentIndex + 1 >= _sortedStories.length) return;
+
+    final nextStory = _sortedStories[_currentIndex + 1];
+    if (nextStory['media_type'] != 'video') return;
+
+    _preloadedIndex = _currentIndex + 1;
+    _preloadedController = VideoPlayerController.network(nextStory['media_url'])
+      ..initialize(); // ready in advance
   }
 
   void _startProgressForCurrentStory() {
@@ -115,43 +151,52 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
+  // === REPLACE _videoProgressListener WITH THIS (fixes "doesn't advance to next story") ===
+  // === REPLACE _videoProgressListener WITH THIS ===
   void _videoProgressListener() {
-    if (!mounted || _videoController == null || _isPaused) return;
+    if (!mounted || _videoController == null || _isPaused || _isTransitioning) {
+      return;
+    }
+
     final controller = _videoController!;
 
     if (controller.value.isInitialized) {
-      final progress = controller.value.position.inMilliseconds /
-          controller.value.duration.inMilliseconds.clamp(1, double.infinity);
+      final position = controller.value.position;
+      final duration = controller.value.duration;
 
+      // Update progress bar
+      final progress = position.inMilliseconds /
+          duration.inMilliseconds.clamp(1, double.infinity);
       setState(() => _progressValues[_currentIndex] = progress.clamp(0.0, 1.0));
 
-      if (progress >= 0.99) {
+      // Trigger next story exactly when video ends
+      if (duration.inMilliseconds > 0 && position >= duration) {
+        _isTransitioning = true;
+        controller.removeListener(_videoProgressListener);
         _goToNextStory();
       }
     }
   }
 
+  // === REPLACE _goToNextStory WITH THIS ===
   void _goToNextStory() {
     if (_currentIndex < _sortedStories.length - 1) {
-      setState(() {
-        _progressValues[_currentIndex] = 1.0;
-        _currentIndex++;
-      });
-      _playCurrentStory();
-      _startProgressForCurrentStory();
+      _pageController.nextPage(
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeInOut,
+      );
     } else {
       Navigator.pop(context);
     }
   }
 
+  // === REPLACE _goToPreviousStory WITH THIS ===
   void _goToPreviousStory() {
     if (_currentIndex > 0) {
-      setState(() {
-        _currentIndex--;
-        _progressValues[_currentIndex] = 0.0;
-      });
-      _playCurrentStory();
-      _startProgressForCurrentStory();
+      _pageController.previousPage(
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeInOut,
+      );
     }
   }
 
@@ -169,6 +214,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     _startProgressForCurrentStory();
   }
 
+  // === REPLACE _toggleLike WITH THIS (fixes like count resetting to 0 even when RLS blocks count update) ===
+  // === REPLACE _toggleLike WITH THIS (fixes count resetting to 0) ===
+  // === REPLACE _toggleLike WITH THIS ===
   Future<void> _toggleLike() async {
     final story = _sortedStories[_currentIndex];
     final storyId = story['id'] as int;
@@ -178,49 +226,60 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
     final wasLiked = _likedStoryIds.contains(storyId);
     final currentCount = (story['likes_count'] ?? 0) as int;
-    final newCount = wasLiked ? currentCount - 1 : currentCount + 1;
+
+    // Optimistic UI update (instant feel)
+    setState(() {
+      if (wasLiked) {
+        _likedStoryIds.remove(storyId);
+        story['likes_count'] = currentCount > 0 ? currentCount - 1 : 0;
+      } else {
+        _likedStoryIds.add(storyId);
+        story['likes_count'] = currentCount + 1;
+      }
+    });
 
     try {
+      // Database operation only — the trigger handles the real count
       if (wasLiked) {
         await supabase
             .from('story_likes')
             .delete()
             .eq('story_id', storyId)
             .eq('user_id', user.id);
-        _likedStoryIds.remove(storyId);
       } else {
         await supabase
             .from('story_likes')
             .insert({'story_id': storyId, 'user_id': user.id});
-        _likedStoryIds.add(storyId);
       }
-
-      // Update database
-      await supabase
-          .from('stories')
-          .update({'likes_count': newCount}).eq('id', storyId);
-
-      // Update local data for instant UI feedback
-      story['likes_count'] = newCount;
-
-      if (mounted) setState(() {});
     } catch (e) {
       debugPrint('Like error: $e');
+      // Rollback UI only if DB failed
+      setState(() {
+        if (wasLiked) {
+          _likedStoryIds.add(storyId);
+        } else {
+          _likedStoryIds.remove(storyId);
+        }
+        story['likes_count'] = currentCount;
+      });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('Could not update like'),
-              backgroundColor: Colors.red),
+            content: Text('Could not update like'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     }
   }
 
+  // === REPLACE dispose WITH THIS ===
   @override
   void dispose() {
     _progressTimer?.cancel();
     _videoController?.removeListener(_videoProgressListener);
     _videoController?.dispose();
+    _preloadedController?.dispose();
     _pageController.dispose();
     super.dispose();
   }
@@ -261,23 +320,42 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          // === MEDIA (with proper long-press pause) ===
-          GestureDetector(
-            onLongPressStart: (_) => _pauseStory(),
-            onLongPressEnd: (_) => _resumeStory(),
-            child: isVideo
-                ? (_videoController != null &&
-                        _videoController!.value.isInitialized
-                    ? VideoPlayer(_videoController!)
-                    : const Center(child: CircularProgressIndicator()))
-                : Center(
-                    child: Image.network(
-                      story['media_url'],
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => const Icon(Icons.error,
-                          color: Colors.white, size: 60),
-                    ),
-                  ),
+          PageView.builder(
+            controller: _pageController,
+            onPageChanged: (index) {
+              setState(() => _currentIndex = index);
+              _playCurrentStory();
+              _startProgressForCurrentStory();
+            },
+            itemCount: _sortedStories.length,
+            itemBuilder: (context, index) {
+              final story = _sortedStories[index];
+              final isVideo = story['media_type'] == 'video';
+
+              return GestureDetector(
+                onLongPressStart: (_) => _pauseStory(),
+                onLongPressEnd: (_) => _resumeStory(),
+                child: isVideo
+                    ? (_currentIndex == index &&
+                            _videoController != null &&
+                            _videoController!.value.isInitialized
+                        ? Center(
+                            child: AspectRatio(
+                              aspectRatio: _videoController!.value.aspectRatio,
+                              child: VideoPlayer(_videoController!),
+                            ),
+                          )
+                        : const Center(child: CircularProgressIndicator()))
+                    : Center(
+                        child: Image.network(
+                          story['media_url'],
+                          fit: BoxFit.contain,
+                          errorBuilder: (_, __, ___) => const Icon(Icons.error,
+                              color: Colors.white, size: 60),
+                        ),
+                      ),
+              );
+            },
           ),
 
           // === TAP ZONES (left = previous, right = next) ===
