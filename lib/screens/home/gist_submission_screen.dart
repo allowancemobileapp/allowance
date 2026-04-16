@@ -62,6 +62,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   bool _isSubmitting = false;
   List<XFile> _pickedImages = [];
   List<Uint8List> _pickedImageBytes = [];
+  List<XFile> _pickedVideos = []; // ← NEW
+  bool _isVideoMode = false;
 
   String? _selectedCategory;
   final categories = ['Sports', 'Entertainment', 'Official', 'Religion'];
@@ -107,6 +109,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   }
 
   Future<void> _pickImages() async {
+    if (_isVideoMode || _pickedVideos.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Cannot mix images and video in one gist')),
+      );
+      return;
+    }
     if (_pickedImages.length >= 3) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Maximum 3 images allowed')),
@@ -115,11 +124,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     }
 
     final picker = ImagePicker();
-    final picked = await picker.pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 80,
-    );
-
+    final picked =
+        await picker.pickImage(source: ImageSource.gallery, imageQuality: 80);
     if (picked == null || !mounted) return;
 
     Uint8List? bytes;
@@ -128,6 +134,25 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     setState(() {
       _pickedImages.add(picked);
       if (bytes != null) _pickedImageBytes.add(bytes);
+    });
+  }
+
+  Future<void> _pickVideo() async {
+    if (_pickedImages.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Cannot mix images and video in one gist')),
+      );
+      return;
+    }
+
+    final picker = ImagePicker();
+    final picked = await picker.pickVideo(source: ImageSource.gallery);
+    if (picked == null || !mounted) return;
+
+    setState(() {
+      _pickedVideos = [picked];
+      _isVideoMode = true;
     });
   }
 
@@ -172,10 +197,10 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   // ==================== MAIN SUBMIT (auto-verification) ====================
   Future<void> _submitGist() async {
     if (!_formKey.currentState!.validate() ||
-        _pickedImages.isEmpty ||
+        (_pickedImages.isEmpty && _pickedVideos.isEmpty) ||
         _selectedGistType == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Complete form & pick at least one image')));
+          content: Text('Complete form & pick at least one image or video')));
       return;
     }
 
@@ -198,28 +223,58 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     int? draftGistId;
 
     try {
-      // 1. Upload all images (max 3)
+      // 1. Upload media (either images OR one video)
       const bucket = 'gist-images';
       final List<String> uploadedUrls = [];
       final List<String> uploadedPaths = [];
+      String mediaType = 'image';
 
-      for (int i = 0; i < _pickedImages.length; i++) {
-        final image = _pickedImages[i];
-        final ext = image.name.split('.').last;
+      if (_pickedVideos.isNotEmpty) {
+        // ====================== VIDEO UPLOAD ======================
+        mediaType = 'video';
+        final video = _pickedVideos.first;
+        final ext = video.name.split('.').last.toLowerCase();
         final filePath = 'gists/${const Uuid().v4()}.$ext';
 
         if (kIsWeb) {
-          final bytes = await image.readAsBytes();
-          await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
-              fileOptions: const FileOptions(contentType: 'image/*'));
+          final bytes = await video.readAsBytes();
+          await supabase.storage.from(bucket).uploadBinary(
+                filePath,
+                bytes,
+                fileOptions: FileOptions(contentType: 'video/$ext'),
+              );
         } else {
-          final file = File(image.path);
+          final file = File(video.path);
           await supabase.storage.from(bucket).upload(filePath, file);
         }
 
         final publicUrl = supabase.storage.from(bucket).getPublicUrl(filePath);
         uploadedUrls.add(publicUrl);
         uploadedPaths.add(filePath);
+      } else {
+        // ====================== IMAGE UPLOAD (max 3) ======================
+        for (int i = 0; i < _pickedImages.length; i++) {
+          final image = _pickedImages[i];
+          final ext = image.name.split('.').last;
+          final filePath = 'gists/${const Uuid().v4()}.$ext';
+
+          if (kIsWeb) {
+            final bytes = await image.readAsBytes();
+            await supabase.storage.from(bucket).uploadBinary(
+                  filePath,
+                  bytes,
+                  fileOptions: const FileOptions(contentType: 'image/*'),
+                );
+          } else {
+            final file = File(image.path);
+            await supabase.storage.from(bucket).upload(filePath, file);
+          }
+
+          final publicUrl =
+              supabase.storage.from(bucket).getPublicUrl(filePath);
+          uploadedUrls.add(publicUrl);
+          uploadedPaths.add(filePath);
+        }
       }
 
       // 2. Create draft gist
@@ -232,8 +287,10 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'type': dbType,
         'title': _titleController.text.trim(),
         'image_url': uploadedUrls.first, // backward compatibility
-        'image_urls': uploadedUrls, // ← NEW: array of up to 3 images
+        'image_urls':
+            mediaType == 'image' ? uploadedUrls : [], // only for images
         'image_path': uploadedPaths.first,
+        'media_type': mediaType, // ← IMPORTANT: tells DB it's video
         'number_of_days': numDays,
         'price_per_day': pricePerDay,
         'paid': false,
@@ -264,7 +321,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         return;
       }
 
-      // 3. Paystack initialize (your original payment flow - untouched)
+      // 3. Paystack payment flow (unchanged)
       final reference = 'gist_${const Uuid().v4()}';
       final payload = {
         'amount': totalNaira * 100,
@@ -519,11 +576,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   const SizedBox(height: 12),
                 ],
 
-                // TITLE — NOW RESPECTS PARAGRAPHS (multi-line)
+                // TITLE
                 TextFormField(
                   controller: _titleController,
                   maxLength: 2000,
-                  maxLines: null, // ← Allows unlimited lines
+                  maxLines: null,
                   keyboardType: TextInputType.multiline,
                   textInputAction: TextInputAction.newline,
                   style: const TextStyle(color: Colors.white),
@@ -584,53 +641,130 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 ),
                 const SizedBox(height: 20),
 
-                // MULTIPLE IMAGE PICKER UI
-                const Text('Images (max 3)',
+                // ====================== MEDIA PICKER (Images + Video) ======================
+                const Text('Media (Images or 1 Video)',
                     style: TextStyle(color: Colors.white70, fontSize: 16)),
                 const SizedBox(height: 8),
 
-                if (_pickedImages.isNotEmpty)
+                // Preview area
+                if (_pickedImages.isNotEmpty || _pickedVideos.isNotEmpty)
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
-                    children: List.generate(_pickedImages.length, (i) {
-                      return Stack(
-                        children: [
-                          kIsWeb
-                              ? Image.memory(_pickedImageBytes[i],
-                                  height: 100, width: 100, fit: BoxFit.cover)
-                              : Image.file(File(_pickedImages[i].path),
-                                  height: 100, width: 100, fit: BoxFit.cover),
-                          Positioned(
-                            top: 4,
-                            right: 4,
-                            child: GestureDetector(
-                              onTap: () => _removeImage(i),
-                              child: const CircleAvatar(
-                                radius: 12,
-                                backgroundColor: Colors.red,
-                                child: Icon(Icons.close,
-                                    size: 16, color: Colors.white),
+                    children: [
+                      // Images
+                      ...List.generate(_pickedImages.length, (i) {
+                        return Stack(
+                          children: [
+                            kIsWeb
+                                ? Image.memory(_pickedImageBytes[i],
+                                    height: 100, width: 100, fit: BoxFit.cover)
+                                : Image.file(File(_pickedImages[i].path),
+                                    height: 100, width: 100, fit: BoxFit.cover),
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: GestureDetector(
+                                onTap: () => _removeImage(i),
+                                child: const CircleAvatar(
+                                  radius: 12,
+                                  backgroundColor: Colors.red,
+                                  child: Icon(Icons.close,
+                                      size: 16, color: Colors.white),
+                                ),
                               ),
                             ),
-                          ),
-                        ],
-                      );
-                    }),
+                          ],
+                        );
+                      }),
+
+                      // Video preview
+                      if (_pickedVideos.isNotEmpty)
+                        Stack(
+                          children: [
+                            Container(
+                              height: 100,
+                              width: 100,
+                              decoration: BoxDecoration(
+                                color: Colors.black,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: const Center(
+                                child: Icon(Icons.play_circle_fill,
+                                    size: 50, color: Colors.white70),
+                              ),
+                            ),
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: GestureDetector(
+                                onTap: () {
+                                  setState(() {
+                                    _pickedVideos.clear();
+                                    _isVideoMode = false;
+                                  });
+                                },
+                                child: const CircleAvatar(
+                                  radius: 12,
+                                  backgroundColor: Colors.red,
+                                  child: Icon(Icons.close,
+                                      size: 16, color: Colors.white),
+                                ),
+                              ),
+                            ),
+                            const Positioned(
+                              bottom: 6,
+                              left: 6,
+                              child: Text('VIDEO',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold)),
+                            ),
+                          ],
+                        ),
+                    ],
                   ),
 
                 const SizedBox(height: 12),
 
-                OutlinedButton.icon(
-                  icon: const Icon(Icons.add_photo_alternate,
-                      color: Colors.white),
-                  label: Text(_pickedImages.length >= 3
-                      ? 'Maximum reached (3)'
-                      : 'Add Image (${_pickedImages.length}/3)'),
-                  style: OutlinedButton.styleFrom(
-                      side: BorderSide(color: widget.themeColor),
-                      backgroundColor: Colors.transparent),
-                  onPressed: _pickedImages.length >= 3 ? null : _pickImages,
+                // Buttons
+                Row(
+                  children: [
+                    // Add Images Button
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.add_photo_alternate,
+                            color: Colors.white),
+                        label: Text(_pickedImages.length >= 3
+                            ? 'Maximum reached (3)'
+                            : 'Add Images (${_pickedImages.length}/3)'),
+                        style: OutlinedButton.styleFrom(
+                            side: BorderSide(color: widget.themeColor),
+                            backgroundColor: Colors.transparent),
+                        onPressed: (_pickedImages.length >= 3 ||
+                                _pickedVideos.isNotEmpty)
+                            ? null
+                            : _pickImages,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+
+                    // Add Video Button
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.videocam, color: Colors.white),
+                        label: const Text('Add Video'),
+                        style: OutlinedButton.styleFrom(
+                            side: BorderSide(color: widget.themeColor),
+                            backgroundColor: Colors.transparent),
+                        onPressed: (_pickedVideos.isNotEmpty ||
+                                _pickedImages.isNotEmpty)
+                            ? null
+                            : _pickVideo,
+                      ),
+                    ),
+                  ],
                 ),
 
                 const SizedBox(height: 24),
@@ -656,18 +790,47 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 // Submit Button
                 SizedBox(
                   width: double.infinity,
+                  height:
+                      56, // Fixed height keeps the button stable during state changes
                   child: ElevatedButton(
                     onPressed: _isSubmitting ? null : _submitGist,
                     style: ElevatedButton.styleFrom(
                         backgroundColor: widget.themeColor,
-                        padding: const EdgeInsets.symmetric(vertical: 14)),
+                        // Darkens the button background while the progress bar runs
+                        disabledBackgroundColor: Colors.grey[850],
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10)),
+                        padding: const EdgeInsets.symmetric(vertical: 8)),
                     child: _isSubmitting
-                        ? const SizedBox(
-                            height: 20,
-                            width: 20,
-                            child: CircularProgressIndicator(
-                                color: Colors.white, strokeWidth: 2))
-                        : const Text('Advertise'),
+                        ? Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Text('Uploading Media...',
+                                  style: TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500)),
+                              const SizedBox(height: 8),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: const SizedBox(
+                                  width:
+                                      140, // Keeps the progress bar "small" and centered
+                                  child: LinearProgressIndicator(
+                                    color: Color(
+                                        0xFF4CAF50), // Small Green Progress Bar
+                                    backgroundColor: Colors.black45,
+                                    minHeight: 4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          )
+                        : const Text('Advertise',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold)),
                   ),
                 ),
               ],

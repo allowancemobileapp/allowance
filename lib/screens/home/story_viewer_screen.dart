@@ -39,15 +39,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   @override
   void initState() {
     super.initState();
-
-    // Sort stories: earliest to latest
-    _sortedStories = List.from(widget.stories)
-      ..sort((a, b) {
-        final dateA = DateTime.parse(a['created_at'] as String);
-        final dateB = DateTime.parse(b['created_at'] as String);
-        return dateA.compareTo(dateB);
-      });
-
+    _sortedStories = widget.stories;
     _currentIndex = widget.initialIndex;
     _pageController = PageController(initialPage: _currentIndex);
     _progressValues = List.filled(_sortedStories.length, 0.0);
@@ -55,6 +47,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     _loadLikedStories();
     _playCurrentStory();
     _startProgressForCurrentStory();
+    _markStoryAsViewed(_currentIndex); // <--- ADD THIS
   }
 
   Future<void> _loadLikedStories() async {
@@ -151,8 +144,22 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
+  Future<void> _markStoryAsViewed(int index) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    final story = _sortedStories[index];
+    try {
+      await Supabase.instance.client.from('story_views').upsert({
+        'story_id': story['id'],
+        'user_id': user.id,
+      });
+    } catch (e) {
+      debugPrint('View recording error: $e');
+    }
+  }
+
   // === REPLACE _videoProgressListener WITH THIS (fixes "doesn't advance to next story") ===
-  // === REPLACE _videoProgressListener WITH THIS ===
   void _videoProgressListener() {
     if (!mounted || _videoController == null || _isPaused || _isTransitioning) {
       return;
@@ -327,6 +334,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               setState(() => _currentIndex = index);
               _playCurrentStory();
               _startProgressForCurrentStory();
+              _markStoryAsViewed(index);
             },
             itemCount: _sortedStories.length,
             itemBuilder: (context, index) {

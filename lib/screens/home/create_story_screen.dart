@@ -16,7 +16,7 @@ class CreateStoryScreen extends StatefulWidget {
 
 class _CreateStoryScreenState extends State<CreateStoryScreen> {
   XFile? _mediaFile;
-  Uint8List? _mediaBytes; // ← NEW: We store bytes for Web
+  Uint8List? _mediaBytes;
   String _mediaType = 'image';
   final _captionController = TextEditingController();
   final _urlController = TextEditingController();
@@ -24,18 +24,20 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
 
   Future<void> _pickMedia() async {
     final picker = ImagePicker();
+
     final picked = await picker.pickMedia(
       imageQuality: 85,
     );
 
     if (picked != null) {
-      final bytes = await picked.readAsBytes(); // ← Read bytes once
+      final bytes = await picked.readAsBytes();
 
       setState(() {
         _mediaFile = picked;
         _mediaBytes = bytes;
         _mediaType = picked.name.toLowerCase().contains('.mp4') ||
-                picked.name.toLowerCase().contains('.mov')
+                picked.name.toLowerCase().contains('.mov') ||
+                picked.name.toLowerCase().contains('.avi')
             ? 'video'
             : 'image';
       });
@@ -47,13 +49,13 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
     setState(() => _isUploading = true);
 
     final supabase = Supabase.instance.client;
-    final bucket = 'gist-images'; // or whatever bucket you use for stories
+    final bucket =
+        'gist-images'; // change if you use a different bucket for stories
 
     try {
       final ext = _mediaFile!.name.split('.').last;
       final path = 'stories/${const Uuid().v4()}.$ext';
 
-      // Upload using bytes (works perfectly on Web + Mobile)
       await supabase.storage.from(bucket).uploadBinary(path, _mediaBytes!);
 
       final publicUrl = supabase.storage.from(bucket).getPublicUrl(path);
@@ -74,6 +76,7 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
           const SnackBar(
             content: Text('Story posted successfully! 🎉'),
             backgroundColor: Color(0xFF4CAF50),
+            behavior: SnackBarBehavior.floating,
           ),
         );
       }
@@ -81,7 +84,10 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text('Upload failed: $e'), backgroundColor: Colors.red),
+            content: Text('Upload failed: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
         );
       }
     } finally {
@@ -94,31 +100,82 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
     final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
 
     if (!isPlus) {
-      // Paywall remains the same
       return Scaffold(
         backgroundColor: Colors.grey[900],
         appBar: AppBar(
-            title: const Text('New Story'), backgroundColor: Colors.grey[900]),
+          title: const Text('New Story',
+              style:
+                  TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          iconTheme: const IconThemeData(color: Colors.white),
+        ),
         body: Center(
           child: Padding(
             padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.lock_rounded, size: 80, color: Colors.amber),
-                const SizedBox(height: 20),
-                const Text('JOIN THE ALLOWANCE PLUS FAMILY',
+            child: Container(
+              padding: const EdgeInsets.all(32),
+              decoration: BoxDecoration(
+                color: Colors.grey[850],
+                borderRadius: BorderRadius.circular(24),
+                border:
+                    Border.all(color: Colors.amber.withOpacity(0.3), width: 1),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black26,
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
+                  )
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.withOpacity(0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.workspace_premium_rounded,
+                        size: 64, color: Colors.amber),
+                  ),
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Unlock Story Gists',
+                    textAlign: TextAlign.center,
                     style: TextStyle(
-                        fontSize: 24,
+                        fontSize: 22,
                         fontWeight: FontWeight.bold,
-                        color: Colors.white)),
-                const Text('to post Story Gist',
-                    style: TextStyle(fontSize: 18, color: Colors.white70)),
-                const SizedBox(height: 30),
-                ElevatedButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Subscribe to Plus')),
-              ],
+                        color: Colors.white),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Join the Allowance Plus family to start sharing your stories with the community.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                        fontSize: 15, color: Colors.white70, height: 1.4),
+                  ),
+                  const SizedBox(height: 32),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.amber,
+                        foregroundColor: Colors.black87,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                        elevation: 0,
+                      ),
+                      child: const Text('Subscribe to Plus',
+                          style: TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -128,79 +185,129 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
     return Scaffold(
       backgroundColor: Colors.grey[900],
       appBar: AppBar(
-          title: const Text('New Story'), backgroundColor: Colors.grey[900]),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            GestureDetector(
-              onTap: _pickMedia,
-              child: Container(
-                height: 300,
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: Colors.grey[800],
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: _mediaBytes == null
-                    ? const Center(
-                        child: Text('Tap to pick photo or video',
-                            style:
-                                TextStyle(color: Colors.white70, fontSize: 18)))
-                    : _mediaType == 'video'
-                        ? const Center(
-                            child: Icon(Icons.play_circle,
-                                size: 80, color: Colors.white))
-                        : ClipRRect(
-                            borderRadius: BorderRadius.circular(16),
-                            child: Image.memory(
-                              _mediaBytes!,
-                              fit: BoxFit.cover,
-                              width: double.infinity,
-                              height: 300,
+        title: const Text('New Story',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              GestureDetector(
+                onTap: _pickMedia,
+                child: Container(
+                  height: 320,
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[850],
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.grey[700]!, width: 2),
+                  ),
+                  child: _mediaBytes == null
+                      ? Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.add_photo_alternate_outlined,
+                                size: 64, color: Colors.grey[500]),
+                            const SizedBox(height: 12),
+                            const Text('Tap to add photo or video',
+                                style: TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w500)),
+                          ],
+                        )
+                      : _mediaType == 'video'
+                          ? const Center(
+                              child: Icon(Icons.play_circle_fill,
+                                  size: 80, color: Colors.white))
+                          : ClipRRect(
+                              borderRadius: BorderRadius.circular(18),
+                              child: Image.memory(
+                                _mediaBytes!,
+                                fit: BoxFit.cover,
+                                width: double.infinity,
+                                height: 320,
+                              ),
                             ),
-                          ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            TextField(
-              controller: _captionController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'Caption (optional)',
-                labelStyle: TextStyle(color: Colors.white70),
-                enabledBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white54)),
-              ),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _urlController,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                labelText: 'Optional URL',
-                labelStyle: TextStyle(color: Colors.white70),
-                enabledBorder: UnderlineInputBorder(
-                    borderSide: BorderSide(color: Colors.white54)),
-              ),
-            ),
-            const Spacer(),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _isUploading ? null : _postStory,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF4CAF50),
-                  padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
-                child: _isUploading
-                    ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text('Post Story',
-                        style: TextStyle(
-                            fontSize: 18, fontWeight: FontWeight.bold)),
               ),
-            ),
-          ],
+              const SizedBox(height: 32),
+              const Text('Details',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _captionController,
+                style: const TextStyle(color: Colors.white),
+                maxLength: 100, // Optional: limits caption length
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Colors.grey[850],
+                  hintText: 'Write a caption...',
+                  hintStyle: const TextStyle(color: Colors.white38),
+                  prefixIcon: const Icon(Icons.short_text_rounded,
+                      color: Colors.white54),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none),
+                  counterStyle: const TextStyle(color: Colors.white38),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _urlController,
+                style: const TextStyle(color: Colors.white),
+                keyboardType: TextInputType.url,
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Colors.grey[850],
+                  hintText: 'Add a link (Optional)',
+                  hintStyle: const TextStyle(color: Colors.white38),
+                  prefixIcon:
+                      const Icon(Icons.link_rounded, color: Colors.white54),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 40),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _isUploading ? null : _postStory,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4CAF50),
+                    disabledBackgroundColor: Colors.grey[800],
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                    elevation: 0,
+                  ),
+                  child: _isUploading
+                      ? const SizedBox(
+                          height: 24,
+                          width: 24,
+                          child: CircularProgressIndicator(
+                              color: Colors.white, strokeWidth: 2),
+                        )
+                      : const Text(
+                          'Post Story',
+                          style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white),
+                        ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

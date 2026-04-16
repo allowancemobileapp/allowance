@@ -16,6 +16,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'dart:developer' as developer;
 import 'package:gal/gal.dart';
+import 'package:video_player/video_player.dart';
 
 class HomeScreen extends StatefulWidget {
   final UserPreferences? userPreferences;
@@ -33,6 +34,10 @@ class _HomeScreenState extends State<HomeScreen> {
   final FocusNode _budgetFocusNode = FocusNode();
   bool _vendorBarTapped = false;
   final Color themeColor = const Color(0xFF4CAF50);
+  final GlobalKey<StoriesBarState> _storiesBarKey =
+      GlobalKey<StoriesBarState>();
+  final Map<int, VideoPlayerController> _videoControllers = {};
+  final Map<int, bool> _isVideoMuted = {};
   // 1. Updated _colorfulTabs (changed Order icon to food-related)
   final List<Map<String, dynamic>> _colorfulTabs = [
     {"label": "Favorites", "icon": BoxIcons.bxs_heart, "color": Colors.orange},
@@ -110,6 +115,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _disposeVideoControllers(); // ← NEW
     _slideshowTimer?.cancel();
     _pageController.dispose();
     _budgetController.dispose();
@@ -122,11 +128,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _fetchGistsAndStartSlideshow() async {
     setState(() => _isGistsLoading = true);
+
     try {
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
           .select('''
-            id, title, image_url, image_urls, type, school_id, url, created_at, category,
+            id, title, image_url, image_urls, media_type, type, school_id, url, created_at, category,
             profiles:user_id (username, avatar_url, bio)
           ''')
           .eq('paid', true)
@@ -137,9 +144,10 @@ class _HomeScreenState extends State<HomeScreen> {
       if (!mounted) return;
 
       List<Map<String, dynamic>> list = raw;
+
+      // Filter by school (same as before)
       final sidStr = _prefs.schoolId;
       final int? sidInt = sidStr != null ? int.tryParse(sidStr) : null;
-
       if (sidStr != null && sidStr.isNotEmpty) {
         list = list.where((g) {
           final type = (g['type'] ?? '').toString().toLowerCase();
@@ -168,6 +176,7 @@ class _HomeScreenState extends State<HomeScreen> {
       });
 
       await _loadGistLikes();
+      await _initializeVideoControllers(); // ← NEW
 
       if (_fetchedGists.isEmpty) {
         setState(() => _fetchedGists = List.from(_fallbackGists));
@@ -185,6 +194,40 @@ class _HomeScreenState extends State<HomeScreen> {
       );
       _startSlideshow();
     }
+  }
+
+  // Initialize video controllers for all video gists
+  Future<void> _initializeVideoControllers() async {
+    for (var gist in _fetchedGists) {
+      final mediaType = gist['media_type'] as String?;
+      if (mediaType == 'video') {
+        final gistId = gist['id'] as int;
+        final videoUrl = (gist['image_url'] as String?) ?? '';
+
+        if (videoUrl.isNotEmpty) {
+          final controller =
+              VideoPlayerController.networkUrl(Uri.parse(videoUrl));
+          await controller.initialize();
+          controller.setLooping(true);
+          _videoControllers[gistId] = controller;
+          _isVideoMuted[gistId] = true; // start muted like Instagram
+        }
+      }
+    }
+  }
+
+  // Dispose all video controllers
+  void _disposeVideoControllers() {
+    for (var controller in _videoControllers.values) {
+      controller.dispose();
+    }
+    _videoControllers.clear();
+    _isVideoMuted.clear();
+  }
+
+  Future<void> _handleRefresh() async {
+    await _fetchGistsAndStartSlideshow(); // Refreshes Gists
+    _storiesBarKey.currentState?.refresh(); // Refreshes Stories
   }
 
   // ── NEW: Load like counts and whether current user liked each gist ──
@@ -791,26 +834,287 @@ class _HomeScreenState extends State<HomeScreen> {
       itemCount: filteredGists.isEmpty ? 0 : filteredGists.length,
       itemBuilder: (ctx, idx) {
         final gist = filteredGists[idx];
+
         final imageUrl = (gist['image_url'] as String?) ?? '';
         final imageUrls = (gist['image_urls'] as List?)?.cast<String>() ?? [];
+        final mediaType = (gist['media_type'] as String?) ?? 'image';
         final gistUrl = (gist['url'] as String?) ?? '';
         final fullTitle = gist['title'] as String? ?? '';
+
         final profileData = gist['profiles'];
         final gistId = (gist['id'] is int)
             ? gist['id'] as int
             : int.tryParse(gist['id'].toString()) ?? 0;
+
         final username =
             (profileData is Map) ? profileData['username'] as String? : null;
         final avatarUrl =
             (profileData is Map) ? profileData['avatar_url'] as String? : null;
         final bio = (profileData is Map) ? profileData['bio'] as String? : null;
+
         final likeCount = _gistLikeCounts[gistId] ?? 0;
         final isLiked = _likedGistIds.contains(gistId);
+
         final imagesToShow = imageUrls.isNotEmpty
             ? imageUrls
             : (imageUrl.isNotEmpty ? [imageUrl] : []);
+
         int currentPage = 0;
 
+        // ====================== VIDEO GIST ======================
+        if (mediaType == 'video') {
+          final controller = _videoControllers[gistId];
+          final isMuted = _isVideoMuted[gistId] ?? true;
+
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 32.0),
+            child: Column(
+              children: [
+                SizedBox(
+                  height: MediaQuery.of(context).size.height * 0.36,
+                  width: MediaQuery.of(context).size.width * 0.85,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(24),
+                    child: controller != null && controller.value.isInitialized
+                        ? Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              VideoPlayer(controller),
+
+                              // Tap anywhere to play/pause
+                              GestureDetector(
+                                onTap: () {
+                                  if (controller.value.isPlaying) {
+                                    controller.pause();
+                                  } else {
+                                    controller.play();
+                                  }
+                                  setState(() {});
+                                },
+                              ),
+
+                              // MUTE BUTTON → MOVED TO BOTTOM LEFT
+                              Positioned(
+                                bottom: 12,
+                                left: 12,
+                                child: GestureDetector(
+                                  onTap: () {
+                                    setState(() {
+                                      _isVideoMuted[gistId] = !isMuted;
+                                      controller.setVolume(isMuted ? 1.0 : 0.0);
+                                    });
+                                  },
+                                  child: CircleAvatar(
+                                    backgroundColor: Colors.black54,
+                                    radius: 20,
+                                    child: Icon(
+                                      isMuted
+                                          ? Icons.volume_off
+                                          : Icons.volume_up,
+                                      color: Colors.white,
+                                      size: 22,
+                                    ),
+                                  ),
+                                ),
+                              ),
+
+                              // PROGRESS BAR
+                              Positioned(
+                                bottom: 12,
+                                left: 52,
+                                right: 12,
+                                child: VideoProgressIndicator(
+                                  controller,
+                                  allowScrubbing: true,
+                                  colors: const VideoProgressColors(
+                                    playedColor: Color(0xFF4CAF50),
+                                    bufferedColor: Colors.white24,
+                                    backgroundColor: Colors.black26,
+                                  ),
+                                ),
+                              ),
+
+                              // LINK BUTTON (top right) - if URL exists
+                              if (gistUrl.isNotEmpty)
+                                Positioned(
+                                  top: 12,
+                                  right: 12,
+                                  child: Material(
+                                    color: Colors.transparent,
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(30),
+                                      onTap: () async {
+                                        final uri = Uri.tryParse(gistUrl);
+                                        if (uri != null &&
+                                            await canLaunchUrl(uri)) {
+                                          await launchUrl(uri,
+                                              mode: LaunchMode
+                                                  .externalApplication);
+                                        }
+                                      },
+                                      child: Container(
+                                        padding: const EdgeInsets.all(12),
+                                        decoration: const BoxDecoration(
+                                            color: Colors.black54,
+                                            shape: BoxShape.circle),
+                                        child: const Icon(Icons.link,
+                                            size: 24, color: Colors.white),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+
+                              // LIKE BUTTON (bottom right) - restored
+                              Positioned(
+                                bottom: 12,
+                                right: 12,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 8, horizontal: 8),
+                                  decoration: BoxDecoration(
+                                      color: Colors.black45,
+                                      borderRadius: BorderRadius.circular(20)),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(),
+                                        onPressed: () =>
+                                            _toggleGistLike(gistId),
+                                        icon: Icon(
+                                            isLiked
+                                                ? Icons.favorite
+                                                : Icons.favorite_border,
+                                            color: isLiked
+                                                ? Colors.red
+                                                : Colors.white,
+                                            size: 28),
+                                      ),
+                                      Text(likeCount.toString(),
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                ),
+                              ),
+
+                              // Big play icon when paused
+                              if (!controller.value.isPlaying)
+                                const Center(
+                                  child: Icon(
+                                    Icons.play_circle_fill,
+                                    size: 80,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                            ],
+                          )
+                        : const Center(child: CircularProgressIndicator()),
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // Username + Title
+                GestureDetector(
+                  onTap: () => _showProfileCard(username ?? '', avatarUrl, bio),
+                  child: RichText(
+                    textAlign: TextAlign.center,
+                    text: TextSpan(
+                      style: const TextStyle(
+                          fontFamily: 'SanFrancisco', fontSize: 18),
+                      children: [
+                        TextSpan(
+                            text: username != null ? "@$username" : '',
+                            style: TextStyle(
+                                color: themeColor,
+                                fontWeight: FontWeight.bold)),
+                        TextSpan(
+                            text: username != null ? ": " : "",
+                            style: TextStyle(
+                                color: themeColor,
+                                fontWeight: FontWeight.bold)),
+                        TextSpan(
+                          text: fullTitle.length > 100
+                              ? "${fullTitle.substring(0, 100)}..."
+                              : fullTitle,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+                if (fullTitle.length > 100)
+                  GestureDetector(
+                    onTap: () {
+                      showModalBottomSheet(
+                        context: context,
+                        isScrollControlled: true,
+                        backgroundColor: Colors.transparent,
+                        builder: (context) => DraggableScrollableSheet(
+                          initialChildSize: 0.55,
+                          minChildSize: 0.4,
+                          maxChildSize: 0.9,
+                          expand: false,
+                          builder: (_, scrollController) => Container(
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF1E1E1E),
+                              borderRadius: BorderRadius.vertical(
+                                  top: Radius.circular(24)),
+                            ),
+                            child: ListView(
+                              controller: scrollController,
+                              padding: const EdgeInsets.all(24),
+                              children: [
+                                const Text("Full Gist Title",
+                                    style: TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white),
+                                    textAlign: TextAlign.center),
+                                const SizedBox(height: 16),
+                                Text(
+                                  fullTitle.replaceAll('\\n', '\n'),
+                                  style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 16,
+                                      height: 1.5),
+                                ),
+                                const SizedBox(height: 32),
+                                Align(
+                                  alignment: Alignment.center,
+                                  child: TextButton(
+                                    onPressed: () => Navigator.pop(context),
+                                    child: const Text('Close',
+                                        style: TextStyle(
+                                            color: Color(0xFF4CAF50),
+                                            fontSize: 18)),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                    child: const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text("...see more",
+                          style: TextStyle(
+                              color: Color(0xFF4CAF50),
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+              ],
+            ),
+          );
+        }
+
+        // ====================== IMAGE GIST (unchanged) ======================
         return Padding(
           padding: const EdgeInsets.only(bottom: 32.0),
           child: Column(
@@ -1123,12 +1427,8 @@ class _HomeScreenState extends State<HomeScreen> {
           ? ThemeData.dark().copyWith(scaffoldBackgroundColor: bgColor)
           : ThemeData.light().copyWith(scaffoldBackgroundColor: bgColor),
       child: Scaffold(
-        // 1. RESTORED APP BAR
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
-
         bottomNavigationBar: _buildCustomFooter(bgColor),
-
-        // 2. YOUR ORIGINAL CHATBOT ICON (Pinned Bottom Right)
         floatingActionButton: FloatingActionButton(
           backgroundColor: Colors.transparent,
           elevation: 0,
@@ -1158,7 +1458,6 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           },
         ),
-
         body: SafeArea(
           child: Stack(
             children: [
@@ -1167,12 +1466,13 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   RefreshIndicator(
                     color: themeColor,
-                    onRefresh: _fetchGistsAndStartSlideshow,
+                    // USE THE NEW COMBINED REFRESH HERE
+                    onRefresh: _handleRefresh,
                     child: CustomScrollView(
                       controller: _scrollController,
                       physics: const AlwaysScrollableScrollPhysics(),
                       slivers: [
-                        // --- Section 1: Top bars (Vendor, Budget, Tabs) ---
+                        // --- Section 1: Top bars ---
                         SliverToBoxAdapter(
                           child: Padding(
                             padding: const EdgeInsets.only(
@@ -1308,7 +1608,8 @@ class _HomeScreenState extends State<HomeScreen> {
                               children: [
                                 _buildGistFilterBar(),
                                 const SizedBox(height: 10),
-                                const StoriesBar(),
+                                // ADD THE KEY HERE
+                                StoriesBar(key: _storiesBarKey),
                               ],
                             ),
                           ),
@@ -1327,8 +1628,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       onSave: () => setState(() => _selectedIndex = 0)),
                 ],
               ),
-
-              // 3. THE NEW SCROLL-TO-TOP BUTTON (Centralized)
               if (_showBackToTopButton)
                 Positioned(
                   bottom: 20,
@@ -1346,9 +1645,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         child: Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
-                            color: themeColor,
-                            shape: BoxShape.circle,
-                          ),
+                              color: themeColor, shape: BoxShape.circle),
                           child: const Icon(Icons.arrow_upward,
                               color: Colors.white, size: 28),
                         ),
