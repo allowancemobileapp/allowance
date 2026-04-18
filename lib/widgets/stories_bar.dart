@@ -1,9 +1,15 @@
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../models/user_preferences.dart';
 
 class StoriesBar extends StatefulWidget {
-  const StoriesBar({super.key});
+  final UserPreferences userPreferences;
+
+  const StoriesBar({
+    super.key,
+    required this.userPreferences,
+  });
 
   @override
   StoriesBarState createState() => StoriesBarState();
@@ -11,11 +17,13 @@ class StoriesBar extends StatefulWidget {
 
 class StoriesBarState extends State<StoriesBar> {
   late Future<List<dynamic>> _storiesFuture;
+  late final RealtimeChannel _realtimeChannel;
 
   @override
   void initState() {
     super.initState();
     _loadStories();
+    _setupRealtimeSubscription();
   }
 
   void refresh() {
@@ -25,17 +33,65 @@ class StoriesBarState extends State<StoriesBar> {
   }
 
   void _loadStories() {
-    final myId = Supabase.instance.client.auth.currentUser?.id;
-    _storiesFuture = Supabase.instance.client
+    final supabase = Supabase.instance.client;
+
+    _storiesFuture = supabase
         .from('stories')
         .select('''
-          id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
-          profiles:user_id(username, avatar_url),
+          id,
+          user_id,
+          media_url,
+          media_type,
+          caption,
+          url,
+          expires_at,
+          created_at,
+          likes_count,
+          profiles:user_id(username, avatar_url, school_name),
           story_views!left(id)
         ''')
-        .eq('story_views.user_id', myId ?? '')
         .gt('expires_at', DateTime.now().toUtc().toIso8601String())
         .order('created_at', ascending: false);
+  }
+
+  void _setupRealtimeSubscription() {
+    final supabase = Supabase.instance.client;
+
+    _realtimeChannel = supabase.channel('stories-realtime');
+
+    // Listen to ALL changes on stories table
+    _realtimeChannel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all, // insert, update, delete
+          schema: 'public',
+          table: 'stories',
+          callback: (_) => refresh(),
+        )
+        // Also listen to story_views (so "viewed" circle updates instantly)
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'story_views',
+          callback: (_) => refresh(),
+        )
+        .subscribe();
+  }
+
+  // Helper to show "23h ago", "3m ago", etc.
+  String _timeAgo(String createdAt) {
+    final date = DateTime.parse(createdAt).toLocal();
+    final difference = DateTime.now().difference(date);
+
+    if (difference.inMinutes < 1) return 'just now';
+    if (difference.inMinutes < 60) return '${difference.inMinutes}m ago';
+    if (difference.inHours < 24) return '${difference.inHours}h ago';
+    return '${difference.inDays}d ago';
+  }
+
+  @override
+  void dispose() {
+    _realtimeChannel.unsubscribe();
+    super.dispose();
   }
 
   @override
@@ -66,13 +122,12 @@ class StoriesBarState extends State<StoriesBar> {
         final Map<String, List<dynamic>> grouped = {};
         for (var story in allStories) {
           final profile = story['profiles'] as Map<String, dynamic>? ?? {};
-          final userId = profile['username'] ?? 'unknown';
-          grouped.putIfAbsent(userId, () => []).add(story);
+          final username = profile['username'] ?? 'unknown';
+          grouped.putIfAbsent(username, () => []).add(story);
         }
 
         final uniqueUsers = grouped.entries.toList();
 
-        // Sort: Unviewed first, Viewed last
         uniqueUsers.sort((a, b) {
           bool aViewed =
               a.value.every((s) => (s['story_views'] as List).isNotEmpty);
@@ -83,7 +138,6 @@ class StoriesBarState extends State<StoriesBar> {
           return 0;
         });
 
-        // === MASTER LIST: Restored for continuous playback ===
         final List<dynamic> continuousStories = [];
         for (var group in uniqueUsers) {
           final userStories = List<dynamic>.from(group.value);
@@ -108,6 +162,7 @@ class StoriesBarState extends State<StoriesBar> {
                   itemBuilder: (ctx, i) {
                     final username = uniqueUsers[i].key;
                     final userStories = uniqueUsers[i].value;
+
                     final isFullyViewed = userStories
                         .every((s) => (s['story_views'] as List).isNotEmpty);
 
@@ -116,7 +171,6 @@ class StoriesBarState extends State<StoriesBar> {
                         firstStory['profiles'] as Map<String, dynamic>? ?? {};
                     final avatarUrl = profile['avatar_url'] as String?;
 
-                    // === Calculate the global index to start at the right person ===
                     int startIndex = 0;
                     for (int j = 0; j < i; j++) {
                       startIndex += uniqueUsers[j].value.length;
@@ -124,18 +178,36 @@ class StoriesBarState extends State<StoriesBar> {
 
                     return GestureDetector(
                       onTap: () async {
+                        final sortedUserStories =
+                            List<dynamic>.from(userStories);
+                        sortedUserStories.sort((a, b) =>
+                            DateTime.parse(b['created_at'])
+                                .compareTo(DateTime.parse(a['created_at'])));
+
+                        int localTargetIndex = 0;
+                        for (int k = 0; k < sortedUserStories.length; k++) {
+                          final views =
+                              (sortedUserStories[k]['story_views'] as List? ??
+                                  []);
+                          if (views.isEmpty) {
+                            localTargetIndex = k;
+                            break;
+                          }
+                        }
+
+                        final targetGlobalIndex = startIndex + localTargetIndex;
+
                         await Navigator.push(
                           context,
                           MaterialPageRoute(
                             builder: (_) => StoryViewerScreen(
-                              stories:
-                                  continuousStories, // PASS ALL for continuous play
-                              initialIndex:
-                                  startIndex, // Jump to the specific user
+                              stories: continuousStories,
+                              initialIndex: targetGlobalIndex,
+                              userPreferences: widget.userPreferences,
                             ),
                           ),
                         );
-                        if (mounted) setState(() {});
+                        if (mounted) refresh(); // ← refresh after viewing
                       },
                       child: Padding(
                         padding: const EdgeInsets.only(right: 16),

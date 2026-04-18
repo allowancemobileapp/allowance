@@ -1609,7 +1609,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                 _buildGistFilterBar(),
                                 const SizedBox(height: 10),
                                 // ADD THE KEY HERE
-                                StoriesBar(key: _storiesBarKey),
+                                StoriesBar(
+                                    userPreferences:
+                                        widget.userPreferences ?? _prefs),
                               ],
                             ),
                           ),

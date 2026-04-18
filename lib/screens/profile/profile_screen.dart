@@ -199,6 +199,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             builder: (_) => StoryViewerScreen(
                               stories: myStories,
                               initialIndex: 0,
+                              userPreferences:
+                                  widget.userPreferences, // ← THIS WAS MISSING
                             ),
                           ),
                         );

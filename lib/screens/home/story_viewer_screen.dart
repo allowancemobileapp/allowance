@@ -1,17 +1,23 @@
 // lib/screens/home/story_viewer_screen.dart
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:async';
 
+import '../../models/user_preferences.dart';
+import 'subscription_screen.dart';
+
 class StoryViewerScreen extends StatefulWidget {
   final List<dynamic> stories;
   final int initialIndex;
+  final UserPreferences userPreferences;
 
   const StoryViewerScreen({
     super.key,
     required this.stories,
     required this.initialIndex,
+    required this.userPreferences,
   });
 
   @override
@@ -28,13 +34,16 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   late List<double> _progressValues;
   Timer? _progressTimer;
   bool _isPaused = false;
-  // === ADD THESE NEW FIELDS (right after `bool _isPaused = false;`) ===
   VideoPlayerController? _preloadedController;
   int? _preloadedIndex;
   bool _isTransitioning = false;
+  int _viewCount = 0;
+  StreamSubscription<List<Map<String, dynamic>>>? _viewSubscription;
 
-  // For correct chronological order (earliest → latest)
   late final List<dynamic> _sortedStories;
+
+  // Theme color for paywall (same as your app)
+  final Color themeColor = const Color(0xFF4CAF50);
 
   @override
   void initState() {
@@ -47,7 +56,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     _loadLikedStories();
     _playCurrentStory();
     _startProgressForCurrentStory();
-    _markStoryAsViewed(_currentIndex); // <--- ADD THIS
+    _initViewCountAndSubscription();
+    _markStoryAsViewed(_currentIndex);
   }
 
   Future<void> _loadLikedStories() async {
@@ -157,6 +167,68 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     } catch (e) {
       debugPrint('View recording error: $e');
     }
+  }
+
+  (int, int) _getCurrentUserStoryRange() {
+    final currentStory = _sortedStories[_currentIndex];
+    final currentUserId = currentStory['user_id'] as String?;
+
+    if (currentUserId == null) {
+      return (0, _sortedStories.length - 1);
+    }
+
+    // Find first story of this user
+    int start = 0;
+    for (int i = 0; i < _sortedStories.length; i++) {
+      final userId = _sortedStories[i]['user_id'] as String?;
+      if (userId == currentUserId) {
+        start = i;
+        break;
+      }
+    }
+
+    // Find last story of this user
+    int end = start;
+    for (int i = start; i < _sortedStories.length; i++) {
+      final userId = _sortedStories[i]['user_id'] as String?;
+      if (userId != currentUserId) {
+        end = i - 1;
+        break;
+      }
+      end = i;
+    }
+
+    return (start, end);
+  }
+
+  // Helper to show "23h ago", "3m ago", "just now", etc.
+  String _timeAgo(String createdAt) {
+    final date = DateTime.parse(createdAt).toLocal();
+    final difference = DateTime.now().difference(date);
+
+    if (difference.inMinutes < 1) return 'just now';
+    if (difference.inMinutes < 60) return '${difference.inMinutes}m ago';
+    if (difference.inHours < 24) return '${difference.inHours}h ago';
+    return '${difference.inDays}d ago';
+  }
+
+  void _initViewCountAndSubscription() {
+    final story = _sortedStories[_currentIndex];
+    _viewCount = (story['story_views'] as List?)?.length ?? 0;
+
+    _viewSubscription?.cancel();
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+    if (currentUserId == null || currentUserId != story['user_id']) return;
+
+    _viewSubscription = Supabase.instance.client
+        .from('story_views')
+        .stream(primaryKey: ['id'])
+        .eq('story_id', story['id'] as int)
+        .listen((payload) {
+          if (mounted) {
+            setState(() => _viewCount = payload.length);
+          }
+        });
   }
 
   // === REPLACE _videoProgressListener WITH THIS (fixes "doesn't advance to next story") ===
@@ -280,12 +352,241 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
+  Future<void> _reshareStory() async {
+    final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
+
+    if (!isPlus) {
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: Colors.grey[900],
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (ctx) => Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
+              const SizedBox(height: 16),
+              const Text(
+                'Join Allowance Plus',
+                style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'JOIN ALLOWANCE PLUS TO POST STORY GIST AND PASS THE FUN!',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16, color: Colors.white70),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => SubscriptionScreen(
+                          userPreferences: widget.userPreferences,
+                          themeColor: themeColor, // ← Fixed here
+                        ),
+                      ),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: themeColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                  ),
+                  child: const Text('Subscribe to Allowance Plus',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Maybe later',
+                    style: TextStyle(color: Colors.white70)),
+              ),
+            ],
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Premium user - normal reshare
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    final original = _sortedStories[_currentIndex];
+
+    final shouldReshare = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.black,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Reshare this story?',
+              style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'It will appear on your profile as a new story.',
+              style: TextStyle(color: Colors.white70),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Cancel',
+                        style: TextStyle(color: Colors.white70)),
+                  ),
+                ),
+                Expanded(
+                  child: ElevatedButton(
+                    style:
+                        ElevatedButton.styleFrom(backgroundColor: Colors.white),
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Reshare',
+                        style: TextStyle(color: Colors.black)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (shouldReshare != true) return;
+
+    try {
+      await Supabase.instance.client.from('stories').insert({
+        'user_id': user.id,
+        'media_url': original['media_url'],
+        'media_type': original['media_type'],
+        'caption': original['caption'],
+        'url': original['url'],
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Story reshared successfully!'),
+              backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      debugPrint('Reshare error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Could not reshare story'),
+              backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteStory() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user == null) return;
+
+    final shouldDelete = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: Colors.black,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Delete this story?',
+                style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white)),
+            const SizedBox(height: 8),
+            const Text('This action cannot be undone.',
+                style: TextStyle(color: Colors.white70)),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Cancel',
+                        style: TextStyle(color: Colors.white70)),
+                  ),
+                ),
+                Expanded(
+                  child: ElevatedButton(
+                    style:
+                        ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                    onPressed: () => Navigator.pop(context, true),
+                    child: const Text('Delete',
+                        style: TextStyle(color: Colors.white)),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (shouldDelete != true) return;
+
+    try {
+      await Supabase.instance.client
+          .from('stories')
+          .delete()
+          .eq('id', _sortedStories[_currentIndex]['id']);
+
+      if (mounted) {
+        Navigator.pop(context); // close viewer after delete
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Story deleted'), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      debugPrint('Delete error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Could not delete story'),
+              backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
   // === REPLACE dispose WITH THIS ===
   @override
   void dispose() {
     _progressTimer?.cancel();
     _videoController?.removeListener(_videoProgressListener);
     _videoController?.dispose();
+    _viewSubscription?.cancel();
     _preloadedController?.dispose();
     _pageController.dispose();
     super.dispose();
@@ -294,29 +595,138 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   @override
   Widget build(BuildContext context) {
     final story = _sortedStories[_currentIndex];
-    // ignore: unused_local_variable
-    final isVideo = story['media_type'] == 'video';
+    final currentUser = Supabase.instance.client.auth.currentUser;
+    final isOwnStory = currentUser?.id == story['user_id'];
+
+    // Get the range of stories belonging to the current user
+    final (userStart, userEnd) = _getCurrentUserStoryRange();
+    final userStoryCount = userEnd - userStart + 1;
+    final currentUserPosition = _currentIndex - userStart;
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // Progress bars
+          // PageView
+          PageView.builder(
+            controller: _pageController,
+            onPageChanged: (index) {
+              setState(() => _currentIndex = index);
+              _playCurrentStory();
+              _startProgressForCurrentStory();
+              _markStoryAsViewed(index);
+              _initViewCountAndSubscription();
+            },
+            itemCount: _sortedStories.length,
+            itemBuilder: (context, index) {
+              final storyItem = _sortedStories[index];
+              final isVideo = storyItem['media_type'] == 'video';
+              final isText = storyItem['media_type'] == 'text';
+              final caption = (storyItem['caption'] ?? '').toString().trim();
+
+              return GestureDetector(
+                onLongPressStart: (_) => _pauseStory(),
+                onLongPressEnd: (_) => _resumeStory(),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (isText)
+                      Container(
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [Color(0xFF1A1A1A), Color(0xFF111111)],
+                          ),
+                        ),
+                        child: Center(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 40),
+                            child: Text(
+                              storyItem['caption'] ?? '',
+                              style: const TextStyle(
+                                fontSize: 32,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white,
+                                height: 1.35,
+                                letterSpacing: -0.5,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ),
+                      )
+                    else if (isVideo)
+                      (_currentIndex == index &&
+                              _videoController != null &&
+                              _videoController!.value.isInitialized
+                          ? Center(
+                              child: AspectRatio(
+                                aspectRatio:
+                                    _videoController!.value.aspectRatio,
+                                child: VideoPlayer(_videoController!),
+                              ),
+                            )
+                          : const Center(child: CircularProgressIndicator()))
+                    else
+                      Center(
+                        child: Image.network(
+                          storyItem['media_url'],
+                          fit: BoxFit.contain,
+                          errorBuilder: (_, __, ___) => const Icon(Icons.error,
+                              color: Colors.white, size: 60),
+                        ),
+                      ),
+                    if (!isText && caption.isNotEmpty)
+                      Positioned(
+                        bottom: 140,
+                        left: 24,
+                        right: 24,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 12, horizontal: 16),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.65),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            caption,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w500,
+                              height: 1.4,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              );
+            },
+          ),
+
+          // ==================== PROGRESS BARS - NOW PER USER ====================
           Positioned(
             top: MediaQuery.of(context).padding.top + 8,
             left: 16,
             right: 16,
             child: Row(
               children: List.generate(
-                _sortedStories.length,
+                userStoryCount,
                 (i) => Expanded(
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 2),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(3),
                       child: LinearProgressIndicator(
-                        value: _progressValues[i],
+                        value: i < currentUserPosition
+                            ? 1.0
+                            : i == currentUserPosition
+                                ? _progressValues[_currentIndex]
+                                : 0.0,
                         minHeight: 3.5,
                         backgroundColor: Colors.white24,
                         valueColor: const AlwaysStoppedAnimation(Colors.white),
@@ -328,61 +738,18 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          PageView.builder(
-            controller: _pageController,
-            onPageChanged: (index) {
-              setState(() => _currentIndex = index);
-              _playCurrentStory();
-              _startProgressForCurrentStory();
-              _markStoryAsViewed(index);
-            },
-            itemCount: _sortedStories.length,
-            itemBuilder: (context, index) {
-              final story = _sortedStories[index];
-              final isVideo = story['media_type'] == 'video';
-
-              return GestureDetector(
-                onLongPressStart: (_) => _pauseStory(),
-                onLongPressEnd: (_) => _resumeStory(),
-                child: isVideo
-                    ? (_currentIndex == index &&
-                            _videoController != null &&
-                            _videoController!.value.isInitialized
-                        ? Center(
-                            child: AspectRatio(
-                              aspectRatio: _videoController!.value.aspectRatio,
-                              child: VideoPlayer(_videoController!),
-                            ),
-                          )
-                        : const Center(child: CircularProgressIndicator()))
-                    : Center(
-                        child: Image.network(
-                          story['media_url'],
-                          fit: BoxFit.contain,
-                          errorBuilder: (_, __, ___) => const Icon(Icons.error,
-                              color: Colors.white, size: 60),
-                        ),
-                      ),
-              );
-            },
-          ),
-
-          // === TAP ZONES (left = previous, right = next) ===
+          // Tap zones
           Positioned.fill(
             child: Row(
               children: [
                 Expanded(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: _goToPreviousStory,
-                  ),
-                ),
+                    child: GestureDetector(
+                        onTap: _goToPreviousStory,
+                        behavior: HitTestBehavior.translucent)),
                 Expanded(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: _goToNextStory,
-                  ),
-                ),
+                    child: GestureDetector(
+                        onTap: _goToNextStory,
+                        behavior: HitTestBehavior.translucent)),
               ],
             ),
           ),
@@ -400,12 +767,50 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                       : null,
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  '@${story['profiles']?['username'] ?? 'user'}',
-                  style: const TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.bold),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '@${story['profiles']?['username'] ?? 'user'}',
+                      style: const TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.bold),
+                    ),
+                    Row(
+                      children: [
+                        if (story['profiles']?['school_name'] != null &&
+                            story['profiles']!['school_name']
+                                .toString()
+                                .trim()
+                                .isNotEmpty)
+                          Text(
+                            story['profiles']!['school_name'],
+                            style: TextStyle(
+                                color: Colors.white.withOpacity(0.6),
+                                fontSize: 12),
+                          ),
+                        if (story['profiles']?['school_name'] != null &&
+                            story['profiles']!['school_name']
+                                .toString()
+                                .trim()
+                                .isNotEmpty)
+                          const Text(' • ',
+                              style: TextStyle(
+                                  color: Colors.white54, fontSize: 12)),
+                        Text(
+                          _timeAgo(story['created_at']),
+                          style: const TextStyle(
+                              color: Colors.white54, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
                 const Spacer(),
+                if (isOwnStory)
+                  IconButton(
+                    icon: const Icon(Icons.delete, color: Colors.red, size: 28),
+                    onPressed: _deleteStory,
+                  ),
                 IconButton(
                   icon: const Icon(Icons.close, color: Colors.white),
                   onPressed: () => Navigator.pop(context),
@@ -414,38 +819,75 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          // Caption
-          if (story['caption'] != null &&
-              story['caption'].toString().isNotEmpty)
+          // URL icon
+          if (story['url'] != null && story['url'].toString().trim().isNotEmpty)
             Positioned(
-              bottom: 100,
-              left: 16,
-              right: 16,
-              child: Text(
-                story['caption'],
-                style: const TextStyle(color: Colors.white, fontSize: 16),
+              bottom: 130,
+              right: 24,
+              child: GestureDetector(
+                onTap: () async {
+                  final uri = Uri.parse(story['url'] as String);
+                  if (await canLaunchUrl(uri))
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      shape: BoxShape.circle),
+                  child: const Icon(Icons.link, color: Colors.white, size: 28),
+                ),
               ),
             ),
 
-          // Like button
+          // Bottom actions
           Positioned(
             bottom: 40,
+            left: 24,
             right: 24,
-            child: Column(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
               children: [
-                IconButton(
-                  icon: Icon(
-                    _likedStoryIds.contains(story['id'])
-                        ? Icons.favorite
-                        : Icons.favorite_border,
-                    color: Colors.white,
-                    size: 32,
+                if (!isOwnStory)
+                  GestureDetector(
+                    onTap: _reshareStory,
+                    child: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          shape: BoxShape.circle),
+                      child: const Icon(Icons.repeat,
+                          color: Colors.white, size: 28),
+                    ),
                   ),
-                  onPressed: _toggleLike,
-                ),
-                Text(
-                  '${story['likes_count'] ?? 0}',
-                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                if (!isOwnStory) const SizedBox(width: 16),
+                if (isOwnStory)
+                  Column(
+                    children: [
+                      const Icon(Icons.remove_red_eye,
+                          color: Colors.white, size: 32),
+                      Text('$_viewCount',
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 15)),
+                    ],
+                  ),
+                if (isOwnStory) const SizedBox(width: 24),
+                Column(
+                  children: [
+                    IconButton(
+                      icon: Icon(
+                        _likedStoryIds.contains(story['id'])
+                            ? Icons.favorite
+                            : Icons.favorite_border,
+                        color: Colors.white,
+                        size: 32,
+                      ),
+                      onPressed: _toggleLike,
+                    ),
+                    Text('${story['likes_count'] ?? 0}',
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 15)),
+                  ],
                 ),
               ],
             ),
