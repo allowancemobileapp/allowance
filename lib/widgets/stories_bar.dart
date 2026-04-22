@@ -78,6 +78,7 @@ class StoriesBarState extends State<StoriesBar> {
   }
 
   // Helper to show "23h ago", "3m ago", etc.
+  // ignore: unused_element
   String _timeAgo(String createdAt) {
     final date = DateTime.parse(createdAt).toLocal();
     final difference = DateTime.now().difference(date);
