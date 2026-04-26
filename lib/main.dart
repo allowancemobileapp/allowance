@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 // Firebase
 import 'package:firebase_core/firebase_core.dart';
@@ -118,13 +119,22 @@ class _AllowanceAppState extends State<AllowanceApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      navigatorKey: navigatorKey,
+      navigatorKey: _AllowanceAppState.navigatorKey,
       title: 'Allowance',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.indigo),
-      home: _isInitialized
-          ? _buildHome()
-          : const CustomLoadingScreen(), // ← Now safely inside MaterialApp
+
+      // ADDED: Localization delegates to fix the Camera Picker language
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [
+        Locale('en', ''), // English
+      ],
+
+      home: _isInitialized ? _buildHome() : const CustomLoadingScreen(),
     );
   }
 

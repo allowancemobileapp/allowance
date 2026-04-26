@@ -23,6 +23,10 @@ dependencies:
   flutter_dotenv: ^5.0.2
   gal: ^2.1.4
   video_player: ^2.11.1
+  image_cropper: ^8.0.1
+  video_trimmer: ^5.0.0
+  wechat_assets_picker: ^9.0.0
+  wechat_camera_picker: ^4.0.0
 
   # Firebase
   firebase_core: ^3.12.1
@@ -37,12 +41,14 @@ dependencies:
   # Apple Sign-In (updated to fix Registrar error)
   sign_in_with_apple: ^7.0.1
   intl: ^0.20.2
+  flutter_localizations:
+    sdk: flutter
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
-  flutter_launcher_icons: ^0.10.0
+  flutter_launcher_icons: 0.14.4
 
 flutter:
   uses-material-design: true
@@ -76,3 +82,7 @@ flutter_icons:
   # If you want Android adaptive icons (recommended), create these two files and uncomment:
   # adaptive_icon_background: "assets/images/app_icon_bg.png"
   # adaptive_icon_foreground: "assets/images/app_icon_foreground.png"
+
+dependency_overrides:
+  intl: ^0.20.2
+  web: ^1.0.0

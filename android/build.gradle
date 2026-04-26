@@ -3,13 +3,11 @@ buildscript {
         google()
         mavenCentral()
         maven { url "https://jitpack.io" }
-        maven { url "https://repo1.maven.org/maven2" } // fallback for Maven Central
     }
     dependencies {
-        // Android Gradle Plugin compatible with Gradle 8.3
-        classpath 'com.android.tools.build:gradle:8.1.1'
-        // Updated Google Services plugin for Firebase to match modern SDK requirements
-        classpath 'com.google.gms:google-services:4.4.1'
+        classpath 'com.android.tools.build:gradle:8.9.1' // Updated to 8.9.1
+        classpath 'com.google.gms:google-services:4.4.2'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0"
     }
 }
 
@@ -19,7 +17,6 @@ allprojects {
         mavenCentral()
         maven { url "https://jitpack.io" }
         maven { url "https://maven.google.com" }
-        maven { url "https://repo1.maven.org/maven2" } // secondary mirror
     }
 }
 

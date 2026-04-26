@@ -212,6 +212,14 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     return '${difference.inDays}d ago';
   }
 
+  // Place this after your _timeAgo method
+  String _formatDuration(Duration duration) {
+    String twoDigits(int n) => n.toString().padLeft(2, "0");
+    String twoDigitMinutes = twoDigits(duration.inMinutes.remainder(60));
+    String twoDigitSeconds = twoDigits(duration.inSeconds.remainder(60));
+    return "$twoDigitMinutes:$twoDigitSeconds";
+  }
+
   void _initViewCountAndSubscription() {
     final story = _sortedStories[_currentIndex];
     _viewCount = (story['story_views'] as List?)?.length ?? 0;
@@ -597,8 +605,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     final story = _sortedStories[_currentIndex];
     final currentUser = Supabase.instance.client.auth.currentUser;
     final isOwnStory = currentUser?.id == story['user_id'];
-
-    // Get the range of stories belonging to the current user
     final (userStart, userEnd) = _getCurrentUserStoryRange();
     final userStoryCount = userEnd - userStart + 1;
     final currentUserPosition = _currentIndex - userStart;
@@ -608,7 +614,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // PageView
+          // 1. PageView (Media Content)
           PageView.builder(
             controller: _pageController,
             onPageChanged: (index) {
@@ -678,9 +684,11 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                               color: Colors.white, size: 60),
                         ),
                       ),
+
+                    // Story Caption Overlay
                     if (!isText && caption.isNotEmpty)
                       Positioned(
-                        bottom: 140,
+                        bottom: 160,
                         left: 24,
                         right: 24,
                         child: Container(
@@ -708,7 +716,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             },
           ),
 
-          // ==================== PROGRESS BARS - NOW PER USER ====================
+          // 2. Progress Bars (Top)
           Positioned(
             top: MediaQuery.of(context).padding.top + 8,
             left: 16,
@@ -738,23 +746,109 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          // Tap zones
+          // 3. Tap Zones (Navigation)
           Positioned.fill(
             child: Row(
               children: [
                 Expanded(
-                    child: GestureDetector(
-                        onTap: _goToPreviousStory,
-                        behavior: HitTestBehavior.translucent)),
+                  child: GestureDetector(
+                    onTap: _goToPreviousStory,
+                    behavior: HitTestBehavior.translucent,
+                  ),
+                ),
                 Expanded(
-                    child: GestureDetector(
-                        onTap: _goToNextStory,
-                        behavior: HitTestBehavior.translucent)),
+                  child: GestureDetector(
+                    onTap: _goToNextStory,
+                    behavior: HitTestBehavior.translucent,
+                  ),
+                ),
               ],
             ),
           ),
 
-          // Top bar
+          // 4. Video Scrubber
+          if (story['media_type'] == 'video' &&
+              _videoController != null &&
+              _videoController!.value.isInitialized)
+            Positioned(
+              bottom: 105,
+              left: 16,
+              right: 16,
+              child: Row(
+                children: [
+                  GestureDetector(
+                    onTap: () => _isPaused ? _resumeStory() : _pauseStory(),
+                    child: Icon(
+                      _isPaused
+                          ? Icons.play_arrow_rounded
+                          : Icons.pause_rounded,
+                      color: Colors.white,
+                      size: 30,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    "${_formatDuration(_videoController!.value.position)} / ${_formatDuration(_videoController!.value.duration)}",
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold),
+                  ),
+                  Expanded(
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 2,
+                        thumbShape:
+                            const RoundSliderThumbShape(enabledThumbRadius: 6),
+                        activeTrackColor: Colors.white,
+                        inactiveTrackColor: Colors.white24,
+                        thumbColor: Colors.white,
+                      ),
+                      child: Slider(
+                        value: _videoController!.value.position.inMilliseconds
+                            .toDouble(),
+                        min: 0.0,
+                        max: _videoController!.value.duration.inMilliseconds
+                            .toDouble(),
+                        onChangeStart: (_) => _pauseStory(),
+                        onChanged: (value) {
+                          _videoController!
+                              .seekTo(Duration(milliseconds: value.toInt()));
+                          setState(() {});
+                        },
+                        onChangeEnd: (_) => _resumeStory(),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // 4.5 URL Link Icon (Restored Fix)
+          if (story['url'] != null && story['url'].toString().trim().isNotEmpty)
+            Positioned(
+              bottom: 140, // Positioned above the scrubber
+              right: 24,
+              child: GestureDetector(
+                onTap: () async {
+                  final uri = Uri.parse(story['url'] as String);
+                  if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: const Icon(Icons.link, color: Colors.white, size: 28),
+                ),
+              ),
+            ),
+
+          // 5. Top Bar (Profile/Close)
           Positioned(
             top: MediaQuery.of(context).padding.top + 45,
             left: 16,
@@ -781,21 +875,17 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                             story['profiles']!['school_name']
                                 .toString()
                                 .trim()
-                                .isNotEmpty)
+                                .isNotEmpty) ...[
                           Text(
                             story['profiles']!['school_name'],
                             style: TextStyle(
                                 color: Colors.white.withOpacity(0.6),
                                 fontSize: 12),
                           ),
-                        if (story['profiles']?['school_name'] != null &&
-                            story['profiles']!['school_name']
-                                .toString()
-                                .trim()
-                                .isNotEmpty)
                           const Text(' • ',
                               style: TextStyle(
                                   color: Colors.white54, fontSize: 12)),
+                        ],
                         Text(
                           _timeAgo(story['created_at']),
                           style: const TextStyle(
@@ -819,74 +909,95 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          // URL icon
-          if (story['url'] != null && story['url'].toString().trim().isNotEmpty)
-            Positioned(
-              bottom: 130,
-              right: 24,
-              child: GestureDetector(
-                onTap: () async {
-                  final uri = Uri.parse(story['url'] as String);
-                  if (await canLaunchUrl(uri))
-                    await launchUrl(uri, mode: LaunchMode.externalApplication);
-                },
-                child: Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
-                      shape: BoxShape.circle),
-                  child: const Icon(Icons.link, color: Colors.white, size: 28),
-                ),
-              ),
-            ),
-
-          // Bottom actions
+          // 6. BOTTOM BAR (WhatsApp-Style)
           Positioned(
-            bottom: 40,
-            left: 24,
-            right: 24,
+            bottom: 30,
+            left: 16,
+            right: 16,
             child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
               children: [
+                // Message Bar
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('MESSAGES & RESPONSES COMING SOON'),
+                          backgroundColor: Colors.blueGrey,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    child: Container(
+                      height: 50,
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: const Row(
+                        children: [
+                          Icon(Icons.emoji_emotions_outlined,
+                              color: Colors.white60, size: 22),
+                          SizedBox(width: 12),
+                          Text('Reply...',
+                              style: TextStyle(
+                                  color: Colors.white70, fontSize: 16)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+
+                // Reshare Button
                 if (!isOwnStory)
                   GestureDetector(
                     onTap: _reshareStory,
-                    child: Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.2),
-                          shape: BoxShape.circle),
-                      child: const Icon(Icons.repeat,
-                          color: Colors.white, size: 28),
-                    ),
+                    child:
+                        const Icon(Icons.repeat, color: Colors.white, size: 28),
                   ),
-                if (!isOwnStory) const SizedBox(width: 16),
+
+                // View Count
                 if (isOwnStory)
-                  Column(
+                  Row(
                     children: [
                       const Icon(Icons.remove_red_eye,
-                          color: Colors.white, size: 32),
+                          color: Colors.white, size: 24),
+                      const SizedBox(width: 4),
                       Text('$_viewCount',
                           style: const TextStyle(
-                              color: Colors.white, fontSize: 15)),
+                              color: Colors.white, fontSize: 14)),
                     ],
                   ),
-                if (isOwnStory) const SizedBox(width: 24),
-                Column(
+
+                const SizedBox(width: 16),
+
+                // Like Button & Count
+                Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
                       icon: Icon(
                         _likedStoryIds.contains(story['id'])
                             ? Icons.favorite
                             : Icons.favorite_border,
                         color: Colors.white,
-                        size: 32,
+                        size: 28,
                       ),
                       onPressed: _toggleLike,
                     ),
-                    Text('${story['likes_count'] ?? 0}',
-                        style:
-                            const TextStyle(color: Colors.white, fontSize: 15)),
+                    const SizedBox(width: 6),
+                    Text(
+                      '${story['likes_count'] ?? 0}',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold),
+                    ),
                   ],
                 ),
               ],
