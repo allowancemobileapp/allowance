@@ -498,7 +498,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     foregroundColor: Colors.black),
                 onPressed: () {
                   Navigator.pop(ctx);
-                  // Navigate to subscription
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => SubscriptionScreen(
+                        userPreferences: widget.userPreferences,
+                        themeColor: _accent,
+                      ),
+                    ),
+                  );
                 },
                 child: const Text('Subscribe to Allowance Plus',
                     style: TextStyle(fontWeight: FontWeight.bold)),
