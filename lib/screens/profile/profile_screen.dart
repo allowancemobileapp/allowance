@@ -95,7 +95,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
+            body: Center(
+                child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
           );
         }
 
@@ -109,6 +110,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 child: Text(
                   'Error loading profile.\n${err.toString()}',
                   textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70),
                 ),
               ),
             ),
@@ -117,19 +119,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
         final profile = snapshot.data;
 
+        // Handle missing profile record
         if (profile == null) {
           final supabase = Supabase.instance.client;
           final user = supabase.auth.currentUser;
 
           return Scaffold(
+            backgroundColor: _bg,
             body: Center(
               child: ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: _accent),
                 onPressed: () async {
                   try {
                     await supabase.from('profiles').insert({
                       'id': user?.id,
-                      'created_at': DateTime.now().toIso8601String(),
-                      'updated_at': DateTime.now().toIso8601String(),
+                      'created_at': DateTime.now().toUtc().toIso8601String(),
+                      'updated_at': DateTime.now().toUtc().toIso8601String(),
                     });
                     await widget.userPreferences.loadPreferences();
                     if (!mounted) return;
@@ -142,13 +147,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     }
                   }
                 },
-                child: const Text('Set up your profile'),
+                child: const Text('Set up your profile',
+                    style: TextStyle(color: Colors.black)),
               ),
             ),
           );
         }
 
         final up = widget.userPreferences;
+        final isPlus = up.subscriptionTier == 'Membership';
         final avatarUrl = up.avatarUrl;
         final imageProvider = (avatarUrl != null && avatarUrl.isNotEmpty)
             ? NetworkImage(avatarUrl)
@@ -162,28 +169,50 @@ class _ProfileScreenState extends State<ProfileScreen> {
             centerTitle: true,
             title: Image.asset(
               'assets/images/profile.png',
-              height: 120,
+              height: 100,
               fit: BoxFit.contain,
             ),
             automaticallyImplyLeading: false,
+            // Visibility Toggle in AppBar for easy access
+            actions: [
+              if (isPlus)
+                IconButton(
+                  icon: const Icon(Icons.remove_red_eye_outlined,
+                      color: Color(0xFF4CAF50)),
+                  onPressed: () {
+                    // Logic to toggle public/private visibility
+                  },
+                  tooltip: 'Profile Visibility',
+                ),
+            ],
           ),
           body: ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             children: [
+              // ==================== STATS HEADER ====================
+              Padding(
+                padding: const EdgeInsets.only(bottom: 20),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _buildStatItem('Followers',
+                        '0'), // Replace with real count if available
+                    const SizedBox(width: 110), // Space for the center avatar
+                    _buildStatItem('Memories',
+                        '0'), // Replace with real count if available
+                  ],
+                ),
+              ),
+
               Column(
                 children: [
-                  // ==================== TAPABLE AVATAR WITH STORY RING + PLUS BUTTON ====================
+                  // ==================== TAPABLE AVATAR WITH STORY RING ====================
                   GestureDetector(
                     onTap: () async {
-                      // When user taps their own profile photo → open their story
                       final supabase = Supabase.instance.client;
-
                       final response = await supabase
                           .from('stories')
-                          .select('''
-      id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
-      profiles:user_id(username, avatar_url)
-    ''')
+                          .select('*, profiles:user_id(username, avatar_url)')
                           .eq('user_id', supabase.auth.currentUser!.id)
                           .gt('expires_at',
                               DateTime.now().toUtc().toIso8601String())
@@ -199,8 +228,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             builder: (_) => StoryViewerScreen(
                               stories: myStories,
                               initialIndex: 0,
-                              userPreferences:
-                                  widget.userPreferences, // ← THIS WAS MISSING
+                              userPreferences: widget.userPreferences,
                             ),
                           ),
                         );
@@ -218,7 +246,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       child: Stack(
                         alignment: Alignment.center,
                         children: [
-                          // Green glowing ring (visible when you have an active story)
+                          // Story Ring
                           Container(
                             width: 110,
                             height: 110,
@@ -226,7 +254,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               shape: BoxShape.circle,
                               border: Border.all(
                                 color: const Color(0xFF4CAF50),
-                                width: 5,
+                                width: 3,
                               ),
                             ),
                           ),
@@ -245,15 +273,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                   )
                                 : null,
                           ),
-                          // PLUS BUTTON FOR POSTING STORY
+                          // PLUS BUTTON
                           Positioned(
                             bottom: 4,
                             right: 4,
                             child: GestureDetector(
                               onTap: () async {
-                                final isPlus =
-                                    widget.userPreferences.subscriptionTier ==
-                                        'Membership';
                                 if (isPlus) {
                                   final result = await Navigator.push(
                                     context,
@@ -265,87 +290,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                   );
                                   if (result == true) _refreshProfile();
                                 } else {
-                                  if (!mounted) return;
-                                  showModalBottomSheet(
-                                    context: context,
-                                    backgroundColor: Colors.grey[900],
-                                    shape: const RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.vertical(
-                                          top: Radius.circular(20)),
-                                    ),
-                                    builder: (ctx) => Padding(
-                                      padding: const EdgeInsets.all(24),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const Icon(Icons.lock_rounded,
-                                              size: 64, color: Colors.amber),
-                                          const SizedBox(height: 16),
-                                          const Text(
-                                            'JOIN THE ALLOWANCE PLUS FAMILY',
-                                            style: TextStyle(
-                                                fontSize: 22,
-                                                fontWeight: FontWeight.bold,
-                                                color: Colors.white),
-                                          ),
-                                          const SizedBox(height: 12),
-                                          const Text(
-                                            'to post Story Gist',
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                                fontSize: 16,
-                                                color: Colors.white70),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          const Text(
-                                            'This unlocks full creative features across Allowance.',
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                                color: Colors.white54,
-                                                fontSize: 14),
-                                          ),
-                                          const SizedBox(height: 24),
-                                          SizedBox(
-                                            width: double.infinity,
-                                            child: ElevatedButton(
-                                              onPressed: () {
-                                                Navigator.pop(ctx);
-                                                Navigator.push(
-                                                  context,
-                                                  MaterialPageRoute(
-                                                    builder: (_) =>
-                                                        SubscriptionScreen(
-                                                      userPreferences: widget
-                                                          .userPreferences,
-                                                      themeColor: _accent,
-                                                    ),
-                                                  ),
-                                                );
-                                              },
-                                              style: ElevatedButton.styleFrom(
-                                                backgroundColor: _accent,
-                                                foregroundColor: Colors.white,
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                        vertical: 16),
-                                              ),
-                                              child: const Text(
-                                                  'Subscribe to Allowance Plus',
-                                                  style: TextStyle(
-                                                      fontWeight:
-                                                          FontWeight.bold)),
-                                            ),
-                                          ),
-                                          TextButton(
-                                            onPressed: () => Navigator.pop(ctx),
-                                            child: const Text('Maybe later',
-                                                style: TextStyle(
-                                                    color: Colors.white70)),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  );
+                                  _showUpgradeSheet(context);
                                 }
                               },
                               child: const CircleAvatar(
@@ -360,28 +305,32 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ),
                     ),
                   ),
-                  // ==================== END TAPABLE AVATAR ====================
+                  // ==================== END AVATAR ====================
 
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 16),
                   Text(
                     up.fullName ?? 'No name',
                     style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 22,
+                        fontSize: 24,
                         fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 6),
-                  Text('@${up.username ?? 'nouser'}',
-                      style: const TextStyle(color: Colors.white70)),
+                  Text(
+                    '@${up.username ?? 'nouser'}',
+                    style: const TextStyle(
+                        color: Color(0xFF4CAF50), fontWeight: FontWeight.w500),
+                  ),
 
                   // BIO DISPLAY
                   const SizedBox(height: 16),
                   Container(
+                    width: double.infinity,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 16, vertical: 12),
                     decoration: BoxDecoration(
                       color: _card,
-                      borderRadius: BorderRadius.circular(12),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Colors.white10),
                     ),
                     child: Text(
                       up.bio?.trim().isNotEmpty == true
@@ -390,7 +339,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       style: TextStyle(
                         color: up.bio?.trim().isNotEmpty == true
                             ? Colors.white70
-                            : Colors.white54,
+                            : Colors.white38,
                         fontSize: 15,
                         height: 1.4,
                       ),
@@ -399,74 +348,55 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   ),
                 ],
               ),
-              const SizedBox(height: 28),
 
-              // Info card
+              const SizedBox(height: 24),
+
+              // ==================== INFO DETAILS CARD ====================
               Container(
-                padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                    color: _card, borderRadius: BorderRadius.circular(12)),
+                  color: _card,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white10),
+                ),
                 child: Column(
                   children: [
-                    ListTile(
-                      leading: const Icon(Icons.phone, color: Colors.white70),
-                      title: const Text('Phone',
-                          style: TextStyle(color: Colors.white70)),
-                      subtitle: Text(up.phoneNumber ?? 'Not set',
-                          style: const TextStyle(color: Colors.white)),
-                    ),
-                    const Divider(color: Colors.grey),
-                    ListTile(
-                      leading: const Icon(Icons.fitness_center,
-                          color: Colors.white70),
-                      title: const Text('Weight',
-                          style: TextStyle(color: Colors.white70)),
-                      subtitle: Text(up.weight?.toString() ?? 'Not set',
-                          style: const TextStyle(color: Colors.white)),
-                    ),
-                    const Divider(color: Colors.grey),
-                    ListTile(
-                      leading: const Icon(Icons.height, color: Colors.white70),
-                      title: const Text('Height',
-                          style: TextStyle(color: Colors.white70)),
-                      subtitle: Text(up.height?.toString() ?? 'Not set',
-                          style: const TextStyle(color: Colors.white)),
-                    ),
-                    const Divider(color: Colors.grey),
-                    ListTile(
-                      leading: const Icon(Icons.cake, color: Colors.white70),
-                      title: const Text('Age',
-                          style: TextStyle(color: Colors.white70)),
-                      subtitle: Text(up.age?.toString() ?? 'Not set',
-                          style: const TextStyle(color: Colors.white)),
-                    ),
-                    const Divider(color: Colors.grey),
-                    ListTile(
-                      leading:
-                          const Icon(Icons.bloodtype, color: Colors.white70),
-                      title: const Text('Blood group',
-                          style: TextStyle(color: Colors.white70)),
-                      subtitle: Text(up.bloodGroup ?? 'Not set',
-                          style: const TextStyle(color: Colors.white)),
-                    ),
+                    _buildProfileTile(Icons.school_outlined, 'Campus',
+                        up.schoolName ?? 'Not set'),
+                    const Divider(color: Colors.white10, height: 1),
+                    _buildProfileTile(Icons.phone_outlined, 'Phone',
+                        up.phoneNumber ?? 'Not set'),
+                    const Divider(color: Colors.white10, height: 1),
+                    _buildProfileTile(Icons.fitness_center_outlined, 'Weight',
+                        '${up.weight ?? 'Not set'} kg'),
+                    const Divider(color: Colors.white10, height: 1),
+                    _buildProfileTile(Icons.height_outlined, 'Height',
+                        '${up.height ?? 'Not set'} cm'),
+                    const Divider(color: Colors.white10, height: 1),
+                    _buildProfileTile(Icons.cake_outlined, 'Age',
+                        '${up.age ?? 'Not set'} years'),
                   ],
                 ),
               ),
 
               const SizedBox(height: 24),
 
+              // ==================== ACTIONS ====================
               ElevatedButton.icon(
-                icon: const Icon(Icons.edit_outlined),
-                label: const Text('Edit profile'),
+                icon: const Icon(Icons.edit_outlined, size: 20),
+                label: const Text('Edit Profile'),
                 style: ElevatedButton.styleFrom(
-                    backgroundColor: _accent,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 14)),
+                  backgroundColor: _accent,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
                 onPressed: () async {
                   final changed = await Navigator.of(context).push<bool>(
                     MaterialPageRoute(
-                        builder: (_) => EditProfileScreen(
-                            userPreferences: widget.userPreferences)),
+                      builder: (_) => EditProfileScreen(
+                          userPreferences: widget.userPreferences),
+                    ),
                   );
                   if (changed == true) {
                     await widget.userPreferences.loadPreferences();
@@ -484,19 +414,99 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         width: 16,
                         height: 16,
                         child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.logout),
-                label: const Text('Log out'),
+                    : const Icon(Icons.logout_rounded, size: 20),
+                label: const Text('Log Out'),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.redAccent,
                   side: const BorderSide(color: Colors.redAccent),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
                 onPressed: _signingOut ? null : _confirmLogout,
               ),
+              const SizedBox(height: 40),
             ],
           ),
         );
       },
+    );
+  }
+
+// Helper for Stats
+  Widget _buildStatItem(String label, String value) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(value,
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold)),
+        Text(label,
+            style: const TextStyle(color: Colors.white54, fontSize: 12)),
+      ],
+    );
+  }
+
+// Helper for Profile Details
+  Widget _buildProfileTile(IconData icon, String title, String value) {
+    return ListTile(
+      leading: Icon(icon, color: const Color(0xFF4CAF50), size: 22),
+      title: Text(title,
+          style: const TextStyle(color: Colors.white54, fontSize: 13)),
+      subtitle: Text(value,
+          style: const TextStyle(
+              color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500)),
+      dense: true,
+    );
+  }
+
+// Helper for Upgrade Sheet
+  void _showUpgradeSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
+            const SizedBox(height: 16),
+            const Text(
+              'JOIN THE ALLOWANCE PLUS FAMILY',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Unlock Story Gist and profile customization.',
+              style: TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4CAF50),
+                    foregroundColor: Colors.black),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  // Navigate to subscription
+                },
+                child: const Text('Subscribe to Allowance Plus',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

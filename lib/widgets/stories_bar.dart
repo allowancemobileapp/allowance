@@ -32,26 +32,37 @@ class StoriesBarState extends State<StoriesBar> {
     });
   }
 
-  void _loadStories() {
+  // Inside STORIES BAR.txt -> _loadStories()
+  void _loadStories() async {
+    // Add 'async' here
     final supabase = Supabase.instance.client;
 
-    _storiesFuture = supabase
+    final response = await supabase
         .from('stories')
         .select('''
-          id,
-          user_id,
-          media_url,
-          media_type,
-          caption,
-          url,
-          expires_at,
-          created_at,
-          likes_count,
+          id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
           profiles:user_id(username, avatar_url, school_name),
           story_views!left(id)
         ''')
         .gt('expires_at', DateTime.now().toUtc().toIso8601String())
         .order('created_at', ascending: false);
+
+    // ==========================================
+    // ADD THIS: PRELOAD AVATARS
+    // ==========================================
+    // ignore: unnecessary_null_comparison
+    if (mounted && response != null) {
+      for (var story in response) {
+        final avatarUrl = story['profiles']?['avatar_url'] as String?;
+        if (avatarUrl != null && avatarUrl.isNotEmpty) {
+          precacheImage(NetworkImage(avatarUrl), context);
+        }
+      }
+    }
+
+    setState(() {
+      _storiesFuture = Future.value(response);
+    });
   }
 
   void _setupRealtimeSubscription() {

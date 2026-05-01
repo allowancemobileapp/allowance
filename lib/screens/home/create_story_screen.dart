@@ -6,6 +6,7 @@ import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:wechat_camera_picker/wechat_camera_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:image_cropper/image_cropper.dart';
+import 'package:flutter/foundation.dart';
 // ignore: unnecessary_import
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -38,9 +39,46 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
   final _urlController = TextEditingController();
   bool _isUploading = false;
   final PageController _pageController = PageController();
+  final ImagePicker _imagePicker = ImagePicker();
 
   // ==================== PICK MEDIA ====================
   Future<void> _pickMedia() async {
+    // --- 1. WEB IMPLEMENTATION ---
+    if (kIsWeb) {
+      // Use image_picker on the web
+      final List<XFile> pickedFiles = await _imagePicker.pickMultipleMedia();
+
+      if (pickedFiles.isNotEmpty) {
+        setState(() => _isUploading = true);
+        List<MediaItem> newItems = [];
+
+        for (var file in pickedFiles) {
+          final bytes = await file.readAsBytes();
+
+          // Determine if it's a video based on mimeType or extension
+          final isVideo = file.mimeType?.startsWith('video/') == true ||
+              file.name.toLowerCase().endsWith('.mp4') ||
+              file.name.toLowerCase().endsWith('.mov') ||
+              file.name.toLowerCase().endsWith('.webm');
+
+          newItems.add(MediaItem(
+            file: file,
+            bytes: bytes,
+            type: isVideo ? 'video' : 'image',
+          ));
+        }
+
+        setState(() {
+          _selectedMedia = newItems;
+          _isTextOnly = false;
+          _currentCarouselIndex = 0;
+          _isUploading = false;
+        });
+      }
+      return; // Exit the function early so it doesn't run the mobile code below
+    }
+
+    // --- 2. MOBILE IMPLEMENTATION (Your existing logic) ---
     final List<AssetEntity>? result = await AssetPicker.pickAssets(
       context,
       pickerConfig: AssetPickerConfig(

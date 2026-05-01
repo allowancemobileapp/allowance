@@ -1,5 +1,6 @@
 // lib/screens/home/home_screen.dart
 import 'dart:async';
+import 'package:allowance/screens/chat/chat_list_screen.dart';
 import 'package:allowance/widgets/stories_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:icons_plus/icons_plus.dart';
@@ -17,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'dart:developer' as developer;
 import 'package:gal/gal.dart';
 import 'package:video_player/video_player.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
 class HomeScreen extends StatefulWidget {
   final UserPreferences? userPreferences;
@@ -128,7 +130,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _fetchGistsAndStartSlideshow() async {
     setState(() => _isGistsLoading = true);
-
     try {
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
@@ -145,7 +146,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
       List<Map<String, dynamic>> list = raw;
 
-      // Filter by school (same as before)
       final sidStr = _prefs.schoolId;
       final int? sidInt = sidStr != null ? int.tryParse(sidStr) : null;
       if (sidStr != null && sidStr.isNotEmpty) {
@@ -169,6 +169,22 @@ class _HomeScreenState extends State<HomeScreen> {
             .toList();
       }
 
+      // ==========================================
+      // SPEED HACK: PRELOAD IMAGES INTO RAM
+      // ==========================================
+      if (mounted) {
+        // Preload the first 5 images so the initial scroll is instant
+        for (var i = 0; i < list.length && i < 5; i++) {
+          final gist = list[i];
+          final mediaType = gist['media_type'] as String?;
+          final imageUrl = gist['image_url'] as String?;
+
+          if (mediaType != 'video' && imageUrl != null && imageUrl.isNotEmpty) {
+            precacheImage(CachedNetworkImageProvider(imageUrl), context);
+          }
+        }
+      }
+
       if (!mounted) return;
       setState(() {
         _fetchedGists = list;
@@ -176,7 +192,7 @@ class _HomeScreenState extends State<HomeScreen> {
       });
 
       await _loadGistLikes();
-      await _initializeVideoControllers(); // ← NEW
+      await _initializeVideoControllers();
 
       if (_fetchedGists.isEmpty) {
         setState(() => _fetchedGists = List.from(_fallbackGists));
@@ -196,21 +212,41 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // Initialize video controllers for all video gists
+  // ==========================================
+  // SPEED HACK: CACHE VIDEOS TO PHONE STORAGE
+  // ==========================================
   Future<void> _initializeVideoControllers() async {
     for (var gist in _fetchedGists) {
       final mediaType = gist['media_type'] as String?;
+
       if (mediaType == 'video') {
         final gistId = gist['id'] as int;
         final videoUrl = (gist['image_url'] as String?) ?? '';
 
         if (videoUrl.isNotEmpty) {
-          final controller =
-              VideoPlayerController.networkUrl(Uri.parse(videoUrl));
-          await controller.initialize();
-          controller.setLooping(true);
-          _videoControllers[gistId] = controller;
-          _isVideoMuted[gistId] = true; // start muted like Instagram
+          try {
+            // 1. Check if the video is already saved in the phone's physical cache
+            var fileInfo =
+                await DefaultCacheManager().getFileFromCache(videoUrl);
+            VideoPlayerController controller;
+
+            if (fileInfo != null) {
+              // PLAY FROM LOCAL DISK: Extremely fast, zero network buffering
+              controller = VideoPlayerController.file(fileInfo.file);
+            } else {
+              // PLAY FROM NETWORK: But silently download to the disk cache in the background for next time!
+              controller =
+                  VideoPlayerController.networkUrl(Uri.parse(videoUrl));
+              DefaultCacheManager().downloadFile(videoUrl);
+            }
+
+            await controller.initialize();
+            controller.setLooping(true);
+            _videoControllers[gistId] = controller;
+            _isVideoMuted[gistId] = true;
+          } catch (e) {
+            debugPrint("Video caching error: $e");
+          }
         }
       }
     }
@@ -822,561 +858,716 @@ class _HomeScreenState extends State<HomeScreen> {
         : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
 
     if (_isGistsLoading) {
-      return const Center(
-        child: CircularProgressIndicator(color: Color(0xFF4CAF50)),
+      return const SliverToBoxAdapter(
+        child: Padding(
+          padding: EdgeInsets.only(top: 40.0),
+          child: Center(
+            child: CircularProgressIndicator(color: Color(0xFF4CAF50)),
+          ),
+        ),
       );
     }
 
-    return ListView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
+    if (filteredGists.isEmpty) {
+      return const SliverToBoxAdapter(child: SizedBox());
+    }
+
+    return SliverPadding(
       padding: const EdgeInsets.only(bottom: 40, top: 8),
-      itemCount: filteredGists.isEmpty ? 0 : filteredGists.length,
-      itemBuilder: (ctx, idx) {
-        final gist = filteredGists[idx];
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (ctx, idx) {
+            final gist = filteredGists[idx];
 
-        final imageUrl = (gist['image_url'] as String?) ?? '';
-        final imageUrls = (gist['image_urls'] as List?)?.cast<String>() ?? [];
-        final mediaType = (gist['media_type'] as String?) ?? 'image';
-        final gistUrl = (gist['url'] as String?) ?? '';
-        final fullTitle = gist['title'] as String? ?? '';
+            final imageUrl = (gist['image_url'] as String?) ?? '';
+            final imageUrls =
+                (gist['image_urls'] as List?)?.cast<String>() ?? [];
+            final mediaType = (gist['media_type'] as String?) ?? 'image';
+            final gistUrl = (gist['url'] as String?) ?? '';
+            final fullTitle = gist['title'] as String? ?? '';
 
-        final profileData = gist['profiles'];
-        final gistId = (gist['id'] is int)
-            ? gist['id'] as int
-            : int.tryParse(gist['id'].toString()) ?? 0;
+            final profileData = gist['profiles'];
+            final gistId = (gist['id'] is int)
+                ? gist['id'] as int
+                : int.tryParse(gist['id'].toString()) ?? 0;
 
-        final username =
-            (profileData is Map) ? profileData['username'] as String? : null;
-        final avatarUrl =
-            (profileData is Map) ? profileData['avatar_url'] as String? : null;
-        final bio = (profileData is Map) ? profileData['bio'] as String? : null;
+            final username = (profileData is Map)
+                ? profileData['username'] as String?
+                : null;
+            final avatarUrl = (profileData is Map)
+                ? profileData['avatar_url'] as String?
+                : null;
+            final bio =
+                (profileData is Map) ? profileData['bio'] as String? : null;
 
-        final likeCount = _gistLikeCounts[gistId] ?? 0;
-        final isLiked = _likedGistIds.contains(gistId);
+            final likeCount = _gistLikeCounts[gistId] ?? 0;
+            final isLiked = _likedGistIds.contains(gistId);
 
-        final imagesToShow = imageUrls.isNotEmpty
-            ? imageUrls
-            : (imageUrl.isNotEmpty ? [imageUrl] : []);
+            final imagesToShow = imageUrls.isNotEmpty
+                ? imageUrls
+                : (imageUrl.isNotEmpty ? [imageUrl] : []);
 
-        int currentPage = 0;
+            int currentPage = 0;
 
-        // ====================== VIDEO GIST ======================
-        if (mediaType == 'video') {
-          final controller = _videoControllers[gistId];
-          final isMuted = _isVideoMuted[gistId] ?? true;
+            // ====================== VIDEO GIST ======================
+            if (mediaType == 'video') {
+              final controller = _videoControllers[gistId];
+              final isMuted = _isVideoMuted[gistId] ?? true;
 
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 32.0),
-            child: Column(
-              children: [
-                SizedBox(
-                  height: MediaQuery.of(context).size.height * 0.36,
-                  width: MediaQuery.of(context).size.width * 0.85,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(24),
-                    child: controller != null && controller.value.isInitialized
-                        ? Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              VideoPlayer(controller),
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 32.0),
+                child: Column(
+                  children: [
+                    SizedBox(
+                      height: MediaQuery.of(context).size.height * 0.36,
+                      width: MediaQuery.of(context).size.width * 0.85,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(24),
+                        child: controller != null &&
+                                controller.value.isInitialized
+                            ? Stack(
+                                children: [
+                                  // 1. Black background for letterboxing
+                                  Positioned.fill(
+                                    child: Container(color: Colors.black),
+                                  ),
 
-                              // Tap anywhere to play/pause
-                              GestureDetector(
-                                onTap: () {
-                                  if (controller.value.isPlaying) {
-                                    controller.pause();
-                                  } else {
-                                    controller.play();
-                                  }
-                                  setState(() {});
-                                },
-                              ),
-
-                              // MUTE BUTTON → MOVED TO BOTTOM LEFT
-                              Positioned(
-                                bottom: 12,
-                                left: 12,
-                                child: GestureDetector(
-                                  onTap: () {
-                                    setState(() {
-                                      _isVideoMuted[gistId] = !isMuted;
-                                      controller.setVolume(isMuted ? 1.0 : 0.0);
-                                    });
-                                  },
-                                  child: CircleAvatar(
-                                    backgroundColor: Colors.black54,
-                                    radius: 20,
-                                    child: Icon(
-                                      isMuted
-                                          ? Icons.volume_off
-                                          : Icons.volume_up,
-                                      color: Colors.white,
-                                      size: 22,
+                                  // 2. Video in original aspect ratio (like YouTube)
+                                  Center(
+                                    child: AspectRatio(
+                                      aspectRatio: controller.value.aspectRatio,
+                                      child: VideoPlayer(controller),
                                     ),
                                   ),
-                                ),
-                              ),
 
-                              // PROGRESS BAR
-                              Positioned(
-                                bottom: 12,
-                                left: 52,
-                                right: 12,
-                                child: VideoProgressIndicator(
-                                  controller,
-                                  allowScrubbing: true,
-                                  colors: const VideoProgressColors(
-                                    playedColor: Color(0xFF4CAF50),
-                                    bufferedColor: Colors.white24,
-                                    backgroundColor: Colors.black26,
-                                  ),
-                                ),
-                              ),
-
-                              // LINK BUTTON (top right) - if URL exists
-                              if (gistUrl.isNotEmpty)
-                                Positioned(
-                                  top: 12,
-                                  right: 12,
-                                  child: Material(
-                                    color: Colors.transparent,
-                                    child: InkWell(
-                                      borderRadius: BorderRadius.circular(30),
-                                      onTap: () async {
-                                        final uri = Uri.tryParse(gistUrl);
-                                        if (uri != null &&
-                                            await canLaunchUrl(uri)) {
-                                          await launchUrl(uri,
-                                              mode: LaunchMode
-                                                  .externalApplication);
+                                  // 3. Tap anywhere to play/pause
+                                  Positioned.fill(
+                                    child: GestureDetector(
+                                      onTap: () {
+                                        if (controller.value.isPlaying) {
+                                          controller.pause();
+                                        } else {
+                                          controller.play();
                                         }
+                                        setState(() {});
                                       },
-                                      child: Container(
-                                        padding: const EdgeInsets.all(12),
-                                        decoration: const BoxDecoration(
-                                            color: Colors.black54,
-                                            shape: BoxShape.circle),
-                                        child: const Icon(Icons.link,
-                                            size: 24, color: Colors.white),
+                                    ),
+                                  ),
+
+                                  // 4. FULLSCREEN BUTTON (Top Left)
+                                  Positioned(
+                                    top: 12,
+                                    left: 12,
+                                    child: Material(
+                                      color: Colors.transparent,
+                                      child: InkWell(
+                                        borderRadius: BorderRadius.circular(30),
+                                        onTap: () {
+                                          showDialog(
+                                            context: context,
+                                            builder: (ctx) => Dialog(
+                                              backgroundColor: Colors.black,
+                                              insetPadding: EdgeInsets.zero,
+                                              // We use StatefulBuilder here so the dialog can update its own play/pause icon
+                                              child: StatefulBuilder(builder:
+                                                  (context, setDialogState) {
+                                                return Stack(
+                                                  fit: StackFit.expand,
+                                                  children: [
+                                                    Center(
+                                                      child: AspectRatio(
+                                                        aspectRatio: controller
+                                                            .value.aspectRatio,
+                                                        child: VideoPlayer(
+                                                            controller),
+                                                      ),
+                                                    ),
+
+                                                    // Tap to play/pause inside fullscreen
+                                                    Positioned.fill(
+                                                      child: GestureDetector(
+                                                        onTap: () {
+                                                          if (controller.value
+                                                              .isPlaying) {
+                                                            controller.pause();
+                                                          } else {
+                                                            controller.play();
+                                                          }
+                                                          // Update the dialog UI
+                                                          setDialogState(() {});
+                                                          // Keep the background UI in sync
+                                                          setState(() {});
+                                                        },
+                                                      ),
+                                                    ),
+
+                                                    // Big play icon when paused in fullscreen
+                                                    if (!controller
+                                                        .value.isPlaying)
+                                                      const Center(
+                                                        child: IgnorePointer(
+                                                          child: Icon(
+                                                            Icons
+                                                                .play_circle_fill,
+                                                            size: 80,
+                                                            color:
+                                                                Colors.white70,
+                                                          ),
+                                                        ),
+                                                      ),
+
+                                                    // FULLSCREEN PROGRESS BAR
+                                                    Positioned(
+                                                      bottom: 40,
+                                                      left: 24,
+                                                      right: 24,
+                                                      child:
+                                                          VideoProgressIndicator(
+                                                        controller,
+                                                        allowScrubbing: true,
+                                                        colors:
+                                                            const VideoProgressColors(
+                                                          playedColor:
+                                                              Color(0xFF4CAF50),
+                                                          bufferedColor:
+                                                              Colors.white24,
+                                                          backgroundColor:
+                                                              Colors.black26,
+                                                        ),
+                                                      ),
+                                                    ),
+
+                                                    // Close Button
+                                                    Positioned(
+                                                      top: 40,
+                                                      right: 20,
+                                                      child: IconButton(
+                                                        icon: const Icon(
+                                                            Icons.close,
+                                                            color: Colors.white,
+                                                            size: 30),
+                                                        onPressed: () =>
+                                                            Navigator.pop(ctx),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                );
+                                              }),
+                                            ),
+                                          );
+                                        },
+                                        child: Container(
+                                          padding: const EdgeInsets.all(8),
+                                          decoration: const BoxDecoration(
+                                              color: Colors.black54,
+                                              shape: BoxShape.circle),
+                                          child: const Icon(Icons.fullscreen,
+                                              color: Colors.white, size: 24),
+                                        ),
                                       ),
                                     ),
                                   ),
-                                ),
 
-                              // LIKE BUTTON (bottom right) - restored
-                              Positioned(
-                                bottom: 12,
-                                right: 12,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      vertical: 8, horizontal: 8),
-                                  decoration: BoxDecoration(
-                                      color: Colors.black45,
-                                      borderRadius: BorderRadius.circular(20)),
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        padding: EdgeInsets.zero,
-                                        constraints: const BoxConstraints(),
-                                        onPressed: () =>
-                                            _toggleGistLike(gistId),
-                                        icon: Icon(
-                                            isLiked
-                                                ? Icons.favorite
-                                                : Icons.favorite_border,
-                                            color: isLiked
-                                                ? Colors.red
-                                                : Colors.white,
-                                            size: 28),
+                                  // MUTE BUTTON → BOTTOM LEFT
+                                  Positioned(
+                                    bottom: 12,
+                                    left: 12,
+                                    child: GestureDetector(
+                                      onTap: () {
+                                        setState(() {
+                                          _isVideoMuted[gistId] = !isMuted;
+                                          controller
+                                              .setVolume(isMuted ? 1.0 : 0.0);
+                                        });
+                                      },
+                                      child: CircleAvatar(
+                                        backgroundColor: Colors.black54,
+                                        radius: 20,
+                                        child: Icon(
+                                          isMuted
+                                              ? Icons.volume_off
+                                              : Icons.volume_up,
+                                          color: Colors.white,
+                                          size: 22,
+                                        ),
                                       ),
-                                      Text(likeCount.toString(),
-                                          style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 15,
-                                              fontWeight: FontWeight.bold)),
-                                    ],
+                                    ),
                                   ),
-                                ),
-                              ),
 
-                              // Big play icon when paused
-                              if (!controller.value.isPlaying)
-                                const Center(
-                                  child: Icon(
-                                    Icons.play_circle_fill,
-                                    size: 80,
-                                    color: Colors.white70,
+                                  // IN-FEED PROGRESS BAR
+                                  Positioned(
+                                    bottom: 12,
+                                    left: 52,
+                                    right: 12,
+                                    child: VideoProgressIndicator(
+                                      controller,
+                                      allowScrubbing: true,
+                                      colors: const VideoProgressColors(
+                                        playedColor: Color(0xFF4CAF50),
+                                        bufferedColor: Colors.white24,
+                                        backgroundColor: Colors.black26,
+                                      ),
+                                    ),
                                   ),
-                                ),
-                            ],
-                          )
-                        : const Center(child: CircularProgressIndicator()),
-                  ),
-                ),
-                const SizedBox(height: 12),
 
-                // Username + Title
-                GestureDetector(
-                  onTap: () => _showProfileCard(username ?? '', avatarUrl, bio),
-                  child: RichText(
-                    textAlign: TextAlign.center,
-                    text: TextSpan(
-                      style: const TextStyle(
-                          fontFamily: 'SanFrancisco', fontSize: 18),
-                      children: [
-                        TextSpan(
-                            text: username != null ? "@$username" : '',
-                            style: TextStyle(
-                                color: themeColor,
-                                fontWeight: FontWeight.bold)),
-                        TextSpan(
-                            text: username != null ? ": " : "",
-                            style: TextStyle(
-                                color: themeColor,
-                                fontWeight: FontWeight.bold)),
-                        TextSpan(
-                          text: fullTitle.length > 100
-                              ? "${fullTitle.substring(0, 100)}..."
-                              : fullTitle,
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                      ],
+                                  // LINK BUTTON (top right)
+                                  if (gistUrl.isNotEmpty)
+                                    Positioned(
+                                      top: 12,
+                                      right: 12,
+                                      child: Material(
+                                        color: Colors.transparent,
+                                        child: InkWell(
+                                          borderRadius:
+                                              BorderRadius.circular(30),
+                                          onTap: () async {
+                                            final uri = Uri.tryParse(gistUrl);
+                                            if (uri != null &&
+                                                await canLaunchUrl(uri)) {
+                                              await launchUrl(uri,
+                                                  mode: LaunchMode
+                                                      .externalApplication);
+                                            }
+                                          },
+                                          child: Container(
+                                            padding: const EdgeInsets.all(12),
+                                            decoration: const BoxDecoration(
+                                                color: Colors.black54,
+                                                shape: BoxShape.circle),
+                                            child: const Icon(Icons.link,
+                                                size: 24, color: Colors.white),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+
+                                  // LIKE BUTTON (bottom right)
+                                  Positioned(
+                                    bottom: 12,
+                                    right: 12,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 8, horizontal: 8),
+                                      decoration: BoxDecoration(
+                                          color: Colors.black45,
+                                          borderRadius:
+                                              BorderRadius.circular(20)),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          IconButton(
+                                            padding: EdgeInsets.zero,
+                                            constraints: const BoxConstraints(),
+                                            onPressed: () =>
+                                                _toggleGistLike(gistId),
+                                            icon: Icon(
+                                                isLiked
+                                                    ? Icons.favorite
+                                                    : Icons.favorite_border,
+                                                color: isLiked
+                                                    ? Colors.red
+                                                    : Colors.white,
+                                                size: 28),
+                                          ),
+                                          Text(likeCount.toString(),
+                                              style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.bold)),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+
+                                  // Big play icon when paused in feed
+                                  if (!controller.value.isPlaying)
+                                    const Center(
+                                      child: IgnorePointer(
+                                        child: Icon(
+                                          Icons.play_circle_fill,
+                                          size: 80,
+                                          color: Colors.white70,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              )
+                            : const Center(child: CircularProgressIndicator()),
+                      ),
                     ),
-                  ),
-                ),
+                    const SizedBox(height: 12),
 
-                if (fullTitle.length > 100)
-                  GestureDetector(
-                    onTap: () {
-                      showModalBottomSheet(
-                        context: context,
-                        isScrollControlled: true,
-                        backgroundColor: Colors.transparent,
-                        builder: (context) => DraggableScrollableSheet(
-                          initialChildSize: 0.55,
-                          minChildSize: 0.4,
-                          maxChildSize: 0.9,
-                          expand: false,
-                          builder: (_, scrollController) => Container(
-                            decoration: const BoxDecoration(
-                              color: Color(0xFF1E1E1E),
-                              borderRadius: BorderRadius.vertical(
-                                  top: Radius.circular(24)),
+                    // Username + Title
+                    GestureDetector(
+                      onTap: () =>
+                          _showProfileCard(username ?? '', avatarUrl, bio),
+                      child: RichText(
+                        textAlign: TextAlign.center,
+                        text: TextSpan(
+                          style: const TextStyle(
+                              fontFamily: 'SanFrancisco', fontSize: 18),
+                          children: [
+                            TextSpan(
+                                text: username != null ? "@$username" : '',
+                                style: TextStyle(
+                                    color: themeColor,
+                                    fontWeight: FontWeight.bold)),
+                            TextSpan(
+                                text: username != null ? ": " : "",
+                                style: TextStyle(
+                                    color: themeColor,
+                                    fontWeight: FontWeight.bold)),
+                            TextSpan(
+                              text: fullTitle.length > 100
+                                  ? "${fullTitle.substring(0, 100)}..."
+                                  : fullTitle,
+                              style: const TextStyle(color: Colors.white),
                             ),
-                            child: ListView(
-                              controller: scrollController,
-                              padding: const EdgeInsets.all(24),
-                              children: [
-                                const Text("Full Gist Title",
-                                    style: TextStyle(
-                                        fontSize: 22,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.white),
-                                    textAlign: TextAlign.center),
-                                const SizedBox(height: 16),
-                                Text(
-                                  fullTitle.replaceAll('\\n', '\n'),
-                                  style: const TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 16,
-                                      height: 1.5),
-                                ),
-                                const SizedBox(height: 32),
-                                Align(
-                                  alignment: Alignment.center,
-                                  child: TextButton(
-                                    onPressed: () => Navigator.pop(context),
-                                    child: const Text('Close',
-                                        style: TextStyle(
-                                            color: Color(0xFF4CAF50),
-                                            fontSize: 18)),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                          ],
                         ),
-                      );
-                    },
-                    child: const Padding(
-                      padding: EdgeInsets.only(top: 4),
-                      child: Text("...see more",
-                          style: TextStyle(
-                              color: Color(0xFF4CAF50),
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold)),
+                      ),
                     ),
-                  ),
-              ],
-            ),
-          );
-        }
 
-        // ====================== IMAGE GIST (unchanged) ======================
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 32.0),
-          child: Column(
-            children: [
-              // CAROUSEL IMAGE AREA
-              SizedBox(
-                height: MediaQuery.of(context).size.height * 0.36,
-                width: MediaQuery.of(context).size.width * 0.85,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(24),
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                          child: Container(
-                              color: _isDarkMode
-                                  ? Colors.grey[750]
-                                  : Colors.grey[300])),
-                      imagesToShow.isEmpty
-                          ? Container(
-                              color: _isDarkMode
-                                  ? Colors.grey[750]
-                                  : Colors.grey[300])
-                          : PageView.builder(
-                              itemCount: imagesToShow.length,
-                              onPageChanged: (page) {
-                                setState(() => currentPage = page);
-                              },
-                              itemBuilder: (context, i) {
-                                return CachedNetworkImage(
-                                  imageUrl: imagesToShow[i],
-                                  fit: BoxFit.cover,
-                                  placeholder: (_, __) => const Center(
-                                      child: CircularProgressIndicator()),
-                                  errorWidget: (_, __, ___) =>
-                                      const Icon(Icons.broken_image, size: 50),
-                                );
-                              },
-                            ),
-                      if (imagesToShow.length > 1)
-                        Positioned(
-                          top: 12,
-                          left: 12,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.7),
-                                borderRadius: BorderRadius.circular(20)),
-                            child: Text(
-                              "${currentPage + 1}/${imagesToShow.length}",
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 14,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                      // Zoom + Download gesture
+                    if (fullTitle.length > 100)
                       GestureDetector(
                         onTap: () {
-                          if (imagesToShow.isNotEmpty) {
-                            showDialog(
-                              context: context,
-                              builder: (context) => Dialog(
-                                backgroundColor: Colors.black,
-                                insetPadding: EdgeInsets.zero,
-                                child: Stack(
+                          showModalBottomSheet(
+                            context: context,
+                            isScrollControlled: true,
+                            backgroundColor: Colors.transparent,
+                            builder: (context) => DraggableScrollableSheet(
+                              initialChildSize: 0.55,
+                              minChildSize: 0.4,
+                              maxChildSize: 0.9,
+                              expand: false,
+                              builder: (_, scrollController) => Container(
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFF1E1E1E),
+                                  borderRadius: BorderRadius.vertical(
+                                      top: Radius.circular(24)),
+                                ),
+                                child: ListView(
+                                  controller: scrollController,
+                                  padding: const EdgeInsets.all(24),
                                   children: [
-                                    PageView.builder(
-                                      itemCount: imagesToShow.length,
-                                      itemBuilder: (context, i) =>
-                                          InteractiveViewer(
-                                        panEnabled: true,
-                                        minScale: 0.5,
-                                        maxScale: 4.0,
-                                        child: CachedNetworkImage(
-                                            imageUrl: imagesToShow[i],
-                                            fit: BoxFit.contain),
-                                      ),
+                                    const Text("Full Gist Title",
+                                        style: TextStyle(
+                                            fontSize: 22,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.white),
+                                        textAlign: TextAlign.center),
+                                    const SizedBox(height: 16),
+                                    Text(
+                                      fullTitle.replaceAll('\\n', '\n'),
+                                      style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 16,
+                                          height: 1.5),
                                     ),
-                                    Positioned(
-                                      top: 40,
-                                      right: 20,
-                                      child: IconButton(
-                                        icon: const Icon(Icons.close,
-                                            color: Colors.white, size: 30),
+                                    const SizedBox(height: 32),
+                                    Align(
+                                      alignment: Alignment.center,
+                                      child: TextButton(
                                         onPressed: () => Navigator.pop(context),
+                                        child: const Text('Close',
+                                            style: TextStyle(
+                                                color: Color(0xFF4CAF50),
+                                                fontSize: 18)),
                                       ),
                                     ),
                                   ],
                                 ),
                               ),
-                            );
-                          }
+                            ),
+                          );
                         },
-                        onLongPress: () => _downloadGistImage(
-                            imagesToShow.isNotEmpty
-                                ? imagesToShow.first
-                                : imageUrl),
+                        child: const Padding(
+                          padding: EdgeInsets.only(top: 4),
+                          child: Text("...see more",
+                              style: TextStyle(
+                                  color: Color(0xFF4CAF50),
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold)),
+                        ),
                       ),
-                      // Link button
-                      if (gistUrl.isNotEmpty)
-                        Positioned(
-                          top: 12,
-                          right: 12,
-                          child: Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(30),
-                              onTap: () async {
-                                final uri = Uri.tryParse(gistUrl);
-                                if (uri != null && await canLaunchUrl(uri)) {
-                                  await launchUrl(uri,
-                                      mode: LaunchMode.externalApplication);
-                                }
-                              },
+                  ],
+                ),
+              );
+            }
+
+            // ====================== IMAGE GIST ======================
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 32.0),
+              child: Column(
+                children: [
+                  // CAROUSEL IMAGE AREA
+                  SizedBox(
+                    height: MediaQuery.of(context).size.height * 0.36,
+                    width: MediaQuery.of(context).size.width * 0.85,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(24),
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
                               child: Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: const BoxDecoration(
-                                    color: Colors.black54,
-                                    shape: BoxShape.circle),
-                                child: const Icon(Icons.link,
-                                    size: 24, color: Colors.white),
+                                  color: _isDarkMode
+                                      ? Colors.grey[750]
+                                      : Colors.grey[300])),
+                          imagesToShow.isEmpty
+                              ? Container(
+                                  color: _isDarkMode
+                                      ? Colors.grey[750]
+                                      : Colors.grey[300])
+                              : PageView.builder(
+                                  itemCount: imagesToShow.length,
+                                  onPageChanged: (page) {
+                                    setState(() => currentPage = page);
+                                  },
+                                  itemBuilder: (context, i) {
+                                    return CachedNetworkImage(
+                                      imageUrl: imagesToShow[i],
+                                      fit: BoxFit.cover,
+                                      placeholder: (_, __) => const Center(
+                                          child: CircularProgressIndicator()),
+                                      errorWidget: (_, __, ___) => const Icon(
+                                          Icons.broken_image,
+                                          size: 50),
+                                    );
+                                  },
+                                ),
+                          if (imagesToShow.length > 1)
+                            Positioned(
+                              top: 12,
+                              left: 12,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 4),
+                                decoration: BoxDecoration(
+                                    color: Colors.black.withOpacity(0.7),
+                                    borderRadius: BorderRadius.circular(20)),
+                                child: Text(
+                                  "${currentPage + 1}/${imagesToShow.length}",
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          // Zoom + Download gesture
+                          GestureDetector(
+                            onTap: () {
+                              if (imagesToShow.isNotEmpty) {
+                                showDialog(
+                                  context: context,
+                                  builder: (context) => Dialog(
+                                    backgroundColor: Colors.black,
+                                    insetPadding: EdgeInsets.zero,
+                                    child: Stack(
+                                      children: [
+                                        PageView.builder(
+                                          itemCount: imagesToShow.length,
+                                          itemBuilder: (context, i) =>
+                                              InteractiveViewer(
+                                            panEnabled: true,
+                                            minScale: 0.5,
+                                            maxScale: 4.0,
+                                            child: CachedNetworkImage(
+                                                imageUrl: imagesToShow[i],
+                                                fit: BoxFit.contain),
+                                          ),
+                                        ),
+                                        Positioned(
+                                          top: 40,
+                                          right: 20,
+                                          child: IconButton(
+                                            icon: const Icon(Icons.close,
+                                                color: Colors.white, size: 30),
+                                            onPressed: () =>
+                                                Navigator.pop(context),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                            onLongPress: () => _downloadGistImage(
+                                imagesToShow.isNotEmpty
+                                    ? imagesToShow.first
+                                    : imageUrl),
+                          ),
+                          // Link button
+                          if (gistUrl.isNotEmpty)
+                            Positioned(
+                              top: 12,
+                              right: 12,
+                              child: Material(
+                                color: Colors.transparent,
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(30),
+                                  onTap: () async {
+                                    final uri = Uri.tryParse(gistUrl);
+                                    if (uri != null &&
+                                        await canLaunchUrl(uri)) {
+                                      await launchUrl(uri,
+                                          mode: LaunchMode.externalApplication);
+                                    }
+                                  },
+                                  child: Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: const BoxDecoration(
+                                        color: Colors.black54,
+                                        shape: BoxShape.circle),
+                                    child: const Icon(Icons.link,
+                                        size: 24, color: Colors.white),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          // Like button
+                          Positioned(
+                            bottom: 12,
+                            right: 12,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  vertical: 8, horizontal: 8),
+                              decoration: BoxDecoration(
+                                  color: Colors.black45,
+                                  borderRadius: BorderRadius.circular(20)),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    onPressed: () => _toggleGistLike(gistId),
+                                    icon: Icon(
+                                        isLiked
+                                            ? Icons.favorite
+                                            : Icons.favorite_border,
+                                        color:
+                                            isLiked ? Colors.red : Colors.white,
+                                        size: 28),
+                                  ),
+                                  Text(likeCount.toString(),
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.bold)),
+                                ],
                               ),
                             ),
                           ),
-                        ),
-                      // Like button
-                      Positioned(
-                        bottom: 12,
-                        right: 12,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 8, horizontal: 8),
-                          decoration: BoxDecoration(
-                              color: Colors.black45,
-                              borderRadius: BorderRadius.circular(20)),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                padding: EdgeInsets.zero,
-                                constraints: const BoxConstraints(),
-                                onPressed: () => _toggleGistLike(gistId),
-                                icon: Icon(
-                                    isLiked
-                                        ? Icons.favorite
-                                        : Icons.favorite_border,
-                                    color: isLiked ? Colors.red : Colors.white,
-                                    size: 28),
-                              ),
-                              Text(likeCount.toString(),
-                                  style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                        ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 12),
+                  // Username + Title
+                  GestureDetector(
+                    onTap: () =>
+                        _showProfileCard(username ?? '', avatarUrl, bio),
+                    child: RichText(
+                      textAlign: TextAlign.center,
+                      text: TextSpan(
+                        style: const TextStyle(
+                            fontFamily: 'SanFrancisco', fontSize: 18),
+                        children: [
+                          TextSpan(
+                              text: username != null ? "@$username" : '',
+                              style: TextStyle(
+                                  color: themeColor,
+                                  fontWeight: FontWeight.bold)),
+                          TextSpan(
+                              text: username != null ? ": " : "",
+                              style: TextStyle(
+                                  color: themeColor,
+                                  fontWeight: FontWeight.bold)),
+                          TextSpan(
+                            text: fullTitle.length > 100
+                                ? "${fullTitle.substring(0, 100)}..."
+                                : fullTitle,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  // "...see more"
+                  if (fullTitle.length > 100)
+                    GestureDetector(
+                      onTap: () {
+                        showModalBottomSheet(
+                          context: context,
+                          isScrollControlled: true,
+                          backgroundColor: Colors.transparent,
+                          builder: (context) => DraggableScrollableSheet(
+                            initialChildSize: 0.55,
+                            minChildSize: 0.4,
+                            maxChildSize: 0.9,
+                            expand: false,
+                            builder: (_, scrollController) => Container(
+                              decoration: const BoxDecoration(
+                                color: Color(0xFF1E1E1E),
+                                borderRadius: BorderRadius.vertical(
+                                    top: Radius.circular(24)),
+                              ),
+                              child: ListView(
+                                controller: scrollController,
+                                padding: const EdgeInsets.all(24),
+                                children: [
+                                  const Text(
+                                    "Full Gist Title",
+                                    style: TextStyle(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    fullTitle.replaceAll('\\n', '\n'),
+                                    style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 16,
+                                        height: 1.5),
+                                  ),
+                                  const SizedBox(height: 32),
+                                  Align(
+                                    alignment: Alignment.center,
+                                    child: TextButton(
+                                      onPressed: () => Navigator.pop(context),
+                                      child: const Text('Close',
+                                          style: TextStyle(
+                                              color: Color(0xFF4CAF50),
+                                              fontSize: 18)),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text("...see more",
+                            style: TextStyle(
+                                color: Color(0xFF4CAF50),
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold)),
+                      ),
+                    ),
+                ],
               ),
-              const SizedBox(height: 12),
-              // Username + Title
-              GestureDetector(
-                onTap: () => _showProfileCard(username ?? '', avatarUrl, bio),
-                child: RichText(
-                  textAlign: TextAlign.center,
-                  text: TextSpan(
-                    style: const TextStyle(
-                        fontFamily: 'SanFrancisco', fontSize: 18),
-                    children: [
-                      TextSpan(
-                          text: username != null ? "@$username" : '',
-                          style: TextStyle(
-                              color: themeColor, fontWeight: FontWeight.bold)),
-                      TextSpan(
-                          text: username != null ? ": " : "",
-                          style: TextStyle(
-                              color: themeColor, fontWeight: FontWeight.bold)),
-                      TextSpan(
-                        text: fullTitle.length > 100
-                            ? "${fullTitle.substring(0, 100)}..."
-                            : fullTitle,
-                        style: const TextStyle(color: Colors.white),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              // "...see more"
-              if (fullTitle.length > 100)
-                GestureDetector(
-                  onTap: () {
-                    showModalBottomSheet(
-                      context: context,
-                      isScrollControlled: true,
-                      backgroundColor: Colors.transparent,
-                      builder: (context) => DraggableScrollableSheet(
-                        initialChildSize: 0.55,
-                        minChildSize: 0.4,
-                        maxChildSize: 0.9,
-                        expand: false,
-                        builder: (_, scrollController) => Container(
-                          decoration: const BoxDecoration(
-                            color: Color(0xFF1E1E1E),
-                            borderRadius:
-                                BorderRadius.vertical(top: Radius.circular(24)),
-                          ),
-                          child: ListView(
-                            controller: scrollController,
-                            padding: const EdgeInsets.all(24),
-                            children: [
-                              const Text(
-                                "Full Gist Title",
-                                style: TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white),
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: 16),
-                              Text(
-                                fullTitle.replaceAll('\\n', '\n'),
-                                style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 16,
-                                    height: 1.5),
-                              ),
-                              const SizedBox(height: 32),
-                              Align(
-                                alignment: Alignment.center,
-                                child: TextButton(
-                                  onPressed: () => Navigator.pop(context),
-                                  child: const Text('Close',
-                                      style: TextStyle(
-                                          color: Color(0xFF4CAF50),
-                                          fontSize: 18)),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                  child: const Padding(
-                    padding: EdgeInsets.only(top: 4),
-                    child: Text("...see more",
-                        style: TextStyle(
-                            color: Color(0xFF4CAF50),
-                            fontSize: 15,
-                            fontWeight: FontWeight.bold)),
-                  ),
-                ),
-            ],
-          ),
-        );
-      },
+            );
+          },
+          childCount: filteredGists.length,
+        ),
+      ),
     );
   }
 
@@ -1450,10 +1641,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 color: Colors.white, size: 30),
           ),
           onPressed: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Message Chatbot coming soon! 💬'),
-                backgroundColor: Color(0xFF4CAF50),
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ChatListScreen(userPreferences: _prefs),
               ),
             );
           },
@@ -1618,7 +1809,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
 
                         // --- Section 3: Gists list ---
-                        SliverToBoxAdapter(child: _buildGistSlideshow()),
+                        _buildGistSlideshow(),
                       ],
                     ),
                   ),

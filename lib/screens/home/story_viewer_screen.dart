@@ -1,5 +1,6 @@
 // lib/screens/home/story_viewer_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -79,49 +80,57 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   }
 
   // === REPLACE YOUR _playCurrentStory METHOD WITH THIS ===
-  void _playCurrentStory() {
+  // Replace these two methods to combine Caching + Navigation fix
+  Future<void> _playCurrentStory() async {
     _videoController?.removeListener(_videoProgressListener);
     _videoController?.dispose();
     _videoController = null;
 
     final story = _sortedStories[_currentIndex];
-    if (story['media_type'] == 'video') {
-      // Use preloaded controller if available → instant play, no blank/loading
+    final url = story['media_url'] ?? '';
+
+    if (story['media_type'] == 'video' && url.isNotEmpty) {
       if (_preloadedIndex == _currentIndex && _preloadedController != null) {
         _videoController = _preloadedController;
         _preloadedController = null;
         _preloadedIndex = null;
-        if (!_isPaused) {
-          _videoController!.play();
-        }
       } else {
-        // Fallback (first story or going backwards)
-        _videoController = VideoPlayerController.network(story['media_url'])
-          ..initialize().then((_) {
-            if (mounted && !_isPaused) _videoController!.play();
-          });
+        // Use cache for fallback or backward navigation
+        var fileInfo = await DefaultCacheManager().getFileFromCache(url);
+        if (fileInfo != null) {
+          _videoController = VideoPlayerController.file(fileInfo.file);
+        } else {
+          _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
+          DefaultCacheManager().downloadFile(url);
+        }
+        await _videoController!.initialize();
       }
+
+      if (mounted && !_isPaused) _videoController!.play();
+      _videoController!.addListener(_videoProgressListener);
     }
 
-    // Preload the NEXT story’s video right now (this is what removes the break)
     _preloadNext();
+    if (mounted) setState(() {});
   }
 
-  // === ADD THIS NEW METHOD (place it right after _playCurrentStory) ===
-  void _preloadNext() {
-    // Clean up old preload
+  void _preloadNext() async {
     _preloadedController?.dispose();
     _preloadedController = null;
     _preloadedIndex = null;
 
     if (_currentIndex + 1 >= _sortedStories.length) return;
-
     final nextStory = _sortedStories[_currentIndex + 1];
-    if (nextStory['media_type'] != 'video') return;
+    final nextUrl = nextStory['media_url'] ?? '';
 
-    _preloadedIndex = _currentIndex + 1;
-    _preloadedController = VideoPlayerController.network(nextStory['media_url'])
-      ..initialize(); // ready in advance
+    if (nextStory['media_type'] == 'video') {
+      _preloadedIndex = _currentIndex + 1;
+      var fileInfo = await DefaultCacheManager().downloadFile(nextUrl);
+      _preloadedController = VideoPlayerController.file(fileInfo.file);
+      await _preloadedController!.initialize();
+    } else {
+      precacheImage(NetworkImage(nextUrl), context);
+    }
   }
 
   void _startProgressForCurrentStory() {
@@ -251,15 +260,20 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       final position = controller.value.position;
       final duration = controller.value.duration;
 
-      // Update progress bar
+      // Calculate progress for the bar
       final progress = position.inMilliseconds /
           duration.inMilliseconds.clamp(1, double.infinity);
-      setState(() => _progressValues[_currentIndex] = progress.clamp(0.0, 1.0));
 
-      // Trigger next story exactly when video ends
+      if (mounted) {
+        setState(
+            () => _progressValues[_currentIndex] = progress.clamp(0.0, 1.0));
+      }
+
+      // Trigger next story when video ends
       if (duration.inMilliseconds > 0 && position >= duration) {
-        _isTransitioning = true;
-        controller.removeListener(_videoProgressListener);
+        _isTransitioning =
+            true; // Mark as transitioning to prevent multiple triggers
+        controller.removeListener(_videoProgressListener); // Clean up
         _goToNextStory();
       }
     }
@@ -619,6 +633,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             controller: _pageController,
             onPageChanged: (index) {
               setState(() => _currentIndex = index);
+              _isTransitioning = false;
               _playCurrentStory();
               _startProgressForCurrentStory();
               _markStoryAsViewed(index);
