@@ -483,7 +483,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
       if (!mounted) return;
 
-      Navigator.pop(context);
+      Navigator.pop(context); // close preview
 
       Navigator.push(
         context,
@@ -492,6 +492,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
             chatId: chatId,
             chatTitle: group['group_name'] ?? 'Group Chat',
             isGroup: true,
+            isAdmin: false,
+            userPreferences: widget.userPreferences, // ← THIS WAS MISSING
           ),
         ),
       );

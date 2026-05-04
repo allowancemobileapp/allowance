@@ -1,4 +1,5 @@
 // lib/screens/chat/chat_list_screen.dart
+import 'package:allowance/screens/chat/chat_room_screen.dart';
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:allowance/screens/chat/create_group_screen.dart';
 import 'package:allowance/screens/chat/explore_screen.dart';
@@ -291,6 +292,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                     tabIndex: _selectedTabIndex,
                                     themeColor: themeColor,
                                     userPreferences: widget.userPreferences,
+                                    isAdmin: false,
                                   );
                                 },
                               );
@@ -345,6 +347,7 @@ class _ChatTile extends StatefulWidget {
   final int tabIndex;
   final Color themeColor;
   final UserPreferences userPreferences;
+  final bool isAdmin;
 
   const _ChatTile({
     super.key,
@@ -353,6 +356,7 @@ class _ChatTile extends StatefulWidget {
     required this.tabIndex,
     required this.themeColor,
     required this.userPreferences,
+    required this.isAdmin,
   });
 
   @override
@@ -523,10 +527,13 @@ class _ChatTileState extends State<_ChatTile> {
 
     final title = _metaData?['title'] ?? "Chat";
     final avatarUrl = _metaData?['avatar_url'];
-    final isGroup = widget.chat['is_group'] == true;
     final chatId = widget.chat['id'];
     final hasStory = _metaData?['has_story'] == true;
     final isPlus = _metaData?['is_plus'] == true;
+
+    // FIX: Robust isGroup check handles both boolean true and integer 1
+    final dynamic isGroupRaw = widget.chat['is_group'];
+    final bool isGroup = isGroupRaw == true || isGroupRaw == 1;
 
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: supabase
@@ -556,23 +563,47 @@ class _ChatTileState extends State<_ChatTile> {
             bool isTyping = participants.any(
                 (p) => p['user_id'] != widget.myId && p['is_typing'] == true);
 
+            // Calculate Admin status specifically for THIS chat
+            final myParticipant = participants.firstWhere(
+              (p) => p['user_id'] == widget.myId,
+              orElse: () => <String, dynamic>{},
+            );
+            final bool localIsAdmin = myParticipant['role'] == 'admin' ||
+                myParticipant['is_admin'] == true;
+
             return ListTile(
               onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => IndividualChatScreen(
-                      chatId: chatId,
-                      recipientProfile: {
-                        'id': _targetUserId,
-                        'username': title,
-                        'avatar_url': avatarUrl,
-                        'school_name': _metaData?['school_name'],
-                        'is_group': isGroup,
-                      },
+                if (isGroup) {
+                  // Navigate to Group Chat Room
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => ChatRoomScreen(
+                        chatId: chatId,
+                        chatTitle: title,
+                        isAdmin: localIsAdmin,
+                        userPreferences: widget.userPreferences,
+                      ),
                     ),
-                  ),
-                );
+                  );
+                } else {
+                  // Navigate to Individual Chat
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => IndividualChatScreen(
+                        chatId: chatId,
+                        recipientProfile: {
+                          'id': _targetUserId,
+                          'username': title,
+                          'avatar_url': avatarUrl,
+                          'school_name': _metaData?['school_name'],
+                          'is_group': false,
+                        },
+                      ),
+                    ),
+                  );
+                }
               },
               contentPadding:
                   const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -584,9 +615,8 @@ class _ChatTileState extends State<_ChatTile> {
                   decoration: hasStory
                       ? BoxDecoration(
                           shape: BoxShape.circle,
-                          border: Border.all(
-                              color: widget.themeColor,
-                              width: 2), // The Story Ring
+                          border:
+                              Border.all(color: widget.themeColor, width: 2),
                         )
                       : null,
                   child: CircleAvatar(
@@ -621,7 +651,7 @@ class _ChatTileState extends State<_ChatTile> {
                         if (isPlus) ...[
                           const SizedBox(width: 4),
                           const Icon(Icons.stars,
-                              color: Colors.amber, size: 16), // The Plus Star
+                              color: Colors.amber, size: 16),
                         ],
                       ],
                     ),

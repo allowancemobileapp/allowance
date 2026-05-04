@@ -10,7 +10,21 @@ import '../../models/user_preferences.dart';
 
 class CreateGroupScreen extends StatefulWidget {
   final UserPreferences userPreferences;
-  const CreateGroupScreen({super.key, required this.userPreferences});
+  final bool isEdit; // ← NEW
+  final String? chatId; // ← NEW
+  final String? initialName; // ← NEW
+  final String? initialAvatarUrl; // ← NEW
+  final String? initialDescription; // ← NEW
+
+  const CreateGroupScreen({
+    super.key,
+    required this.userPreferences,
+    this.isEdit = false,
+    this.chatId,
+    this.initialName,
+    this.initialAvatarUrl,
+    this.initialDescription,
+  });
 
   @override
   State<CreateGroupScreen> createState() => _CreateGroupScreenState();
@@ -46,7 +60,53 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
   @override
   void initState() {
     super.initState();
+    if (widget.isEdit) {
+      _loadExistingGroupData();
+    }
     _fetchFriends();
+  }
+
+  Future<void> _loadExistingGroupData() async {
+    if (widget.chatId == null) return;
+
+    try {
+      final groupData = await _supabase
+          .from('chats')
+          .select(
+              'group_name, group_description, group_avatar, rules, is_public')
+          .eq('id', widget.chatId!)
+          .single();
+
+      // Load existing participants
+      final participants = await _supabase
+          .from('chat_participants')
+          .select('user_id')
+          .eq('chat_id', widget.chatId!);
+
+      setState(() {
+        _nameController.text = groupData['group_name'] ?? '';
+        _descController.text = groupData['group_description'] ?? '';
+        _isPublic = groupData['is_public'] ?? true;
+
+        // Pre-select existing members
+        _selectedUserIds.clear();
+        for (var p in participants) {
+          _selectedUserIds.add(p['user_id'].toString());
+        }
+
+        // Load Rules
+        final rules = groupData['rules'] as Map<String, dynamic>? ?? {};
+        _onlyAdminsChat = rules['only_admins_chat'] ?? false;
+        _allowShareLink = rules['share_link'] ?? false;
+        _allowPhotos = rules['photos'] ?? true;
+        _allowVideos = rules['videos'] ?? true;
+        _allowLinks = rules['links'] ?? true;
+        _allowFiles = rules['files'] ?? true;
+        _timeLock = rules['time_lock'] ?? false;
+      });
+    } catch (e) {
+      debugPrint("Failed to load existing group data: $e");
+    }
   }
 
   @override
@@ -58,22 +118,32 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
   Future<void> _fetchFriends() async {
     final myId = _supabase.auth.currentUser?.id;
+    if (myId == null) {
+      setState(() => _isLoading = false);
+      return;
+    }
+
     try {
-      // Fetch only people YOU follow (Friends)
+      // Simplified + more reliable query
       final friendsData = await _supabase
-          .from('followers')
-          .select(
-              'following_id, profiles!followers_following_id_fkey(id, username, avatar_url, school_name)')
-          .eq('follower_id', myId!);
+          .from('profiles')
+          .select('id, username, avatar_url, school_name')
+          .inFilter(
+              'id',
+              await _supabase
+                  .from('followers')
+                  .select('following_id')
+                  .eq('follower_id', myId)
+                  .then((res) =>
+                      res.map((r) => r['following_id'].toString()).toList()));
 
       setState(() {
-        _friends = friendsData
-            .map<Map<String, dynamic>>(
-                (f) => f['profiles'] as Map<String, dynamic>)
-            .toList();
+        _friends = List<Map<String, dynamic>>.from(friendsData);
+        debugPrint("✅ Fetched ${_friends.length} friends successfully");
         _isLoading = false;
       });
     } catch (e) {
+      debugPrint("Fetch friends error: $e");
       if (mounted) setState(() => _isLoading = false);
     }
   }
@@ -141,10 +211,8 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
     final myId = _supabase.auth.currentUser!.id;
 
     try {
-      // 1. Upload Avatar if selected
       final avatarUrl = await _uploadAvatar();
 
-      // 2. Format Rules JSON
       final rules = {
         "only_admins_chat": _onlyAdminsChat,
         "share_link": _allowShareLink,
@@ -161,52 +229,103 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
             : null,
       };
 
-      // 3. Create the Chat Entry
-      final chat = await _supabase
-          .from('chats')
-          .insert({
-            'is_group': true,
-            'is_public': _isPublic,
-            'group_name': _nameController.text.trim(),
-            'group_description': _descController.text.trim(),
-            'group_avatar': avatarUrl,
-            'admin_id': myId,
-            'rules': rules,
-          })
-          .select()
-          .single();
+      if (widget.isEdit && widget.chatId != null) {
+        // === EDIT MODE ===
+        final response = await _supabase
+            .from('chats')
+            .update({
+              'group_name': _nameController.text.trim(),
+              'group_description': _descController.text.trim(),
+              'group_avatar': avatarUrl ?? widget.initialAvatarUrl,
+              'rules': rules,
+              'updated_at': DateTime.now().toUtc().toIso8601String(),
+            })
+            .eq('id', widget.chatId!)
+            .select();
 
-      final chatId = chat['id'];
+        // Add only NEW members (avoid duplicate key error)
+        if (_selectedUserIds.isNotEmpty) {
+          // Get current members
+          final currentMembers = await _supabase
+              .from('chat_participants')
+              .select('user_id')
+              .eq('chat_id', widget.chatId!);
 
-      // 4. Prepare Participants (Selected friends + Yourself as Admin)
-      final List<Map<String, dynamic>> participants = _selectedUserIds
-          .map((id) => {
-                'chat_id': chatId,
-                'user_id': id,
-                'role': 'member',
-              })
-          .toList();
+          final existingIds =
+              currentMembers.map((m) => m['user_id'].toString()).toSet();
 
-      participants.add({
-        'chat_id': chatId,
-        'user_id': myId,
-        'role': 'admin',
-      });
+          // Filter only new users
+          final newParticipants = _selectedUserIds
+              .where((id) => !existingIds.contains(id))
+              .map((id) => {
+                    'chat_id': widget.chatId!,
+                    'user_id': id,
+                    'role': 'member',
+                  })
+              .toList();
 
-      // 5. Insert all participants
-      await _supabase.from('chat_participants').insert(participants);
+          if (newParticipants.isNotEmpty) {
+            await _supabase.from('chat_participants').insert(newParticipants);
+          }
+        }
 
-      if (mounted) {
-        Navigator.pop(context); // Go back to chat list
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text("Group created successfully!"),
-            backgroundColor: Colors.green));
+        debugPrint("Edit Response: $response");
+
+        if (mounted) {
+          Navigator.pop(context, true);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text("Group updated successfully!"),
+                backgroundColor: Colors.green),
+          );
+        }
+      } else {
+        // === CREATE MODE ===
+        final chat = await _supabase
+            .from('chats')
+            .insert({
+              'is_group': true,
+              'is_public': _isPublic,
+              'group_name': _nameController.text.trim(),
+              'group_description': _descController.text.trim(),
+              'group_avatar': avatarUrl,
+              'admin_id': myId,
+              'rules': rules,
+            })
+            .select()
+            .single();
+
+        final chatId = chat['id'];
+
+        final List<Map<String, dynamic>> participants = _selectedUserIds
+            .map((id) => {
+                  'chat_id': chatId,
+                  'user_id': id,
+                  'role': 'member',
+                })
+            .toList();
+
+        participants.add({
+          'chat_id': chatId,
+          'user_id': myId,
+          'role': 'admin',
+        });
+
+        await _supabase.from('chat_participants').insert(participants);
+
+        if (mounted) {
+          Navigator.pop(context, true);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text("Group created successfully!"),
+              backgroundColor: Colors.green));
+        }
       }
     } catch (e) {
       debugPrint("Group Error: $e");
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Error: $e"), backgroundColor: Colors.red));
+      }
     } finally {
       if (mounted) setState(() => _isCreating = false);
     }
@@ -268,7 +387,10 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.grey[900],
-        title: const Text("New Group", style: TextStyle(color: Colors.white)),
+        title: Text(
+          widget.isEdit ? "Edit Group" : "New Group",
+          style: const TextStyle(color: Colors.white),
+        ),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           if (_isCreating)
@@ -283,9 +405,11 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
           else
             TextButton(
               onPressed: _createGroup,
-              child: const Text("CREATE",
-                  style: TextStyle(
-                      fontWeight: FontWeight.bold, color: Color(0xFF4CAF50))),
+              child: Text(
+                widget.isEdit ? "SAVE CHANGES" : "CREATE",
+                style: const TextStyle(
+                    fontWeight: FontWeight.bold, color: Color(0xFF4CAF50)),
+              ),
             ),
         ],
       ),
@@ -478,30 +602,57 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                 const SizedBox(height: 24),
 
                 // ADD FRIENDS
-                Text("Add Friends (${_selectedUserIds.length} selected)",
-                    style: const TextStyle(
+                // ADD FRIENDS
+                const Text("Add Friends",
+                    style: TextStyle(
                         color: Color(0xFF4CAF50),
                         fontWeight: FontWeight.bold,
                         fontSize: 16)),
                 const SizedBox(height: 8),
+
+                // Search Bar
+                TextField(
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: "Search friends...",
+                    hintStyle: const TextStyle(color: Colors.white54),
+                    prefixIcon: const Icon(Icons.search, color: Colors.white54),
+                    filled: true,
+                    fillColor: Colors.grey[850],
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                  onChanged: (value) {
+                    // You can add filtering logic here later if needed
+                  },
+                ),
+                const SizedBox(height: 12),
+
                 Container(
                   decoration: BoxDecoration(
                       color: Colors.grey[900],
                       borderRadius: BorderRadius.circular(12)),
                   child: _friends.isEmpty
-                      ? const Padding(
-                          padding: EdgeInsets.all(24),
+                      ? Padding(
+                          padding: const EdgeInsets.all(24),
                           child: Center(
-                              child: Text("You don't follow anyone yet.",
-                                  style: TextStyle(color: Colors.white54))))
+                            child: Text(
+                                "You don't follow anyone yet. (${_friends.length} loaded)",
+                                style: const TextStyle(color: Colors.white54)),
+                          ),
+                        )
                       : ListView.builder(
                           shrinkWrap: true,
                           physics: const NeverScrollableScrollPhysics(),
                           itemCount: _friends.length,
                           itemBuilder: (context, index) {
                             final user = _friends[index];
+                            final userId = user['id'].toString();
                             final isSelected =
-                                _selectedUserIds.contains(user['id']);
+                                _selectedUserIds.contains(userId);
+
                             return CheckboxListTile(
                               title: Text(user['username'] ?? "User",
                                   style: const TextStyle(color: Colors.white)),
@@ -524,9 +675,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                               onChanged: (val) {
                                 setState(() {
                                   if (val == true) {
-                                    _selectedUserIds.add(user['id']);
+                                    _selectedUserIds.add(userId);
                                   } else {
-                                    _selectedUserIds.remove(user['id']);
+                                    _selectedUserIds.remove(userId);
                                   }
                                 });
                               },

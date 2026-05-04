@@ -30,6 +30,10 @@ class UserPreferences {
 
   UserPreferences();
 
+  bool get autoDownloadMedia => preferences['auto_download_media'] ?? true;
+  set autoDownloadMedia(bool value) =>
+      preferences['auto_download_media'] = value;
+
   Future<void> loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
 
