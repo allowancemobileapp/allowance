@@ -531,9 +531,11 @@ class _ChatTileState extends State<_ChatTile> {
     final hasStory = _metaData?['has_story'] == true;
     final isPlus = _metaData?['is_plus'] == true;
 
-    // FIX: Robust isGroup check handles both boolean true and integer 1
+    // FIX: Enhanced check to ensure it correctly identifies group vs individual
     final dynamic isGroupRaw = widget.chat['is_group'];
-    final bool isGroup = isGroupRaw == true || isGroupRaw == 1;
+    final bool isGroup = isGroupRaw == true ||
+        isGroupRaw == 1 ||
+        isGroupRaw.toString() == 'true';
 
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: supabase
@@ -563,7 +565,7 @@ class _ChatTileState extends State<_ChatTile> {
             bool isTyping = participants.any(
                 (p) => p['user_id'] != widget.myId && p['is_typing'] == true);
 
-            // Calculate Admin status specifically for THIS chat
+            // Calculate Admin status specifically for THIS chat[cite: 3]
             final myParticipant = participants.firstWhere(
               (p) => p['user_id'] == widget.myId,
               orElse: () => <String, dynamic>{},
@@ -574,7 +576,7 @@ class _ChatTileState extends State<_ChatTile> {
             return ListTile(
               onTap: () {
                 if (isGroup) {
-                  // Navigate to Group Chat Room
+                  // SUCCESS: Navigating to Group Chat Room with UI flags[cite: 3]
                   Navigator.push(
                     context,
                     MaterialPageRoute(
@@ -583,11 +585,14 @@ class _ChatTileState extends State<_ChatTile> {
                         chatTitle: title,
                         isAdmin: localIsAdmin,
                         userPreferences: widget.userPreferences,
+                        isGroup: true, // Tells the AppBar to use Group style
+                        creatorId: widget.chat['creator_id']
+                            ?.toString(), // Passes the creator for the admin menu
                       ),
                     ),
                   );
                 } else {
-                  // Navigate to Individual Chat
+                  // Navigate to Individual Chat[cite: 3]
                   Navigator.push(
                     context,
                     MaterialPageRoute(

@@ -25,6 +25,7 @@ class UserPreferences {
   int? age;
   String? bloodGroup;
   String? bio; // ← NEW: Bio field added
+  int get themeColorValue => preferences['themeColor'] ?? 0xFF00FF00;
 
   bool hasCompletedProfile = false;
 

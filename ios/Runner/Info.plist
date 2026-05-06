@@ -24,6 +24,13 @@
     <string>$(FLUTTER_BUILD_NUMBER)</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+
+    <!-- Required for url_launcher to open external web links -->
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>https</string>
+        <string>http</string>
+    </array>
     
     <key>NSPhotoLibraryUsageDescription</key>
     <string>We need access to your gallery so you can pick photos and videos for your stories.</string>
@@ -44,7 +51,7 @@
     </array>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
-        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientation portrait</string>
         <string>UIInterfaceOrientationPortraitUpsideDown</string>
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>

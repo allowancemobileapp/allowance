@@ -13,21 +13,25 @@ import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
+import 'package:flutter_linkify/flutter_linkify.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class ChatRoomScreen extends StatefulWidget {
   final String chatId;
   final String chatTitle;
-  final bool isGroup;
   final bool isAdmin;
-  final UserPreferences userPreferences; // ← ADD THIS
+  final UserPreferences userPreferences;
+  final bool isGroup; // ADD THIS
+  final String? creatorId; // ADD THIS
 
   const ChatRoomScreen({
     super.key,
     required this.chatId,
     required this.chatTitle,
-    required this.userPreferences, // ← Required
     required this.isAdmin,
-    this.isGroup = false,
+    required this.userPreferences,
+    this.isGroup = false, // ADD THIS
+    this.creatorId, // ADD THIS
   });
 
   @override
@@ -572,6 +576,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
   void _showChatMenu() {
+    // Extract rules from chat metadata
+    final rules = _chatMeta?['rules'] as Map<String, dynamic>? ?? {};
+    final bool allowShareLink = rules['share_link'] ?? false;
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -583,12 +591,14 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           children: [
             const SizedBox(height: 8),
             if (widget.isGroup) ...[
-              // RESTORED: Group Management for Creators
-              if (_isGroupCreator) ...[
+              if (_isGroupCreator)
                 _menuTile(Icons.edit, 'Edit Group', () async {
                   Navigator.pop(ctx);
                   await _editGroup();
                 }),
+
+              // Only show "Copy Link" if the group rule allows it
+              if (allowShareLink)
                 _menuTile(Icons.link, 'Copy Group Link', () async {
                   Navigator.pop(ctx);
                   final link = 'allowance://group/${widget.chatId}';
@@ -598,26 +608,19 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                         const SnackBar(content: Text('Group link copied!')));
                   }
                 }),
-              ],
 
-              _menuTile(Icons.info_outline, 'Group Info', () {
-                Navigator.pop(ctx);
-                // Navigate to info page logic here
-              }),
+              // "Group Info" removed as requested
 
-              _menuTile(Icons.logout, 'Leave Group', () async {
-                Navigator.pop(ctx);
-                final myId = supabase.auth.currentUser?.id;
-                if (myId == null) return;
-                await supabase.from('chat_participants').delete().match({
-                  'chat_id': widget.chatId,
-                  'user_id': myId,
-                });
-                if (mounted) Navigator.pop(context);
-              }),
+              _menuTile(
+                Icons.logout,
+                'Leave Group',
+                () {
+                  Navigator.pop(ctx); // Close menu
+                  _confirmLeaveGroup(); // Show confirmation
+                },
+                color: Colors.redAccent, // Red color to indicate seriousness
+              ),
             ],
-
-            // THE TOGGLE SECTION (Maintained)
             StatefulBuilder(
               builder: (context, setModalState) => ListTile(
                 leading: Icon(
@@ -626,22 +629,15 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                       : Icons.file_download,
                   color: const Color(0xFF4CAF50),
                 ),
-                title: const Text(
-                  'Auto-Download Media',
-                  style: TextStyle(color: Colors.white),
-                ),
+                title: const Text('Auto-Download Media',
+                    style: TextStyle(color: Colors.white)),
                 trailing: Switch(
                   value: widget.userPreferences.autoDownloadMedia,
                   activeColor: const Color(0xFF4CAF50),
                   onChanged: (val) async {
-                    // 1. Update the UI inside the Modal
                     setModalState(
                         () => widget.userPreferences.autoDownloadMedia = val);
-
-                    // 2. Update the main Chat Screen UI
                     setState(() {});
-
-                    // 3. Save to SharedPreferences and Supabase
                     await widget.userPreferences.savePreferences();
                   },
                 ),
@@ -654,11 +650,50 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     );
   }
 
+  Future<void> _confirmLeaveGroup() async {
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title:
+            const Text('Leave Group?', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Are you sure you want to leave? You will no longer be able to see new messages or participate in the conversation.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child:
+                const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('LEAVE',
+                style: TextStyle(
+                    color: Colors.redAccent, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return;
+      await supabase.from('chat_participants').delete().match({
+        'chat_id': widget.chatId,
+        'user_id': myId,
+      });
+      if (mounted) Navigator.pop(context); // Exit the chat room
+    }
+  }
+
 // Helper widget for clean code
-  Widget _menuTile(IconData icon, String title, VoidCallback onTap) {
+  Widget _menuTile(IconData icon, String title, VoidCallback onTap,
+      {Color? color}) {
     return ListTile(
-      leading: Icon(icon, color: Colors.white70),
-      title: Text(title, style: const TextStyle(color: Colors.white)),
+      leading: Icon(icon, color: color ?? Colors.white70),
+      title: Text(title, style: TextStyle(color: color ?? Colors.white)),
       onTap: onTap,
     );
   }
@@ -973,11 +1008,17 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   Widget _buildSingleMediaItem(String url, String mediaType,
       List<String> allUrls, int index, Map<String, dynamic> message,
       {double? height}) {
-    final String? thumbUrl = message['thumbnail_url'];
+    final String? thumbUrl = message['thumbnail_url']?.toString();
     final int? sizeInBytes = message['file_size_bytes'];
     final String sizeLabel = sizeInBytes != null
         ? "${(sizeInBytes / 1024 / 1024).toStringAsFixed(1)} MB"
         : "";
+
+    final bool isVideo = mediaType == 'video';
+
+    // FIX: Robust logic to ensure we always have a string to pass to the image loader
+    // If it's a video, we MUST use thumbUrl. If thumbUrl is missing, we check url.
+    final String? effectiveImageUrl = isVideo ? (thumbUrl ?? '') : url;
 
     return GestureDetector(
       onTap: () => _openFullScreen(allUrls, mediaType, index),
@@ -987,15 +1028,24 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           Container(
             constraints: BoxConstraints(maxHeight: height ?? 180),
             width: double.infinity,
-            child: CachedNetworkImage(
-              imageUrl:
-                  (mediaType == 'video' && thumbUrl != null) ? thumbUrl : url,
-              fit: BoxFit.cover,
-              placeholder: (context, url) => Container(color: Colors.grey[900]),
+            decoration: BoxDecoration(
+              color: Colors.grey[900],
+              borderRadius: BorderRadius.circular(8),
             ),
+            child: (effectiveImageUrl != null && effectiveImageUrl.isNotEmpty)
+                ? CachedNetworkImage(
+                    imageUrl: effectiveImageUrl,
+                    fit: BoxFit.cover,
+                    placeholder: (context, url) => const Center(
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Color(0xFF4CAF50)),
+                    ),
+                    errorWidget: (context, url, error) =>
+                        _buildErrorPlaceholder(isVideo),
+                  )
+                : _buildErrorPlaceholder(isVideo),
           ),
-          // WhatsApp-style Video/Size Overlay
-          if (mediaType == 'video')
+          if (isVideo)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
@@ -1021,6 +1071,29 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     );
   }
 
+  // Small helper to keep the UI clean when images fail
+  Widget _buildErrorPlaceholder(bool isVideo) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            isVideo
+                ? Icons.videocam_off_outlined
+                : Icons.image_not_supported_outlined,
+            color: Colors.white24,
+            size: 40,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            isVideo ? "Video Preview" : "Image error",
+            style: const TextStyle(color: Colors.white24, fontSize: 10),
+          )
+        ],
+      ),
+    );
+  }
+
   Widget _buildMediaWithOverlay(List<String> urls, String type, String time,
       bool isMe, bool isRead, Map<String, dynamic> message) {
     return Stack(
@@ -1035,15 +1108,45 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 // --- SUB-WIDGET: TEXT & TIME (For standard bubbles) ---
   Widget _buildTextAndTimestamp(
       String text, String time, bool isMe, bool isRead) {
+    // 1. Check if the group rules allow clickable links
+    final rules = _chatMeta?['rules'] as Map<String, dynamic>? ?? {};
+    final bool linksEnabled = rules['links'] ?? true;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(10, 4, 8, 4),
       child: Wrap(
         alignment: WrapAlignment.end,
         crossAxisAlignment: WrapCrossAlignment.end,
-        spacing: 12, // Horizontal gap
-        runSpacing: 2, // Vertical gap if it wraps
+        spacing: 12,
+        runSpacing: 2,
         children: [
-          Text(text, style: const TextStyle(color: Colors.white, fontSize: 15)),
+          // 2. Conditional Rendering: Linkify vs Standard Text
+          linksEnabled
+              ? Linkify(
+                  onOpen: (link) async {
+                    final Uri url = Uri.parse(link.url);
+                    if (await canLaunchUrl(url)) {
+                      await launchUrl(url,
+                          mode: LaunchMode.externalApplication);
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Could not open link')),
+                      );
+                    }
+                  },
+                  text: text,
+                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                  linkStyle: const TextStyle(
+                    color: Color(0xFF53BDEB), // Light blue for links
+                    decoration: TextDecoration.underline,
+                  ),
+                )
+              : Text(
+                  text,
+                  style: const TextStyle(color: Colors.white, fontSize: 15),
+                ),
+
+          // 3. Timestamp and Read Receipts[cite: 6]
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1107,17 +1210,27 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       itemCount: urls.length > 4 ? 4 : urls.length,
       itemBuilder: (context, index) {
         if (index == 3 && urls.length > 4) {
+          // FIX: Ensure the 4th item also uses the thumbnail logic
+          final isVideo = mediaType == 'video';
+          final String? thumbUrl = message['thumbnail_url']?.toString();
+          final String effectiveUrl = isVideo ? (thumbUrl ?? '') : urls[index];
+
           return GestureDetector(
             onTap: () => _openFullScreen(urls, mediaType, index),
             child: Stack(
               fit: StackFit.expand,
               children: [
-                CachedNetworkImage(
-                  imageUrl: urls[index],
-                  fit: BoxFit.cover,
-                  placeholder: (context, url) =>
-                      Container(color: Colors.grey[900]),
-                ),
+                if (effectiveUrl.isNotEmpty)
+                  CachedNetworkImage(
+                    imageUrl: effectiveUrl,
+                    fit: BoxFit.cover,
+                    placeholder: (context, url) =>
+                        Container(color: Colors.grey[900]),
+                    errorWidget: (ctx, url, err) =>
+                        _buildErrorPlaceholder(isVideo),
+                  )
+                else
+                  _buildErrorPlaceholder(isVideo),
                 Container(
                   color: Colors.black54,
                   alignment: Alignment.center,
@@ -1131,7 +1244,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
             ),
           );
         }
-        // FIXED: Passing 'message' as the 5th argument here
         return _buildSingleMediaItem(
             urls[index], mediaType, urls, index, message);
       },

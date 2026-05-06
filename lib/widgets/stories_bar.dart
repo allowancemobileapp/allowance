@@ -16,53 +16,58 @@ class StoriesBar extends StatefulWidget {
 }
 
 class StoriesBarState extends State<StoriesBar> {
-  late Future<List<dynamic>> _storiesFuture;
+  // 1. Remove 'late' and make it nullable to prevent the crash
+  Future<List<dynamic>>? _storiesFuture;
   late final RealtimeChannel _realtimeChannel;
 
   @override
   void initState() {
     super.initState();
-    _loadStories();
+    // 2. Assign the future IMMEDIATELY here
+    _storiesFuture = _loadStories();
     _setupRealtimeSubscription();
   }
 
+  // 3. Update refresh to re-assign the future
   void refresh() {
-    setState(() {
-      _loadStories();
-    });
+    if (mounted) {
+      setState(() {
+        _storiesFuture = _loadStories();
+      });
+    }
   }
 
   // Inside STORIES BAR.txt -> _loadStories()
-  void _loadStories() async {
-    // Add 'async' here
+  // Change 'void' to 'Future<List<dynamic>>'
+  Future<List<dynamic>> _loadStories() async {
     final supabase = Supabase.instance.client;
 
-    final response = await supabase
-        .from('stories')
-        .select('''
-          id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
-          profiles:user_id(username, avatar_url, school_name),
-          story_views!left(id)
-        ''')
-        .gt('expires_at', DateTime.now().toUtc().toIso8601String())
-        .order('created_at', ascending: false);
+    try {
+      final response = await supabase
+          .from('stories')
+          .select('''
+            id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
+            profiles:user_id(username, avatar_url, school_name),
+            story_views!left(id)
+          ''')
+          .gt('expires_at', DateTime.now().toUtc().toIso8601String())
+          .order('created_at', ascending: false);
 
-    // ==========================================
-    // ADD THIS: PRELOAD AVATARS
-    // ==========================================
-    // ignore: unnecessary_null_comparison
-    if (mounted && response != null) {
-      for (var story in response) {
-        final avatarUrl = story['profiles']?['avatar_url'] as String?;
-        if (avatarUrl != null && avatarUrl.isNotEmpty) {
-          precacheImage(NetworkImage(avatarUrl), context);
+      // Preload avatars
+      if (mounted && response != null) {
+        for (var story in response) {
+          final avatarUrl = story['profiles']?['avatar_url'] as String?;
+          if (avatarUrl != null && avatarUrl.isNotEmpty) {
+            precacheImage(NetworkImage(avatarUrl), context);
+          }
         }
       }
-    }
 
-    setState(() {
-      _storiesFuture = Future.value(response);
-    });
+      return response as List<dynamic>;
+    } catch (e) {
+      debugPrint("Error fetching stories: $e");
+      rethrow; // This allows FutureBuilder to catch the error
+    }
   }
 
   void _setupRealtimeSubscription() {

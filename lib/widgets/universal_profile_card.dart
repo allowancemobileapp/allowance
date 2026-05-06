@@ -38,6 +38,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   bool _isFollowing = false;
   List<dynamic> _memories = [];
   bool _isLoading = true;
+  int _followingCount = 0; // Added this
 
   @override
   void initState() {
@@ -48,42 +49,54 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   Future<void> _loadProfileData() async {
     final currentUserId = supabase.auth.currentUser?.id;
     if (currentUserId == null) return;
+
     try {
+      // We use the exact syntax you had when it worked
       final results = await Future.wait<dynamic>([
         supabase
             .from('profiles')
             .select()
             .eq('id', widget.targetUserId)
             .maybeSingle(),
+        // Followers Count
         supabase
             .from('followers')
             .select('*')
             .eq('following_id', widget.targetUserId)
             .count(CountOption.exact),
+        // Check if following
         supabase
             .from('followers')
             .select()
             .eq('follower_id', currentUserId)
             .eq('following_id', widget.targetUserId)
             .maybeSingle(),
+        // Memories Count
         supabase
             .from('memories')
             .select('*')
             .eq('user_id', widget.targetUserId)
             .count(CountOption.exact),
+        // Following Count (The new one)
+        supabase
+            .from('followers')
+            .select('*')
+            .eq('follower_id', widget.targetUserId)
+            .count(CountOption.exact),
       ]);
 
       final profileResp = results[0] as Map<String, dynamic>?;
       final followersResp = results[1] as PostgrestResponse;
-      final followingResp = results[2];
+      final followingStatusResp = results[2];
       final memoriesResp = results[3] as PostgrestResponse;
+      final followingCountResp = results[4] as PostgrestResponse;
 
       final isPrivate = profileResp?['is_private'] == true;
-      final isFollowingStatus = followingResp != null;
+      final isFollowingStatus = followingStatusResp != null;
       final isMe = currentUserId == widget.targetUserId;
 
       List<dynamic> fetchedMemories = [];
-      if (!isPrivate || isFollowingStatus || isMe) {
+      if (profileResp != null && (!isPrivate || isFollowingStatus || isMe)) {
         fetchedMemories = await supabase
             .from('memories')
             .select()
@@ -95,17 +108,120 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
       if (mounted) {
         setState(() {
           _profile = profileResp;
-          _followerCount = followersResp.count ?? 0;
-          _totalMemoriesCount = memoriesResp.count ?? 0;
+          _followerCount = followersResp.count;
+          _totalMemoriesCount = memoriesResp.count;
+          _followingCount = followingCountResp.count;
           _isFollowing = isFollowingStatus;
           _memories = fetchedMemories;
           _isLoading = false;
         });
       }
     } catch (e) {
+      // If you see this in your console, tell me the error!
       debugPrint("Profile load error: $e");
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  void _showUserList(String title, bool showFollowers) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) {
+        return Column(
+          children: [
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2)),
+            ),
+            Text(title,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold)),
+            const Divider(color: Colors.white10),
+            Expanded(
+              child: FutureBuilder<List<dynamic>>(
+                // We fetch from the 'followers' table and join the 'profiles' table
+                // based on which list we are viewing.
+                future: supabase.from('followers').select('''
+                    *,
+                    profiles!${showFollowers ? 'follower_id' : 'following_id'} (
+                      id, 
+                      username, 
+                      avatar_url, 
+                      school_name
+                    )
+                  ''').eq(showFollowers ? 'following_id' : 'follower_id', widget.targetUserId),
+                builder: (context, snapshot) {
+                  // 1. Handle Loading State
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF4CAF50)));
+                  }
+
+                  // 2. Handle Error State (This was missing and causing the infinite load)
+                  if (snapshot.hasError) {
+                    debugPrint("User List Error: ${snapshot.error}");
+                    return Center(
+                      child: Text("Error loading list: ${snapshot.error}",
+                          style: const TextStyle(color: Colors.redAccent),
+                          textAlign: TextAlign.center),
+                    );
+                  }
+
+                  // 3. Handle Empty State
+                  final data = snapshot.data ?? [];
+                  if (data.isEmpty) {
+                    return const Center(
+                        child: Text("No users found",
+                            style: TextStyle(color: Colors.white54)));
+                  }
+
+                  return ListView.builder(
+                    itemCount: data.length,
+                    itemBuilder: (context, index) {
+                      // Access the joined profile data
+                      final profile = data[index]['profiles'];
+
+                      if (profile == null) return const SizedBox.shrink();
+
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.grey[800],
+                          backgroundImage: profile['avatar_url'] != null
+                              ? NetworkImage(profile['avatar_url'])
+                              : null,
+                          child: profile['avatar_url'] == null
+                              ? const Icon(Icons.person, color: Colors.white54)
+                              : null,
+                        ),
+                        title: Text(profile['username'] ?? 'Unknown',
+                            style: const TextStyle(color: Colors.white)),
+                        subtitle: Text(profile['school_name'] ?? '',
+                            style: const TextStyle(color: Colors.white54)),
+                        onTap: () {
+                          Navigator.pop(context); // Close current sheet
+                          UniversalProfileCard.show(
+                              context, profile['id']); // Open new profile
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _toggleFollow() async {
@@ -166,12 +282,10 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
-                    _buildStatColumn('Followers', _followerCount.toString()),
-                    _buildStatColumn(
-                        'Memories',
-                        (isPrivate && !_isFollowing && !isMe)
-                            ? '?'
-                            : _totalMemoriesCount.toString()),
+                    _buildStatColumn('Followers', _followerCount.toString(),
+                        () => _showUserList('Followers', true)),
+                    _buildStatColumn('Following', _followingCount.toString(),
+                        () => _showUserList('Following', false)),
                   ],
                 ),
               ),
@@ -184,8 +298,9 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
           const SizedBox(height: 24),
           const Divider(color: Colors.white10),
           const SizedBox(height: 12),
-          const Text('Memories',
-              style: TextStyle(
+          // Added the memory count here
+          Text('Memories ($_totalMemoriesCount)',
+              style: const TextStyle(
                   color: Colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.bold)),
@@ -411,17 +526,21 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     );
   }
 
-  Widget _buildStatColumn(String label, String count) {
-    return Column(
-      children: [
-        Text(count,
-            style: const TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold)),
-        Text(label,
-            style: const TextStyle(color: Colors.white54, fontSize: 14)),
-      ],
+  Widget _buildStatColumn(String label, String count, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        children: [
+          Text(count,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold)),
+          Text(label,
+              style: const TextStyle(color: Colors.white54, fontSize: 14)),
+        ],
+      ),
     );
   }
 }

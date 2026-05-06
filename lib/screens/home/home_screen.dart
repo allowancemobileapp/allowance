@@ -1,6 +1,7 @@
 // lib/screens/home/home_screen.dart
 import 'dart:async';
 import 'package:allowance/screens/chat/chat_list_screen.dart';
+import 'package:allowance/screens/home/media_editor_screen.dart';
 import 'package:allowance/widgets/stories_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:icons_plus/icons_plus.dart';
@@ -10,6 +11,8 @@ import 'package:allowance/screens/home/favorites_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/screens/home/ticket_screen.dart';
+import 'package:wechat_assets_picker/wechat_assets_picker.dart';
+import 'package:wechat_camera_picker/wechat_camera_picker.dart';
 import 'order_screen.dart';
 import 'package:allowance/services/api_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -1607,11 +1610,62 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _pickMemoryFlow(BuildContext context) async {
+    // Trigger WeChat style picker which includes Camera in the first slot
+    final List<AssetEntity>? result = await AssetPicker.pickAssets(
+      context,
+      pickerConfig: AssetPickerConfig(
+        maxAssets: 1,
+        requestType: RequestType.common,
+        themeColor: themeColor,
+        specialItemPosition:
+            SpecialItemPosition.prepend, // Puts Camera at the start
+        specialItemBuilder: (context, _, __) {
+          return GestureDetector(
+            onTap: () async {
+              // WhatsApp style: Take Photo/Video directly
+              final AssetEntity? cameraResult =
+                  await CameraPicker.pickFromCamera(
+                context,
+                pickerConfig: const CameraPickerConfig(
+                  enableRecording: true,
+                  onlyEnableRecording: false,
+                  enableAudio: true,
+                ),
+              );
+              if (cameraResult != null) {
+                if (mounted) Navigator.pop(context); // Close the gallery picker
+                _navigateToCreateStory(cameraResult);
+              }
+            },
+            child: const Center(
+              child: Icon(Icons.camera_alt, size: 42, color: Colors.grey),
+            ),
+          );
+        },
+      ),
+    );
+
+    if (result != null && result.isNotEmpty) {
+      _navigateToCreateStory(result.first);
+    }
+  }
+
+  void _navigateToCreateStory(AssetEntity asset) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MediaEditorScreen(
+          asset: asset,
+          userPreferences: _prefs, // This will now match the class type
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final Color bgColor = _isDarkMode ? Colors.grey[900]! : Colors.grey[100]!;
-    final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
-    const vendorBudgetTextSizeFactor = 0.7;
 
     return Theme(
       data: _isDarkMode
@@ -1620,35 +1674,57 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Scaffold(
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         bottomNavigationBar: _buildCustomFooter(bgColor),
-        floatingActionButton: FloatingActionButton(
-          backgroundColor: Colors.transparent,
-          elevation: 0,
-          child: Container(
-            width: 58,
-            height: 58,
-            decoration: BoxDecoration(
-              color: const Color(0xFF4CAF50),
-              borderRadius: BorderRadius.circular(18),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.2),
-                  blurRadius: 10,
-                  offset: const Offset(0, 4),
-                )
-              ],
-            ),
-            child: const Icon(Icons.chat_bubble_rounded,
-                color: Colors.white, size: 30),
-          ),
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ChatListScreen(userPreferences: _prefs),
+
+        // UPDATED: Conditional Floating Action Button Stack
+        floatingActionButton: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Show the Plus icon ONLY on the Profile Screen (Index 3)
+            if (_selectedIndex == 3) ...[
+              FloatingActionButton(
+                heroTag: 'add_memory_btn',
+                mini: true, // Makes it slightly smaller than the Message icon
+                backgroundColor: themeColor,
+                onPressed: () => _pickMemoryFlow(context),
+                child: const Icon(Icons.add, color: Colors.white, size: 24),
               ),
-            );
-          },
+              const SizedBox(height: 12), // Space between the two icons
+            ],
+
+            // The standard Message/Chat Icon
+            FloatingActionButton(
+              heroTag: 'chat_btn',
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              child: Container(
+                width: 58,
+                height: 58,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF4CAF50),
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.2),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    )
+                  ],
+                ),
+                child: const Icon(Icons.chat_bubble_rounded,
+                    color: Colors.white, size: 30),
+              ),
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ChatListScreen(userPreferences: _prefs),
+                  ),
+                );
+              },
+            ),
+          ],
         ),
+
         body: SafeArea(
           child: Stack(
             children: [
@@ -1657,13 +1733,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   RefreshIndicator(
                     color: themeColor,
-                    // USE THE NEW COMBINED REFRESH HERE
                     onRefresh: _handleRefresh,
                     child: CustomScrollView(
                       controller: _scrollController,
                       physics: const AlwaysScrollableScrollPhysics(),
                       slivers: [
-                        // --- Section 1: Top bars ---
                         SliverToBoxAdapter(
                           child: Padding(
                             padding: const EdgeInsets.only(
@@ -1676,7 +1750,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                     _showRestaurantSelection();
                                   },
                                   child: Container(
-                                    width: horizontalBarWidth,
+                                    width: MediaQuery.of(context).size.width *
+                                        0.85,
                                     height: 44,
                                     decoration: BoxDecoration(
                                       color: _isDarkMode
@@ -1698,21 +1773,19 @@ class _HomeScreenState extends State<HomeScreen> {
                                                   child: Row(
                                                       children: _selectedRestaurants
                                                           .map((v) => Padding(
-                                                              padding:
-                                                                  const EdgeInsets.only(
-                                                                      right:
-                                                                          12),
+                                                              padding: const EdgeInsets.only(
+                                                                  right: 12),
                                                               child: Chip(
                                                                   label: Text(v,
-                                                                      style: TextStyle(
-                                                                          fontFamily:
-                                                                              'SanFrancisco',
+                                                                      style: const TextStyle(
                                                                           fontSize:
-                                                                              18 * vendorBudgetTextSizeFactor,
-                                                                          color: Colors.white)),
-                                                                  backgroundColor: _isDarkMode ? Colors.grey[700] : Colors.grey[300])))
+                                                                              12.6,
+                                                                          color: Colors
+                                                                              .white)),
+                                                                  backgroundColor:
+                                                                      _isDarkMode ? Colors.grey[700] : Colors.grey[300])))
                                                           .toList()))
-                                              : Text("Select Vendor", style: TextStyle(fontFamily: 'SanFrancisco', fontSize: 22 * vendorBudgetTextSizeFactor, color: Colors.white54))),
+                                              : const Text("Select Vendor", style: TextStyle(fontSize: 15.4, color: Colors.white54))),
                                       !_vendorBarTapped
                                           ? Icon(BoxIcons.bxs_chevron_down,
                                               color: themeColor, size: 22)
@@ -1722,7 +1795,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                                 const SizedBox(height: 16),
                                 Container(
-                                  width: horizontalBarWidth,
+                                  width:
+                                      MediaQuery.of(context).size.width * 0.85,
                                   height: 44,
                                   decoration: BoxDecoration(
                                     color: _isDarkMode
@@ -1741,18 +1815,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                             controller: _budgetController,
                                             focusNode: _budgetFocusNode,
                                             keyboardType: TextInputType.number,
-                                            style: TextStyle(
-                                                fontFamily: 'SanFrancisco',
-                                                fontSize: 18 *
-                                                    vendorBudgetTextSizeFactor,
+                                            style: const TextStyle(
+                                                fontSize: 12.6,
                                                 color: Colors.white),
-                                            decoration: InputDecoration(
+                                            decoration: const InputDecoration(
                                                 hintText: "Enter Budget",
                                                 hintStyle: TextStyle(
-                                                    fontFamily: 'SanFrancisco',
                                                     color: Colors.white54,
-                                                    fontSize: 22 *
-                                                        vendorBudgetTextSizeFactor),
+                                                    fontSize: 15.4),
                                                 border: InputBorder.none))),
                                     InkWell(
                                         onTap: () => Navigator.push(
@@ -1776,7 +1846,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                                 const SizedBox(height: 12),
                                 SizedBox(
-                                    width: horizontalBarWidth,
+                                    width: MediaQuery.of(context).size.width *
+                                        0.85,
                                     height: 50,
                                     child: SingleChildScrollView(
                                         scrollDirection: Axis.horizontal,
@@ -1789,8 +1860,6 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                           ),
                         ),
-
-                        // --- Section 2: STICKY GIST BAR + STORIES ---
                         SliverPersistentHeader(
                           pinned: true,
                           delegate: _GistBarHeaderDelegate(
@@ -1799,16 +1868,14 @@ class _HomeScreenState extends State<HomeScreen> {
                               children: [
                                 _buildGistFilterBar(),
                                 const SizedBox(height: 10),
-                                // ADD THE KEY HERE
                                 StoriesBar(
+                                    key: _storiesBarKey,
                                     userPreferences:
                                         widget.userPreferences ?? _prefs),
                               ],
                             ),
                           ),
                         ),
-
-                        // --- Section 3: Gists list ---
                         _buildGistSlideshow(),
                       ],
                     ),

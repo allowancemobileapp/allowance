@@ -1,6 +1,9 @@
 // lib/screens/chat/individual_chat_screen.dart
 import 'dart:async';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../widgets/universal_profile_card.dart';
 
@@ -27,6 +30,10 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   Timer? _typingTimer;
   bool _remoteUserIsTyping = false;
   bool _isFollowing = false;
+  Map<String, dynamic>? _replyMessage;
+  final bool _showScrollToBottom = false;
+  // For file/media logic
+  final Map<String, Color> _userColors = {};
 
   // FIX: Declare the stream here
   late final Stream<List<Map<String, dynamic>>> _messageStream;
@@ -148,34 +155,73 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     }
   }
 
-  Future<void> _sendMessage() async {
-    final text = _messageController.text.trim();
-    if (text.isEmpty) return;
+  String _getDateLabel(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final dateToCheck = DateTime(date.year, date.month, date.day);
 
+    if (dateToCheck == today) return 'Today';
+    if (dateToCheck == yesterday) return 'Yesterday';
+    return DateFormat('MMMM d, y').format(date);
+  }
+
+  String _formatTime(String createdAt) {
+    final date = DateTime.parse(createdAt).toLocal();
+    return DateFormat('h:mm a').format(date);
+  }
+
+  Future<void> _sendMessage(
+      {String? mediaUrl, String? type, String? thumbUrl, int? size}) async {
+    final text = _messageController.text.trim();
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null || (text.isEmpty && mediaUrl == null)) return;
+
+    final replyId = _replyMessage?['id'];
+    String replySummary = 'Original message';
+    if (_replyMessage != null) {
+      if (_replyMessage!['content']?.toString().isNotEmpty == true &&
+          !_replyMessage!['content'].toString().contains('📸')) {
+        replySummary = _replyMessage!['content'];
+      } else {
+        replySummary =
+            _replyMessage!['media_type'] == 'video' ? '🎥 Video' : '📸 Photo';
+      }
+    }
+
+    final currentReply = _replyMessage;
     _messageController.clear();
-    _setTypingStatus(false);
+    setState(() => _replyMessage = null);
 
     try {
-      // 1. Insert the message
-      await supabase.from('messages').insert({
+      final payload = {
         'chat_id': widget.chatId,
-        'sender_id': supabase.auth.currentUser!.id,
-        'content': text,
+        'sender_id': myId,
+        'content': text.isNotEmpty
+            ? text
+            : (type == 'image'
+                ? '📸 Photo'
+                : (type == 'video' ? '🎥 Video' : '')),
         'is_read': false,
-      });
+        'reply_to_id': replyId,
+        'reply_content': replyId != null ? replySummary : null,
+        'media_url': mediaUrl,
+        'media_type': type,
+        'thumbnail_url': thumbUrl,
+        'file_size_bytes': size,
+      };
 
-      // 2. THIS IS THE MAGIC FIX: Update the chat's timestamp so it jumps to the top!
-      await supabase
-          .from('chats')
-          .update({'updated_at': DateTime.now().toUtc().toIso8601String()}).eq(
-              'id', widget.chatId);
+      await supabase.from('messages').insert(payload);
+
+      // Update chat's last activity
+      await supabase.from('chats').update({
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+        'last_message':
+            text.isNotEmpty ? text : (type == 'image' ? 'Photo' : 'Video'),
+      }).eq('id', widget.chatId);
     } catch (e) {
-      debugPrint('Detailed Supabase Error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error: ${e.toString()}")),
-        );
-      }
+      debugPrint('Send error: $e');
+      setState(() => _replyMessage = currentReply);
     }
   }
 
@@ -192,37 +238,81 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: _buildAppBar(),
-      body: Column(
+      body: Stack(
         children: [
-          Expanded(
-            child: StreamBuilder<List<Map<String, dynamic>>>(
-              stream: _messageStream,
-              builder: (context, snapshot) {
-                if (snapshot.hasError)
-                  return const Center(
-                      child: Text("Error loading chats",
-                          style: TextStyle(color: Colors.red)));
-                if (!snapshot.hasData)
-                  return const Center(
-                      child:
-                          CircularProgressIndicator(color: Color(0xFF4CAF50)));
+          Column(
+            children: [
+              Expanded(
+                child: StreamBuilder<List<Map<String, dynamic>>>(
+                  stream: _messageStream,
+                  builder: (context, snapshot) {
+                    if (!snapshot.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
 
-                final messages = snapshot.data!;
-                return ListView.builder(
-                  controller: _scrollController,
-                  reverse: true,
-                  padding: const EdgeInsets.all(16),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) {
-                    final isMe = messages[index]['sender_id'] ==
-                        supabase.auth.currentUser!.id;
-                    return _buildBubble(messages[index]['content'], isMe);
+                    final messages = snapshot.data!;
+                    return ListView.builder(
+                      controller: _scrollController,
+                      reverse: true,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: messages.length,
+                      itemBuilder: (context, index) {
+                        final msg = messages[index];
+                        final date =
+                            DateTime.parse(msg['created_at']).toLocal();
+
+                        // Date Header Logic
+                        bool showDateHeader = false;
+                        if (index == messages.length - 1) {
+                          showDateHeader = true;
+                        } else {
+                          final prevDate =
+                              DateTime.parse(messages[index + 1]['created_at'])
+                                  .toLocal();
+                          if (date.day != prevDate.day ||
+                              date.year != prevDate.year) {
+                            showDateHeader = true;
+                          }
+                        }
+
+                        return Column(
+                          children: [
+                            if (showDateHeader)
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 16),
+                                child: Center(
+                                  child: Text(_getDateLabel(date),
+                                      style: const TextStyle(
+                                          color: Colors.white54, fontSize: 12)),
+                                ),
+                              ),
+                            _buildBubble(messages, index),
+                          ],
+                        );
+                      },
+                    );
                   },
-                );
-              },
-            ),
+                ),
+              ),
+              // Input Bar with Reply Preview
+              _buildInputBar(),
+            ],
           ),
-          _buildInputBar(),
+          // Scroll to Bottom FAB
+          if (_showScrollToBottom)
+            Positioned(
+              bottom: 100,
+              right: 16,
+              child: FloatingActionButton.small(
+                backgroundColor: const Color(0xFF202C33),
+                onPressed: () => _scrollController.animateTo(0,
+                    duration: const Duration(milliseconds: 300),
+                    curve: Curves.easeOut),
+                child: const Icon(Icons.keyboard_double_arrow_down,
+                    color: Colors.white),
+              ),
+            ),
         ],
       ),
     );
@@ -304,70 +394,220 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
-  Widget _buildBubble(String content, bool isMe) {
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        // FIX: constraints instead of maxConstraints
-        constraints:
-            BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
-        decoration: BoxDecoration(
-          color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
-          borderRadius: BorderRadius.circular(16).copyWith(
-            bottomRight:
-                isMe ? const Radius.circular(0) : const Radius.circular(16),
-            bottomLeft:
-                isMe ? const Radius.circular(16) : const Radius.circular(0),
+  Widget _buildBubble(List<Map<String, dynamic>> messages, int index) {
+    final message = messages[index];
+    final isMe = message['sender_id'] == supabase.auth.currentUser!.id;
+    final content = message['content'] ?? '';
+    final timeStr = _formatTime(message['created_at']);
+    final isRead = message['is_read'] == true;
+    final hasMedia = message['media_url'] != null;
+
+    return Dismissible(
+      key: Key(message['id'].toString()),
+      direction: DismissDirection.startToEnd,
+      confirmDismiss: (_) {
+        HapticFeedback.lightImpact();
+        setState(() => _replyMessage = message);
+        return Future.value(false);
+      },
+      background: Container(
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 20),
+        child: const Icon(Icons.reply, color: Color(0xFF4CAF50)),
+      ),
+      child: Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+          constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width * 0.75),
+          decoration: BoxDecoration(
+            color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
+            borderRadius: BorderRadius.circular(16).copyWith(
+              bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+              bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
+            ),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 1. Reply UI
+                if (message['reply_to_id'] != null)
+                  _buildReplyInsideBubble(message),
+
+                // 2. Media UI
+                if (hasMedia)
+                  _buildMediaSection(message, isMe, isRead, timeStr),
+
+                // 3. Text UI
+                if (content.toString().isNotEmpty &&
+                    content != '📸 Photo' &&
+                    content != '🎥 Video')
+                  _buildTextAndTimestamp(content, timeStr, isMe, isRead),
+              ],
+            ),
           ),
         ),
-        child: Text(content,
-            style: const TextStyle(color: Colors.white, fontSize: 15)),
+      ),
+    );
+  }
+
+  Widget _buildReplyInsideBubble(Map<String, dynamic> message) {
+    return Container(
+      margin: const EdgeInsets.all(4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black12,
+        borderRadius: BorderRadius.circular(8),
+        border:
+            const Border(left: BorderSide(color: Color(0xFF4CAF50), width: 4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            "Replying to",
+            style: TextStyle(
+                color: _userColors['reply'] ?? Colors.greenAccent,
+                fontSize: 11,
+                fontWeight: FontWeight.bold),
+          ),
+          Text(
+            message['reply_content'] ?? '',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMediaSection(
+      Map<String, dynamic> message, bool isMe, bool isRead, String timeStr) {
+    final isVideo = message['media_type'] == 'video';
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        CachedNetworkImage(
+          imageUrl: message['thumbnail_url'] ?? message['media_url'],
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: 200,
+          placeholder: (context, url) =>
+              Container(color: Colors.white10, height: 200),
+        ),
+        if (isVideo)
+          const CircleAvatar(
+            backgroundColor: Colors.black54,
+            child: Icon(Icons.play_arrow, color: Colors.white),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildTextAndTimestamp(
+      String content, String timeStr, bool isMe, bool isRead) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Wrap(
+        alignment: WrapAlignment.end,
+        crossAxisAlignment: WrapCrossAlignment.end,
+        spacing: 8,
+        children: [
+          Text(
+            content,
+            style: const TextStyle(color: Colors.white, fontSize: 16),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                timeStr,
+                style: const TextStyle(color: Colors.white60, fontSize: 10),
+              ),
+              if (isMe) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  isRead ? Icons.done_all : Icons.done,
+                  size: 14,
+                  color: isRead ? Colors.blue : Colors.white60,
+                ),
+              ],
+            ],
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildInputBar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-      color: Colors.grey[900],
-      child: SafeArea(
-        child: Row(
-          children: [
-            IconButton(
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_replyMessage != null)
+          Container(
+            color: const Color(0xFF1F2C34),
+            padding: const EdgeInsets.all(8),
+            child: Row(
+              children: [
+                const Icon(Icons.reply, color: Colors.white54),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _replyMessage!['content'] ?? 'Media',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white70),
+                  ),
+                ),
+                IconButton(
+                  icon:
+                      const Icon(Icons.close, size: 18, color: Colors.white54),
+                  onPressed: () => setState(() => _replyMessage = null),
+                ),
+              ],
+            ),
+          ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          color: Colors.black,
+          child: Row(
+            children: [
+              // FIXED: Wired up the Plus Options menu
+              IconButton(
                 icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
-                onPressed: _showPlusOptions),
-            Expanded(
-              child: TextField(
-                controller: _messageController,
-                onChanged: _handleTyping,
-                style: const TextStyle(color: Colors.white),
-                textCapitalization: TextCapitalization.sentences,
-                decoration: InputDecoration(
-                  hintText: 'Message...',
-                  hintStyle: const TextStyle(color: Colors.white54),
-                  filled: true,
-                  fillColor: Colors.black,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none),
+                onPressed: _showPlusOptions,
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _messageController,
+                  // FIXED: Wired up the Typing indicator logic
+                  onChanged: (value) => _handleTyping(value),
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: "Message",
+                    hintStyle: const TextStyle(color: Colors.white38),
+                    filled: true,
+                    fillColor: const Color(0xFF202C33),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide.none),
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 4),
-            CircleAvatar(
-              backgroundColor: const Color(0xFF4CAF50),
-              child: IconButton(
-                icon: const Icon(Icons.send, color: Colors.white, size: 20),
-                onPressed: _sendMessage,
+              IconButton(
+                icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
+                onPressed: () => _sendMessage(),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-      ),
+      ],
     );
   }
 

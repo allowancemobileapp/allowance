@@ -2,10 +2,12 @@
 import 'package:allowance/screens/home/create_story_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
+import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/screens/introduction/introduction_screen.dart';
+import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'edit_profile_screen.dart';
 
 const Color _bg = Color(0xFF121212);
@@ -25,6 +27,7 @@ class ProfileScreen extends StatefulWidget {
 
 class _ProfileScreenState extends State<ProfileScreen> {
   bool _signingOut = false;
+  int _selectedSegment = 0;
 
   late Future<Map<String, dynamic>?> _profileFuture;
 
@@ -38,6 +41,110 @@ class _ProfileScreenState extends State<ProfileScreen> {
     setState(() {
       _profileFuture = _fetchProfile();
     });
+  }
+
+  void _showUserList(String title, bool showFollowers) {
+    final supabase = Supabase.instance.client;
+    final currentUserId = supabase.auth.currentUser?.id;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _card,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.4,
+        expand: false,
+        builder: (context, scrollController) => Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2))),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Text(title,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
+            ),
+            const Divider(color: Colors.white10),
+            Expanded(
+              child: FutureBuilder<List<dynamic>>(
+                // Fetching from 'followers' and joining 'profiles'
+                future: supabase.from('followers').select('''
+                  *,
+                  profiles!${showFollowers ? 'follower_id' : 'following_id'} (
+                    id, 
+                    username, 
+                    avatar_url, 
+                    school_name
+                  )
+                ''').eq(showFollowers ? 'following_id' : 'follower_id', currentUserId!),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return const Center(
+                        child: CircularProgressIndicator(color: _accent));
+                  }
+
+                  if (snapshot.hasError) {
+                    return Center(
+                      child: Text("Error: ${snapshot.error}",
+                          style: const TextStyle(color: Colors.redAccent)),
+                    );
+                  }
+
+                  final data = snapshot.data ?? [];
+                  if (data.isEmpty) {
+                    return Center(
+                      child: Text("No ${title.toLowerCase()} found",
+                          style: const TextStyle(color: Colors.white38)),
+                    );
+                  }
+
+                  return ListView.builder(
+                    controller: scrollController,
+                    itemCount: data.length,
+                    itemBuilder: (context, index) {
+                      final profile = data[index]['profiles'];
+                      if (profile == null) return const SizedBox.shrink();
+
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.grey[850],
+                          backgroundImage: profile['avatar_url'] != null
+                              ? NetworkImage(profile['avatar_url'])
+                              : null,
+                          child: profile['avatar_url'] == null
+                              ? const Icon(Icons.person, color: Colors.white54)
+                              : null,
+                        ),
+                        title: Text(profile['username'] ?? 'Unknown',
+                            style: const TextStyle(color: Colors.white)),
+                        subtitle: Text(profile['school_name'] ?? '',
+                            style: const TextStyle(color: Colors.white54)),
+                        onTap: () {
+                          Navigator.pop(context);
+                          // Using your static show method to view their profile card[cite: 4]
+                          UniversalProfileCard.show(context, profile['id']);
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _confirmLogout() async {
@@ -95,8 +202,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
-            body: Center(
-                child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
+            backgroundColor: _bg,
+            body: Center(child: CircularProgressIndicator(color: _accent)),
           );
         }
 
@@ -104,6 +211,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           final err = snapshot.error;
           debugPrint('Profile load error: $err');
           return Scaffold(
+            backgroundColor: _bg,
             body: Center(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
@@ -119,7 +227,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
         final profile = snapshot.data;
 
-        // Handle missing profile record
         if (profile == null) {
           final supabase = Supabase.instance.client;
           final user = supabase.auth.currentUser;
@@ -173,40 +280,57 @@ class _ProfileScreenState extends State<ProfileScreen> {
               fit: BoxFit.contain,
             ),
             automaticallyImplyLeading: false,
-            // Visibility Toggle in AppBar for easy access
             actions: [
               if (isPlus)
                 IconButton(
-                  icon: const Icon(Icons.remove_red_eye_outlined,
-                      color: Color(0xFF4CAF50)),
-                  onPressed: () {
-                    // Logic to toggle public/private visibility
-                  },
+                  icon:
+                      const Icon(Icons.remove_red_eye_outlined, color: _accent),
+                  onPressed: () {},
                   tooltip: 'Profile Visibility',
                 ),
             ],
           ),
+
+          // Floating Action Button - Memories Tab Only
+          // floatingActionButton: _selectedSegment == 0
+          //     ? FloatingActionButton(
+          //         backgroundColor: _accent,
+          //         child: const Icon(Icons.add, color: Colors.black, size: 28),
+          //         onPressed: () {
+          //           if (isPlus) {
+          //             _pickMemoryFlow(context);
+          //           } else {
+          //             _showUpgradeSheet(context);
+          //           }
+          //         },
+          //       )
+          //     : null,
+
           body: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             children: [
-              // ==================== STATS HEADER ====================
+              // Stats Header
               Padding(
                 padding: const EdgeInsets.only(bottom: 20),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    _buildStatItem('Followers',
-                        '0'), // Replace with real count if available
-                    const SizedBox(width: 110), // Space for the center avatar
-                    _buildStatItem('Memories',
-                        '0'), // Replace with real count if available
+                    _buildStatItem(
+                        'Followers',
+                        (profile['follower_count'] ?? 0).toString(),
+                        () => _showUserList('Followers', true)),
+                    const SizedBox(width: 110),
+                    _buildStatItem(
+                        'Following',
+                        (profile['following_count'] ?? 0).toString(),
+                        () => _showUserList('Following', false)),
                   ],
                 ),
               ),
 
+              // Avatar with Plus Icon
               Column(
                 children: [
-                  // ==================== TAPABLE AVATAR WITH STORY RING ====================
                   GestureDetector(
                     onTap: () async {
                       final supabase = Supabase.instance.client;
@@ -246,19 +370,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       child: Stack(
                         alignment: Alignment.center,
                         children: [
-                          // Story Ring
                           Container(
                             width: 110,
                             height: 110,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              border: Border.all(
-                                color: const Color(0xFF4CAF50),
-                                width: 3,
-                              ),
+                              border: Border.all(color: _accent, width: 3),
                             ),
                           ),
-                          // Main Avatar
                           CircleAvatar(
                             radius: 48,
                             backgroundColor: Colors.grey[850],
@@ -273,30 +392,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                   )
                                 : null,
                           ),
-                          // PLUS BUTTON
+                          // Plus Icon - Only visible to trigger story creation / upgrade
                           Positioned(
                             bottom: 4,
                             right: 4,
                             child: GestureDetector(
-                              onTap: () async {
+                              onTap: () {
                                 if (isPlus) {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => CreateStoryScreen(
-                                        userPreferences: widget.userPreferences,
-                                      ),
-                                    ),
-                                  );
-                                  if (result == true) _refreshProfile();
+                                  _pickMemoryFlow(context);
                                 } else {
                                   _showUpgradeSheet(context);
                                 }
                               },
-                              child: const CircleAvatar(
+                              child: CircleAvatar(
                                 radius: 14,
-                                backgroundColor: Color(0xFF4CAF50),
-                                child: Icon(Icons.add,
+                                backgroundColor: _accent,
+                                child: const Icon(Icons.add,
                                     color: Colors.black, size: 18),
                               ),
                             ),
@@ -305,8 +416,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ),
                     ),
                   ),
-                  // ==================== END AVATAR ====================
-
                   const SizedBox(height: 16),
                   Text(
                     up.fullName ?? 'No name',
@@ -318,69 +427,78 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   Text(
                     '@${up.username ?? 'nouser'}',
                     style: const TextStyle(
-                        color: Color(0xFF4CAF50), fontWeight: FontWeight.w500),
+                        color: _accent, fontWeight: FontWeight.w500),
                   ),
-
-                  // BIO DISPLAY
                   const SizedBox(height: 16),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: _card,
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.white10),
+                  Text(
+                    up.bio?.trim().isNotEmpty == true
+                        ? up.bio!
+                        : 'No bio yet • Tap "Edit profile" to add one',
+                    style: TextStyle(
+                      color: up.bio?.trim().isNotEmpty == true
+                          ? Colors.white70
+                          : Colors.white38,
+                      fontSize: 15,
                     ),
-                    child: Text(
-                      up.bio?.trim().isNotEmpty == true
-                          ? up.bio!
-                          : 'No bio yet • Tap "Edit profile" to add one',
-                      style: TextStyle(
-                        color: up.bio?.trim().isNotEmpty == true
-                            ? Colors.white70
-                            : Colors.white38,
-                        fontSize: 15,
-                        height: 1.4,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
+                    textAlign: TextAlign.center,
                   ),
                 ],
               ),
 
               const SizedBox(height: 24),
 
-              // ==================== INFO DETAILS CARD ====================
-              Container(
-                decoration: BoxDecoration(
-                  color: _card,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white10),
-                ),
-                child: Column(
-                  children: [
-                    _buildProfileTile(Icons.school_outlined, 'Campus',
-                        up.schoolName ?? 'Not set'),
-                    const Divider(color: Colors.white10, height: 1),
-                    _buildProfileTile(Icons.phone_outlined, 'Phone',
-                        up.phoneNumber ?? 'Not set'),
-                    const Divider(color: Colors.white10, height: 1),
-                    _buildProfileTile(Icons.fitness_center_outlined, 'Weight',
-                        '${up.weight ?? 'Not set'} kg'),
-                    const Divider(color: Colors.white10, height: 1),
-                    _buildProfileTile(Icons.height_outlined, 'Height',
-                        '${up.height ?? 'Not set'} cm'),
-                    const Divider(color: Colors.white10, height: 1),
-                    _buildProfileTile(Icons.cake_outlined, 'Age',
-                        '${up.age ?? 'Not set'} years'),
-                  ],
+              // Segmented Control
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 60),
+                child: Container(
+                  padding: const EdgeInsets.all(3),
+                  decoration: BoxDecoration(
+                    color: _card,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      _buildSegmentItem("Memories", 0),
+                      _buildSegmentItem("Profile Card", 1),
+                    ],
+                  ),
                 ),
               ),
 
+              const SizedBox(height: 16),
+
+              // Content Area
+              _selectedSegment == 0
+                  ? _buildInstagramStyleGrid()
+                  : Container(
+                      decoration: BoxDecoration(
+                        color: _card,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: Column(
+                        children: [
+                          _buildProfileTile(Icons.school_outlined, 'Campus',
+                              up.schoolName ?? 'Not set'),
+                          const Divider(color: Colors.white10, height: 1),
+                          _buildProfileTile(Icons.phone_outlined, 'Phone',
+                              up.phoneNumber ?? 'Not set'),
+                          const Divider(color: Colors.white10, height: 1),
+                          _buildProfileTile(Icons.fitness_center_outlined,
+                              'Weight', '${up.weight ?? 'Not set'} kg'),
+                          const Divider(color: Colors.white10, height: 1),
+                          _buildProfileTile(Icons.height_outlined, 'Height',
+                              '${up.height ?? 'Not set'} cm'),
+                          const Divider(color: Colors.white10, height: 1),
+                          _buildProfileTile(Icons.cake_outlined, 'Age',
+                              '${up.age ?? 'Not set'} years'),
+                        ],
+                      ),
+                    ),
+
               const SizedBox(height: 24),
 
-              // ==================== ACTIONS ====================
+              // Actions
               ElevatedButton.icon(
                 icon: const Icon(Icons.edit_outlined, size: 20),
                 label: const Text('Edit Profile'),
@@ -394,9 +512,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 onPressed: () async {
                   final changed = await Navigator.of(context).push<bool>(
                     MaterialPageRoute(
-                      builder: (_) => EditProfileScreen(
-                          userPreferences: widget.userPreferences),
-                    ),
+                        builder: (_) => EditProfileScreen(
+                            userPreferences: widget.userPreferences)),
                   );
                   if (changed == true) {
                     await widget.userPreferences.loadPreferences();
@@ -425,7 +542,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
                 onPressed: _signingOut ? null : _confirmLogout,
               ),
-              const SizedBox(height: 40),
+              const SizedBox(height: 80),
             ],
           ),
         );
@@ -434,18 +551,21 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
 // Helper for Stats
-  Widget _buildStatItem(String label, String value) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(value,
-            style: const TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold)),
-        Text(label,
-            style: const TextStyle(color: Colors.white54, fontSize: 12)),
-      ],
+  Widget _buildStatItem(String label, String value, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(value,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold)),
+          Text(label,
+              style: const TextStyle(color: Colors.white54, fontSize: 12)),
+        ],
+      ),
     );
   }
 
@@ -462,7 +582,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-// Helper for Upgrade Sheet
+  // Helper for Upgrade Sheet
   void _showUpgradeSheet(BuildContext context) {
     showModalBottomSheet(
       context: context,
@@ -522,7 +642,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
     if (user == null) return null;
+
     try {
+      // 1. Fetch basic profile data
       final resp = await supabase
           .from('profiles')
           .select()
@@ -530,10 +652,168 @@ class _ProfileScreenState extends State<ProfileScreen> {
           .maybeSingle();
 
       if (resp == null) return null;
-      return Map<String, dynamic>.from(resp);
+      final data = Map<String, dynamic>.from(resp);
+
+      // 2. Fetch Follower Count (people following YOU)
+      final followersResp = await supabase
+          .from('followers')
+          .select('*')
+          .eq('following_id', user.id)
+          .count(CountOption.exact);
+
+      // 3. Fetch Following Count (people YOU follow)[cite: 4]
+      final followingResp = await supabase
+          .from('followers')
+          .select('*')
+          .eq('follower_id', user.id)
+          .count(CountOption.exact);
+
+      // 4. Inject these counts into the data map so the build method sees them[cite: 4]
+      data['follower_count'] = followersResp.count;
+      data['following_count'] = followingResp.count;
+
+      return data;
     } catch (e, st) {
       debugPrint('[_fetchProfile] error: $e\n$st');
       return null;
     }
+  }
+
+  Future<void> _pickMemoryFlow(BuildContext context) async {
+    final List<AssetEntity>? result = await AssetPicker.pickAssets(
+      context,
+      pickerConfig: const AssetPickerConfig(
+        maxAssets: 1,
+        requestType: RequestType.common,
+        themeColor: _accent,
+      ),
+    );
+
+    if (result != null && result.isNotEmpty) {
+      // Navigate to CreateStoryScreen to edit/trim the selection
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) =>
+              CreateStoryScreen(userPreferences: widget.userPreferences),
+        ),
+      );
+    }
+  }
+
+  Widget _buildInstagramStyleGrid() {
+    final supabase = Supabase.instance.client;
+    final userId = supabase.auth.currentUser?.id;
+
+    if (userId == null) return const SizedBox.shrink();
+
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      // Connects to Supabase 'memories' table and listens for real-time changes
+      stream: supabase
+          .from('memories')
+          .stream(primaryKey: ['id'])
+          .eq('user_id', userId)
+          .order('created_at', ascending: false),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const SizedBox(
+            height: 200,
+            child: Center(child: CircularProgressIndicator(color: _accent)),
+          );
+        }
+
+        final memories = snapshot.data ?? [];
+
+        if (memories.isEmpty) {
+          return Container(
+            height: 200,
+            alignment: Alignment.center,
+            child: const Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.photo_library_outlined,
+                    color: Colors.white24, size: 40),
+                SizedBox(height: 8),
+                Text("No Memories yet",
+                    style: TextStyle(color: Colors.white38)),
+              ],
+            ),
+          );
+        }
+
+        return GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 2,
+            mainAxisSpacing: 2,
+            childAspectRatio: 0.8,
+          ),
+          itemCount: memories.length,
+          itemBuilder: (context, index) {
+            final memory = memories[index];
+            final isVideo = memory['is_video'] == true;
+
+            return GestureDetector(
+              onTap: () {
+                // Navigate to your viewer here if needed
+              },
+              child: Container(
+                color: Colors.black,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    // Network image for the thumbnail
+                    Image.network(
+                      memory['media_url'],
+                      fit: BoxFit.cover,
+                      errorBuilder: (ctx, _, __) => Container(
+                        color: _card,
+                        child: const Icon(Icons.broken_image,
+                            color: Colors.white10),
+                      ),
+                    ),
+                    // If it's a video, overlay a play icon
+                    if (isVideo)
+                      const Positioned(
+                        top: 5,
+                        right: 5,
+                        child: Icon(Icons.play_circle_filled,
+                            color: Colors.white70, size: 20),
+                      ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildSegmentItem(String title, int index) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _selectedSegment = index),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8), // Reduced height
+          decoration: BoxDecoration(
+            color: _selectedSegment == index ? _accent : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            title,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: _selectedSegment == index ? Colors.black : Colors.white54,
+              fontWeight: FontWeight.bold,
+              fontSize: 13.5, // Slightly smaller
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
