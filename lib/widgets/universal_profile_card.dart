@@ -1,15 +1,24 @@
 // lib/widgets/universal_profile_card.dart
+import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
+import 'package:allowance/screens/home/story_viewer_screen.dart';
+import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/services/subscription_service.dart'; // New Import
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 class UniversalProfileCard extends StatefulWidget {
   final String targetUserId;
-  const UniversalProfileCard({super.key, required this.targetUserId});
+  final UserPreferences userPreferences;
+  const UniversalProfileCard({
+    super.key,
+    required this.targetUserId,
+    required this.userPreferences,
+  });
 
-  static void show(BuildContext context, String userId) {
+  static void show(
+      BuildContext context, String userId, UserPreferences userPreferences) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -18,8 +27,10 @@ class UniversalProfileCard extends StatefulWidget {
         initialChildSize: 0.7,
         minChildSize: 0.5,
         maxChildSize: 0.95,
-        builder: (_, scrollController) =>
-            UniversalProfileCard(targetUserId: userId),
+        builder: (_, scrollController) => UniversalProfileCard(
+          targetUserId: userId,
+          userPreferences: userPreferences, // Pass the required argument here
+        ),
       ),
     );
   }
@@ -39,6 +50,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   List<dynamic> _memories = [];
   bool _isLoading = true;
   int _followingCount = 0; // Added this
+  bool? _hasActiveStories;
 
   @override
   void initState() {
@@ -51,38 +63,40 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     if (currentUserId == null) return;
 
     try {
-      // We use the exact syntax you had when it worked
       final results = await Future.wait<dynamic>([
         supabase
             .from('profiles')
             .select()
             .eq('id', widget.targetUserId)
             .maybeSingle(),
-        // Followers Count
         supabase
             .from('followers')
             .select('*')
             .eq('following_id', widget.targetUserId)
             .count(CountOption.exact),
-        // Check if following
         supabase
             .from('followers')
             .select()
             .eq('follower_id', currentUserId)
             .eq('following_id', widget.targetUserId)
             .maybeSingle(),
-        // Memories Count
         supabase
             .from('memories')
             .select('*')
             .eq('user_id', widget.targetUserId)
             .count(CountOption.exact),
-        // Following Count (The new one)
         supabase
             .from('followers')
             .select('*')
             .eq('follower_id', widget.targetUserId)
             .count(CountOption.exact),
+        // NEW: Check for active stories
+        supabase
+            .from('stories')
+            .select('id')
+            .eq('user_id', widget.targetUserId)
+            .gt('expires_at', DateTime.now().toUtc().toIso8601String())
+            .limit(1),
       ]);
 
       final profileResp = results[0] as Map<String, dynamic>?;
@@ -90,6 +104,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
       final followingStatusResp = results[2];
       final memoriesResp = results[3] as PostgrestResponse;
       final followingCountResp = results[4] as PostgrestResponse;
+      final storiesResp = results[5] as List<dynamic>; // NEW
 
       final isPrivate = profileResp?['is_private'] == true;
       final isFollowingStatus = followingStatusResp != null;
@@ -113,11 +128,12 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
           _followingCount = followingCountResp.count;
           _isFollowing = isFollowingStatus;
           _memories = fetchedMemories;
+          // If the list is not empty, there are active stories
+          _hasActiveStories = storiesResp.isNotEmpty;
           _isLoading = false;
         });
       }
     } catch (e) {
-      // If you see this in your console, tell me the error!
       debugPrint("Profile load error: $e");
       if (mounted) setState(() => _isLoading = false);
     }
@@ -209,8 +225,8 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
                             style: const TextStyle(color: Colors.white54)),
                         onTap: () {
                           Navigator.pop(context); // Close current sheet
-                          UniversalProfileCard.show(
-                              context, profile['id']); // Open new profile
+                          UniversalProfileCard.show(context, profile['id'],
+                              widget.userPreferences); // Open new profile
                         },
                       );
                     },
@@ -298,14 +314,30 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
           const SizedBox(height: 24),
           const Divider(color: Colors.white10),
           const SizedBox(height: 12),
-          // Added the memory count here
           Text('Memories ($_totalMemoriesCount)',
               style: const TextStyle(
                   color: Colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.bold)),
           const SizedBox(height: 16),
-          _buildMemoriesGrid(canSeeContent),
+
+          // Fix: Use the canSeeContent logic here
+          if (canSeeContent)
+            _buildMemoriesGrid(_memories)
+          else
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 40),
+              child: Column(
+                children: [
+                  Icon(Icons.lock_outline, color: Colors.white24, size: 50),
+                  SizedBox(height: 12),
+                  Text("This account is private",
+                      style: TextStyle(color: Colors.white70)),
+                  Text("Follow to see their memories",
+                      style: TextStyle(color: Colors.white38, fontSize: 12)),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -333,23 +365,60 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   }
 
   Widget _buildAvatar() {
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        border: Border.all(color: themeColor.withOpacity(0.5), width: 2),
-      ),
-      child: CircleAvatar(
-        radius: 40,
-        backgroundColor: Colors.grey[800],
-        backgroundImage: _profile!['avatar_url'] != null
-            ? NetworkImage(_profile!['avatar_url'])
-            : null,
-        child: _profile!['avatar_url'] == null
-            ? const Icon(Icons.person, size: 40, color: Colors.white54)
-            : null,
+    final bool showRing = _hasActiveStories == true;
+
+    return GestureDetector(
+      onTap: () => _handleAvatarTap(showRing),
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: showRing ? themeColor : Colors.transparent,
+            width: 2,
+          ),
+        ),
+        child: CircleAvatar(
+          radius: 40,
+          backgroundColor: Colors.grey[800],
+          backgroundImage: _profile!['avatar_url'] != null
+              ? CachedNetworkImageProvider(_profile!['avatar_url'])
+              : null,
+          child: _profile!['avatar_url'] == null
+              ? const Icon(Icons.person, size: 40, color: Colors.white54)
+              : null,
+        ),
       ),
     );
+  }
+
+  Future<void> _handleAvatarTap(bool hasStories) async {
+    if (!hasStories) return;
+
+    try {
+      final List<dynamic> activeStories = await supabase
+          .from('stories')
+          .select()
+          .eq('user_id', widget.targetUserId)
+          .gt('expires_at', DateTime.now().toUtc().toIso8601String())
+          .order('created_at', ascending: true);
+
+      if (activeStories.isNotEmpty && mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => StoryViewerScreen(
+              stories: List<Map<String, dynamic>>.from(activeStories),
+              initialIndex: 0,
+              userPreferences: widget
+                  .userPreferences, // FIX: Pass the required argument here
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("Error launching stories: $e");
+    }
   }
 
   Widget _buildProfileInfo(bool isPrivate) {
@@ -441,6 +510,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
                       builder: (_) => IndividualChatScreen(
                         chatId: chatId,
                         recipientProfile: _profile!,
+                        userPreferences: widget.userPreferences,
                       ),
                     ),
                   );
@@ -468,59 +538,39 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     );
   }
 
-  Widget _buildMemoriesGrid(bool canSeeContent) {
-    if (!canSeeContent) {
+  // Update your grid builder method
+  // Replace your current _buildMemoriesGrid method with this updated one:
+  Widget _buildMemoriesGrid(List<dynamic> memories) {
+    if (memories.isEmpty) {
       return const Center(
         child: Padding(
-          padding: EdgeInsets.symmetric(vertical: 40),
-          child: Column(
-            children: [
-              Icon(Icons.lock_outline, color: Colors.white24, size: 64),
-              SizedBox(height: 12),
-              Text('This account is private.',
-                  style: TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.bold)),
-              Text('Follow them to see their memories.',
-                  style: TextStyle(color: Colors.white54)),
-            ],
-          ),
+          padding: EdgeInsets.only(top: 20),
+          child:
+              Text("No memories yet", style: TextStyle(color: Colors.white38)),
         ),
       );
     }
 
-    if (_memories.isEmpty) {
-      return const Center(
-          child: Padding(
-              padding: EdgeInsets.all(32),
-              child: Text('No memories yet.',
-                  style: TextStyle(color: Colors.white54))));
-    }
+    // Convert the dynamic list to the exact map type expected by MemoryGridItem
+    final List<Map<String, dynamic>> typedMemories =
+        List<Map<String, dynamic>>.from(memories);
 
     return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3, crossAxisSpacing: 2, mainAxisSpacing: 2),
-      itemCount: _memories.length,
+        crossAxisCount: 3,
+        crossAxisSpacing: 2,
+        mainAxisSpacing: 2,
+        childAspectRatio: 0.56,
+      ),
+      itemCount: typedMemories.length,
       itemBuilder: (context, index) {
-        final mem = _memories[index];
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              CachedNetworkImage(
-                  imageUrl: mem['media_url'],
-                  fit: BoxFit.cover,
-                  placeholder: (_, __) => Container(color: Colors.grey[800])),
-              if (mem['media_type'] == 'video')
-                const Positioned(
-                    top: 4,
-                    right: 4,
-                    child: Icon(Icons.play_circle_fill,
-                        color: Colors.white, size: 20)),
-            ],
-          ),
+        // Reusing MemoryGridItem from your profile_screen.dart
+        // It already has the VideoPlayer logic for thumbnails built-in!
+        return MemoryGridItem(
+          memories: typedMemories,
+          index: index,
         );
       },
     );
@@ -540,6 +590,36 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
           Text(label,
               style: const TextStyle(color: Colors.white54, fontSize: 14)),
         ],
+      ),
+    );
+  }
+}
+
+class VerticalMemoryFeed extends StatelessWidget {
+  final List<dynamic> memories;
+  final int initialIndex;
+
+  const VerticalMemoryFeed({
+    super.key,
+    required this.memories,
+    required this.initialIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final PageController pageController =
+        PageController(initialPage: initialIndex);
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: PageView.builder(
+        controller: pageController,
+        scrollDirection: Axis.vertical, // This makes it slide like TikTok
+        itemCount: memories.length,
+        itemBuilder: (context, index) {
+          // This returns your existing screen for each "slide"
+          return EnlargedMemoryScreen(memory: memories[index]);
+        },
       ),
     );
   }

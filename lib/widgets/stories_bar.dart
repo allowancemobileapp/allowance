@@ -1,3 +1,4 @@
+// lib/widgets/stories_bar.dart
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';

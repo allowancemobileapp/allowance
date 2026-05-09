@@ -605,6 +605,7 @@ class _ChatTileState extends State<_ChatTile> {
                           'school_name': _metaData?['school_name'],
                           'is_group': false,
                         },
+                        userPreferences: widget.userPreferences,
                       ),
                     ),
                   );

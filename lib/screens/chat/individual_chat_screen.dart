@@ -1,5 +1,6 @@
 // lib/screens/chat/individual_chat_screen.dart
 import 'dart:async';
+import 'package:allowance/models/user_preferences.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,11 +11,13 @@ import '../../widgets/universal_profile_card.dart';
 class IndividualChatScreen extends StatefulWidget {
   final String chatId;
   final Map<String, dynamic> recipientProfile;
+  final UserPreferences userPreferences;
 
   const IndividualChatScreen({
     super.key,
     required this.chatId,
     required this.recipientProfile,
+    required this.userPreferences,
   });
 
   @override
@@ -327,7 +330,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       title: GestureDetector(
         onTap: () {
           if (!isGroup) {
-            UniversalProfileCard.show(context, widget.recipientProfile['id']);
+            UniversalProfileCard.show(
+                context, widget.recipientProfile['id'], widget.userPreferences);
           }
         },
         child: Row(

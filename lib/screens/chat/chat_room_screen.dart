@@ -1472,7 +1472,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                     return ListTile(
                       onTap: () {
                         Navigator.pop(context);
-                        UniversalProfileCard.show(context, userId);
+                        UniversalProfileCard.show(
+                            context, userId, widget.userPreferences);
                       },
                       leading: Container(
                         padding: const EdgeInsets.all(2),

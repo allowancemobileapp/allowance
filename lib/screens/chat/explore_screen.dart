@@ -294,7 +294,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
     final isPlus = user['subscription_tier'] == 'Membership';
 
     return GestureDetector(
-      onTap: () => UniversalProfileCard.show(context, user['id']),
+      onTap: () => UniversalProfileCard.show(
+          context, user['id'], widget.userPreferences),
       child: Container(
         decoration: BoxDecoration(
           color: Colors.grey[900],

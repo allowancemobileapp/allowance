@@ -3,11 +3,12 @@ import 'package:allowance/screens/home/create_story_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/screens/introduction/introduction_screen.dart';
-import 'package:wechat_assets_picker/wechat_assets_picker.dart';
+import 'package:video_player/video_player.dart';
 import 'edit_profile_screen.dart';
 
 const Color _bg = Color(0xFF121212);
@@ -133,7 +134,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         onTap: () {
                           Navigator.pop(context);
                           // Using your static show method to view their profile card[cite: 4]
-                          UniversalProfileCard.show(context, profile['id']);
+                          UniversalProfileCard.show(
+                              context, profile['id'], widget.userPreferences);
                         },
                       );
                     },
@@ -148,23 +150,86 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _confirmLogout() async {
-    final confirmed = await showDialog<bool>(
+    showModalBottomSheet(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Log out'),
-        content: const Text('Are you sure you want to log out?'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Log out')),
-        ],
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Log Out',
+                style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white),
+              ),
+              const SizedBox(height: 16),
+              const Text('Are you sure you want to log out?',
+                  style: TextStyle(color: Colors.white70)),
+              const SizedBox(height: 32),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('Cancel',
+                          style: TextStyle(color: Colors.white)),
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF4CAF50)),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _signOut();
+                      },
+                      child: const Text('Log Out',
+                          style: TextStyle(
+                              color: Colors.black,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  GestureDetector(
+                    onTap: () {/* Placeholder for Terms */},
+                    child: const Text("Terms of Agreement",
+                        style: TextStyle(color: Colors.white38, fontSize: 12)),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8.0),
+                    child: Text(".",
+                        style: TextStyle(
+                            color: Colors.white38,
+                            fontWeight: FontWeight.bold)),
+                  ),
+                  GestureDetector(
+                    onTap: () {
+                      // Open: https://www.freeprivacypolicy.com/live/c2d1ccb0-132f-4ec9-b087-5ada740e3a4f
+                    },
+                    child: const Text("Privacy Policy",
+                        style: TextStyle(color: Colors.white38, fontSize: 12)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+      },
     );
-
-    if (confirmed == true) await _signOut();
   }
 
   Future<void> _signOut() async {
@@ -176,19 +241,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
       await widget.userPreferences.clearLocal();
 
       if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(
+        // Using rootNavigator: true and pushAndRemoveUntil ensures
+        // the app clears the screen stack immediately, preventing the red flicker.
+        Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
           MaterialPageRoute(
-              builder: (_) => IntroductionScreen(
-                  userPreferences: widget.userPreferences,
-                  onFinishIntro: () {})),
+            builder: (_) => IntroductionScreen(
+              userPreferences: widget.userPreferences,
+              onFinishIntro: () {},
+            ),
+          ),
           (route) => false,
         );
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Could not sign out. Try again.'),
-            backgroundColor: Colors.red));
+          content: Text('Could not sign out. Try again.'),
+          backgroundColor: Colors.red,
+        ));
       }
     } finally {
       if (mounted) setState(() => _signingOut = false);
@@ -285,27 +355,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 IconButton(
                   icon:
                       const Icon(Icons.remove_red_eye_outlined, color: _accent),
-                  onPressed: () {},
+                  onPressed: () {
+                    // Logic for profile visibility toggle could go here
+                  },
                   tooltip: 'Profile Visibility',
                 ),
             ],
           ),
-
-          // Floating Action Button - Memories Tab Only
-          // floatingActionButton: _selectedSegment == 0
-          //     ? FloatingActionButton(
-          //         backgroundColor: _accent,
-          //         child: const Icon(Icons.add, color: Colors.black, size: 28),
-          //         onPressed: () {
-          //           if (isPlus) {
-          //             _pickMemoryFlow(context);
-          //           } else {
-          //             _showUpgradeSheet(context);
-          //           }
-          //         },
-          //       )
-          //     : null,
-
           body: ListView(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             children: [
@@ -328,92 +384,103 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
 
-              // Avatar with Plus Icon
+              // Avatar with Plus Icon Stack
               Column(
                 children: [
-                  GestureDetector(
-                    onTap: () async {
-                      final supabase = Supabase.instance.client;
-                      final response = await supabase
-                          .from('stories')
-                          .select('*, profiles:user_id(username, avatar_url)')
-                          .eq('user_id', supabase.auth.currentUser!.id)
-                          .gt('expires_at',
-                              DateTime.now().toUtc().toIso8601String())
-                          .order('created_at', ascending: false);
+                  SizedBox(
+                    width: 110,
+                    height: 110,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        GestureDetector(
+                          onTap: () async {
+                            final supabase = Supabase.instance.client;
+                            final response = await supabase
+                                .from('stories')
+                                .select(
+                                    '*, profiles:user_id(username, avatar_url)')
+                                .eq('user_id', supabase.auth.currentUser!.id)
+                                .gt('expires_at',
+                                    DateTime.now().toUtc().toIso8601String())
+                                .order('created_at', ascending: false);
 
-                      final myStories = response as List<dynamic>;
+                            final myStories = response as List<dynamic>;
 
-                      if (myStories.isNotEmpty) {
-                        if (!mounted) return;
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => StoryViewerScreen(
-                              stories: myStories,
-                              initialIndex: 0,
-                              userPreferences: widget.userPreferences,
-                            ),
-                          ),
-                        );
-                      } else {
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text('You have no active stories yet')),
-                        );
-                      }
-                    },
-                    child: SizedBox(
-                      width: 110,
-                      height: 110,
-                      child: Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          Container(
+                            if (myStories.isNotEmpty) {
+                              if (!mounted) return;
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => StoryViewerScreen(
+                                    stories: myStories,
+                                    initialIndex: 0,
+                                    userPreferences: widget.userPreferences,
+                                  ),
+                                ),
+                              );
+                            } else {
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          'You have no active stories yet')),
+                                );
+                              }
+                            }
+                          },
+                          child: Container(
                             width: 110,
                             height: 110,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               border: Border.all(color: _accent, width: 3),
                             ),
-                          ),
-                          CircleAvatar(
-                            radius: 48,
-                            backgroundColor: Colors.grey[850],
-                            backgroundImage: imageProvider,
-                            child: imageProvider == null
-                                ? Text(
-                                    (up.fullName ?? '?').isNotEmpty
-                                        ? up.fullName![0].toUpperCase()
-                                        : '?',
-                                    style: const TextStyle(
-                                        color: Colors.white, fontSize: 34),
-                                  )
-                                : null,
-                          ),
-                          // Plus Icon - Only visible to trigger story creation / upgrade
-                          Positioned(
-                            bottom: 4,
-                            right: 4,
-                            child: GestureDetector(
-                              onTap: () {
-                                if (isPlus) {
-                                  _pickMemoryFlow(context);
-                                } else {
-                                  _showUpgradeSheet(context);
-                                }
-                              },
-                              child: CircleAvatar(
-                                radius: 14,
-                                backgroundColor: _accent,
-                                child: const Icon(Icons.add,
-                                    color: Colors.black, size: 18),
-                              ),
+                            child: CircleAvatar(
+                              radius: 48,
+                              backgroundColor: Colors.grey[850],
+                              backgroundImage: imageProvider,
+                              child: imageProvider == null
+                                  ? Text(
+                                      (up.fullName ?? '?').isNotEmpty
+                                          ? up.fullName![0].toUpperCase()
+                                          : '?',
+                                      style: const TextStyle(
+                                          color: Colors.white, fontSize: 34),
+                                    )
+                                  : null,
                             ),
                           ),
-                        ],
-                      ),
+                        ),
+                        // RESTORED: Calls _pickMemoryFlow so the warning is gone and the picker works!
+                        Positioned(
+                          bottom: 4,
+                          right: 4,
+                          child: GestureDetector(
+                            onTap: () {
+                              if (isPlus) {
+                                // FIX: Navigate directly to the screen instead of calling _pickMemoryFlow
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                    builder: (_) => CreateStoryScreen(
+                                        userPreferences:
+                                            widget.userPreferences),
+                                  ),
+                                );
+                              } else {
+                                _showUpgradeSheet(context);
+                              }
+                            },
+                            child: CircleAvatar(
+                              radius: 14,
+                              backgroundColor: _accent,
+                              child: const Icon(Icons.add,
+                                  color: Colors.black, size: 18),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -467,7 +534,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
               const SizedBox(height: 16),
 
-              // Content Area
+              // Content Area (Grid or Profile Info)
               _selectedSegment == 0
                   ? _buildInstagramStyleGrid()
                   : Container(
@@ -498,7 +565,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
               const SizedBox(height: 24),
 
-              // Actions
+              // Action Buttons
               ElevatedButton.icon(
                 icon: const Icon(Icons.edit_outlined, size: 20),
                 label: const Text('Edit Profile'),
@@ -541,6 +608,30 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
                 onPressed: _signingOut ? null : _confirmLogout,
+              ),
+
+              // Privacy and Terms Links
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text("Terms of Agreement",
+                      style: TextStyle(color: Colors.white38, fontSize: 11)),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 6),
+                    child: Text("•", style: TextStyle(color: Colors.white38)),
+                  ),
+                  GestureDetector(
+                    onTap: () {
+                      // Logic to open privacy policy link
+                    },
+                    child: const Text("Privacy Policy",
+                        style: TextStyle(
+                            color: Colors.white38,
+                            fontSize: 11,
+                            decoration: TextDecoration.underline)),
+                  ),
+                ],
               ),
               const SizedBox(height: 80),
             ],
@@ -679,29 +770,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  Future<void> _pickMemoryFlow(BuildContext context) async {
-    final List<AssetEntity>? result = await AssetPicker.pickAssets(
-      context,
-      pickerConfig: const AssetPickerConfig(
-        maxAssets: 1,
-        requestType: RequestType.common,
-        themeColor: _accent,
-      ),
-    );
-
-    if (result != null && result.isNotEmpty) {
-      // Navigate to CreateStoryScreen to edit/trim the selection
-      if (!mounted) return;
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) =>
-              CreateStoryScreen(userPreferences: widget.userPreferences),
-        ),
-      );
-    }
-  }
-
   Widget _buildInstagramStyleGrid() {
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser?.id;
@@ -709,7 +777,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (userId == null) return const SizedBox.shrink();
 
     return StreamBuilder<List<Map<String, dynamic>>>(
-      // Connects to Supabase 'memories' table and listens for real-time changes
       stream: supabase
           .from('memories')
           .stream(primaryKey: ['id'])
@@ -753,40 +820,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
           itemCount: memories.length,
           itemBuilder: (context, index) {
-            final memory = memories[index];
-            final isVideo = memory['is_video'] == true;
-
-            return GestureDetector(
-              onTap: () {
-                // Navigate to your viewer here if needed
-              },
-              child: Container(
-                color: Colors.black,
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    // Network image for the thumbnail
-                    Image.network(
-                      memory['media_url'],
-                      fit: BoxFit.cover,
-                      errorBuilder: (ctx, _, __) => Container(
-                        color: _card,
-                        child: const Icon(Icons.broken_image,
-                            color: Colors.white10),
-                      ),
-                    ),
-                    // If it's a video, overlay a play icon
-                    if (isVideo)
-                      const Positioned(
-                        top: 5,
-                        right: 5,
-                        child: Icon(Icons.play_circle_filled,
-                            color: Colors.white70, size: 20),
-                      ),
-                  ],
-                ),
-              ),
-            );
+            // FIX: Pass the whole list and the index
+            return MemoryGridItem(memories: memories, index: index);
           },
         );
       },
@@ -813,6 +848,311 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+// --- PASTE AT THE VERY BOTTOM OF profile_screen.dart ---
+
+// ADD THIS CLASS AT THE BOTTOM OF YOUR FILE
+class VerticalMemoryFeed extends StatelessWidget {
+  final List<dynamic> memories;
+  final int initialIndex;
+
+  const VerticalMemoryFeed({
+    super.key,
+    required this.memories,
+    required this.initialIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final PageController pageController =
+        PageController(initialPage: initialIndex);
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: PageView.builder(
+        controller: pageController,
+        scrollDirection: Axis.vertical, // This makes it slide like TikTok
+        itemCount: memories.length,
+        itemBuilder: (context, index) {
+          return EnlargedMemoryScreen(memory: memories[index]);
+        },
+      ),
+    );
+  }
+}
+
+class MemoryGridItem extends StatefulWidget {
+  final List<Map<String, dynamic>> memories; // Changed from single map
+  final int index; // Added index
+
+  const MemoryGridItem(
+      {super.key, required this.memories, required this.index});
+
+  @override
+  State<MemoryGridItem> createState() => _MemoryGridItemState();
+}
+
+class _MemoryGridItemState extends State<MemoryGridItem> {
+  VideoPlayerController? _videoController;
+  bool _isVideo = false;
+  late Map<String, dynamic> memory; // Local variable for convenience
+
+  @override
+  void initState() {
+    super.initState();
+    // Grab the specific memory using the index
+    memory = widget.memories[widget.index];
+    _isVideo = memory['media_type'] == 'video';
+
+    if (_isVideo) {
+      _videoController =
+          VideoPlayerController.networkUrl(Uri.parse(memory['media_url']))
+            ..initialize().then((_) {
+              if (mounted) setState(() {});
+            });
+    }
+  }
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => VerticalMemoryFeed(
+              memories: widget.memories, // FIX: Pass the entire list
+              initialIndex: widget.index, // FIX: Pass the starting index
+            ),
+          ),
+        );
+      },
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (_isVideo)
+              _videoController != null && _videoController!.value.isInitialized
+                  ? FittedBox(
+                      fit: BoxFit.cover,
+                      child: SizedBox(
+                        width: _videoController!.value.size.width,
+                        height: _videoController!.value.size.height,
+                        child: VideoPlayer(_videoController!),
+                      ),
+                    )
+                  : Container(color: Colors.black)
+            else
+              CachedNetworkImage(
+                imageUrl: memory['media_url'], // Updated to use local variable
+                fit: BoxFit.cover,
+                placeholder: (context, url) =>
+                    Container(color: Colors.grey[900]),
+                errorWidget: (context, url, error) => Container(
+                  color: Colors.grey[900],
+                  child: const Icon(Icons.broken_image, color: Colors.white10),
+                ),
+              ),
+            if (_isVideo)
+              const Positioned(
+                top: 5,
+                right: 5,
+                child: Icon(Icons.play_circle_filled,
+                    color: Colors.white, size: 24),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class EnlargedMemoryScreen extends StatefulWidget {
+  final Map<String, dynamic> memory;
+  const EnlargedMemoryScreen({super.key, required this.memory});
+
+  @override
+  State<EnlargedMemoryScreen> createState() => _EnlargedMemoryScreenState();
+}
+
+class _EnlargedMemoryScreenState extends State<EnlargedMemoryScreen> {
+  VideoPlayerController? _videoController;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.memory['media_type'] == 'video') {
+      _videoController = VideoPlayerController.networkUrl(
+          Uri.parse(widget.memory['media_url']))
+        ..initialize().then((_) {
+          if (mounted) setState(() {});
+          _videoController!.setLooping(true);
+          _videoController!.play();
+        });
+    }
+  }
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    super.dispose();
+  }
+
+  // --- NEW MENU BOTTOM SHEET FOR DELETE ---
+  void _showMemoryOptions(BuildContext context, dynamic memoryId) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading:
+                  const Icon(Icons.delete_outline, color: Colors.redAccent),
+              title: const Text('Delete Memory',
+                  style: TextStyle(color: Colors.redAccent, fontSize: 16)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _deleteMemory(memoryId);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --- NEW DELETE FUNCTION ---
+  Future<void> _deleteMemory(dynamic memoryId) async {
+    try {
+      await Supabase.instance.client
+          .from('memories')
+          .delete()
+          .eq('id', memoryId);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Memory deleted successfully')),
+        );
+        Navigator.pop(context); // Pop back out of the memory viewer
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete memory: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isVideo = widget.memory['media_type'] == 'video';
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // 1. BACKGROUND MEDIA LAYER
+          Center(
+            child: isVideo
+                ? (_videoController != null &&
+                        _videoController!.value.isInitialized
+                    ? AspectRatio(
+                        aspectRatio: _videoController!.value.aspectRatio,
+                        child: VideoPlayer(_videoController!),
+                      )
+                    : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
+                : CachedNetworkImage(
+                    imageUrl: widget.memory['media_url'],
+                    fit: BoxFit.contain,
+                    placeholder: (context, url) =>
+                        const CircularProgressIndicator(
+                            color: Color(0xFF4CAF50)),
+                  ),
+          ),
+
+          // 2. TOP CONTROLS (Back Button & Hamburger Menu)
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.more_vert,
+                        color: Colors.white), // Hamburger Menu
+                    onPressed: () =>
+                        _showMemoryOptions(context, widget.memory['id']),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // 3. BOTTOM CONTROLS (Caption & Video Progress Bar)
+          Positioned(
+            bottom: 20,
+            left: 20,
+            right: 20,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.memory['caption'] != null &&
+                    widget.memory['caption'].toString().isNotEmpty)
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.6),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      widget.memory['caption'],
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
+                    ),
+                  ),
+
+                // PROGRESS BAR NOW PINNED BELOW CAPTION
+                if (isVideo &&
+                    _videoController != null &&
+                    _videoController!.value.isInitialized) ...[
+                  const SizedBox(height: 12),
+                  VideoProgressIndicator(
+                    _videoController!,
+                    allowScrubbing: true,
+                    colors: const VideoProgressColors(
+                      playedColor: Color(0xFF4CAF50),
+                      bufferedColor: Colors.white24,
+                      backgroundColor: Colors.white10,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
