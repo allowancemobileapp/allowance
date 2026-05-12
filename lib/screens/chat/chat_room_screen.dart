@@ -249,6 +249,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       }
 
       await supabase.from('messages').insert(payload);
+      await supabase.from('chats').update({
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+        'last_message': text.isNotEmpty ? text : 'New message',
+      }).eq('id', widget.chatId);
       // ... rest of your metadata update code
     } catch (e) {
       debugPrint('Send error: $e');

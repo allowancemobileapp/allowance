@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:allowance/screens/chat/chat_list_screen.dart';
 import 'package:allowance/screens/home/media_editor_screen.dart';
 import 'package:allowance/widgets/stories_bar.dart';
+import 'package:allowance/widgets/universal_profile_card.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:icons_plus/icons_plus.dart';
 import 'package:allowance/models/user_preferences.dart';
@@ -339,72 +341,6 @@ class _HomeScreenState extends State<HomeScreen> {
             curve: Curves.easeInOut);
       }
     });
-  }
-
-  void _showProfileCard(String username, String? avatarUrl, String? bio) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => DraggableScrollableSheet(
-        initialChildSize: 0.45,
-        minChildSize: 0.35,
-        maxChildSize: 0.75,
-        expand: false,
-        builder: (_, scrollController) => Container(
-          decoration: const BoxDecoration(
-            color: Color(0xFF1E1E1E),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          child: ListView(
-            controller: scrollController,
-            padding: const EdgeInsets.all(24),
-            children: [
-              Center(
-                child: CircleAvatar(
-                  radius: 52,
-                  backgroundColor: Colors.grey[800],
-                  backgroundImage: avatarUrl != null && avatarUrl.isNotEmpty
-                      ? NetworkImage(avatarUrl)
-                      : null,
-                  child: avatarUrl == null || avatarUrl.isEmpty
-                      ? Text(
-                          username.isNotEmpty ? username[0].toUpperCase() : '?',
-                          style: const TextStyle(
-                              fontSize: 40, color: Colors.white))
-                      : null,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text('@$username',
-                  style: const TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white),
-                  textAlign: TextAlign.center),
-              const SizedBox(height: 8),
-              Text(bio?.trim().isNotEmpty == true ? bio! : 'No bio yet',
-                  style: TextStyle(
-                      fontSize: 16,
-                      color: bio?.trim().isNotEmpty == true
-                          ? Colors.white70
-                          : Colors.white54,
-                      height: 1.5),
-                  textAlign: TextAlign.center),
-              const SizedBox(height: 32),
-              Align(
-                alignment: Alignment.center,
-                child: TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Close',
-                        style:
-                            TextStyle(color: Color(0xFF4CAF50), fontSize: 18))),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   void _chooseUniversity() async {
@@ -853,8 +789,79 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _showCommentsSheet(String gistId) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF111111),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => Padding(
+        padding:
+            EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+        child: FractionallySizedBox(
+          heightFactor: 0.7,
+          child: Column(
+            children: [
+              const SizedBox(height: 12),
+              Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: Colors.grey[700],
+                      borderRadius: BorderRadius.circular(10))),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 15),
+                child: Text('Comments',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold)),
+              ),
+              const Divider(color: Colors.white10, height: 1),
+              const Expanded(
+                  child: Center(
+                      child: Text("No comments yet",
+                          style: TextStyle(color: Colors.white54)))),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: const BoxDecoration(
+                    border: Border(top: BorderSide(color: Colors.white10))),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: 'Add a comment...',
+                          hintStyle: const TextStyle(color: Colors.white54),
+                          filled: true,
+                          fillColor: Colors.grey[900],
+                          border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(30),
+                              borderSide: BorderSide.none),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 8),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    const Text('Post',
+                        style: TextStyle(
+                            color: Color(0xFF4CAF50),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // 3. Updated _buildGistSlideshow() – added megaphone icon + tap to open filter sheet
-  // 3. Updated _buildGistSlideshow() – longer titles + "...see more"
   Widget _buildGistSlideshow() {
     final filteredGists = _gistFilter == 'All'
         ? _fetchedGists
@@ -865,15 +872,13 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Padding(
           padding: EdgeInsets.only(top: 40.0),
           child: Center(
-            child: CircularProgressIndicator(color: Color(0xFF4CAF50)),
-          ),
+              child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
         ),
       );
     }
 
-    if (filteredGists.isEmpty) {
+    if (filteredGists.isEmpty)
       return const SliverToBoxAdapter(child: SizedBox());
-    }
 
     return SliverPadding(
       padding: const EdgeInsets.only(bottom: 40, top: 8),
@@ -881,694 +886,31 @@ class _HomeScreenState extends State<HomeScreen> {
         delegate: SliverChildBuilderDelegate(
           (ctx, idx) {
             final gist = filteredGists[idx];
-
-            final imageUrl = (gist['image_url'] as String?) ?? '';
-            final imageUrls =
-                (gist['image_urls'] as List?)?.cast<String>() ?? [];
-            final mediaType = (gist['media_type'] as String?) ?? 'image';
-            final gistUrl = (gist['url'] as String?) ?? '';
-            final fullTitle = gist['title'] as String? ?? '';
-
-            final profileData = gist['profiles'];
             final gistId = (gist['id'] is int)
                 ? gist['id'] as int
                 : int.tryParse(gist['id'].toString()) ?? 0;
 
-            final username = (profileData is Map)
-                ? profileData['username'] as String?
-                : null;
-            final avatarUrl = (profileData is Map)
-                ? profileData['avatar_url'] as String?
-                : null;
-            final bio =
-                (profileData is Map) ? profileData['bio'] as String? : null;
-
-            final likeCount = _gistLikeCounts[gistId] ?? 0;
-            final isLiked = _likedGistIds.contains(gistId);
-
-            final imagesToShow = imageUrls.isNotEmpty
-                ? imageUrls
-                : (imageUrl.isNotEmpty ? [imageUrl] : []);
-
-            int currentPage = 0;
-
-            // ====================== VIDEO GIST ======================
-            if (mediaType == 'video') {
-              final controller = _videoControllers[gistId];
-              final isMuted = _isVideoMuted[gistId] ?? true;
-
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 32.0),
-                child: Column(
-                  children: [
-                    SizedBox(
-                      height: MediaQuery.of(context).size.height * 0.36,
-                      width: MediaQuery.of(context).size.width * 0.85,
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(24),
-                        child: controller != null &&
-                                controller.value.isInitialized
-                            ? Stack(
-                                children: [
-                                  // 1. Black background for letterboxing
-                                  Positioned.fill(
-                                    child: Container(color: Colors.black),
-                                  ),
-
-                                  // 2. Video in original aspect ratio (like YouTube)
-                                  Center(
-                                    child: AspectRatio(
-                                      aspectRatio: controller.value.aspectRatio,
-                                      child: VideoPlayer(controller),
-                                    ),
-                                  ),
-
-                                  // 3. Tap anywhere to play/pause
-                                  Positioned.fill(
-                                    child: GestureDetector(
-                                      onTap: () {
-                                        if (controller.value.isPlaying) {
-                                          controller.pause();
-                                        } else {
-                                          controller.play();
-                                        }
-                                        setState(() {});
-                                      },
-                                    ),
-                                  ),
-
-                                  // 4. FULLSCREEN BUTTON (Top Left)
-                                  Positioned(
-                                    top: 12,
-                                    left: 12,
-                                    child: Material(
-                                      color: Colors.transparent,
-                                      child: InkWell(
-                                        borderRadius: BorderRadius.circular(30),
-                                        onTap: () {
-                                          showDialog(
-                                            context: context,
-                                            builder: (ctx) => Dialog(
-                                              backgroundColor: Colors.black,
-                                              insetPadding: EdgeInsets.zero,
-                                              // We use StatefulBuilder here so the dialog can update its own play/pause icon
-                                              child: StatefulBuilder(builder:
-                                                  (context, setDialogState) {
-                                                return Stack(
-                                                  fit: StackFit.expand,
-                                                  children: [
-                                                    Center(
-                                                      child: AspectRatio(
-                                                        aspectRatio: controller
-                                                            .value.aspectRatio,
-                                                        child: VideoPlayer(
-                                                            controller),
-                                                      ),
-                                                    ),
-
-                                                    // Tap to play/pause inside fullscreen
-                                                    Positioned.fill(
-                                                      child: GestureDetector(
-                                                        onTap: () {
-                                                          if (controller.value
-                                                              .isPlaying) {
-                                                            controller.pause();
-                                                          } else {
-                                                            controller.play();
-                                                          }
-                                                          // Update the dialog UI
-                                                          setDialogState(() {});
-                                                          // Keep the background UI in sync
-                                                          setState(() {});
-                                                        },
-                                                      ),
-                                                    ),
-
-                                                    // Big play icon when paused in fullscreen
-                                                    if (!controller
-                                                        .value.isPlaying)
-                                                      const Center(
-                                                        child: IgnorePointer(
-                                                          child: Icon(
-                                                            Icons
-                                                                .play_circle_fill,
-                                                            size: 80,
-                                                            color:
-                                                                Colors.white70,
-                                                          ),
-                                                        ),
-                                                      ),
-
-                                                    // FULLSCREEN PROGRESS BAR
-                                                    Positioned(
-                                                      bottom: 40,
-                                                      left: 24,
-                                                      right: 24,
-                                                      child:
-                                                          VideoProgressIndicator(
-                                                        controller,
-                                                        allowScrubbing: true,
-                                                        colors:
-                                                            const VideoProgressColors(
-                                                          playedColor:
-                                                              Color(0xFF4CAF50),
-                                                          bufferedColor:
-                                                              Colors.white24,
-                                                          backgroundColor:
-                                                              Colors.black26,
-                                                        ),
-                                                      ),
-                                                    ),
-
-                                                    // Close Button
-                                                    Positioned(
-                                                      top: 40,
-                                                      right: 20,
-                                                      child: IconButton(
-                                                        icon: const Icon(
-                                                            Icons.close,
-                                                            color: Colors.white,
-                                                            size: 30),
-                                                        onPressed: () =>
-                                                            Navigator.pop(ctx),
-                                                      ),
-                                                    ),
-                                                  ],
-                                                );
-                                              }),
-                                            ),
-                                          );
-                                        },
-                                        child: Container(
-                                          padding: const EdgeInsets.all(8),
-                                          decoration: const BoxDecoration(
-                                              color: Colors.black54,
-                                              shape: BoxShape.circle),
-                                          child: const Icon(Icons.fullscreen,
-                                              color: Colors.white, size: 24),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-
-                                  // MUTE BUTTON → BOTTOM LEFT
-                                  Positioned(
-                                    bottom: 12,
-                                    left: 12,
-                                    child: GestureDetector(
-                                      onTap: () {
-                                        setState(() {
-                                          _isVideoMuted[gistId] = !isMuted;
-                                          controller
-                                              .setVolume(isMuted ? 1.0 : 0.0);
-                                        });
-                                      },
-                                      child: CircleAvatar(
-                                        backgroundColor: Colors.black54,
-                                        radius: 20,
-                                        child: Icon(
-                                          isMuted
-                                              ? Icons.volume_off
-                                              : Icons.volume_up,
-                                          color: Colors.white,
-                                          size: 22,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-
-                                  // IN-FEED PROGRESS BAR
-                                  Positioned(
-                                    bottom: 12,
-                                    left: 52,
-                                    right: 12,
-                                    child: VideoProgressIndicator(
-                                      controller,
-                                      allowScrubbing: true,
-                                      colors: const VideoProgressColors(
-                                        playedColor: Color(0xFF4CAF50),
-                                        bufferedColor: Colors.white24,
-                                        backgroundColor: Colors.black26,
-                                      ),
-                                    ),
-                                  ),
-
-                                  // LINK BUTTON (top right)
-                                  if (gistUrl.isNotEmpty)
-                                    Positioned(
-                                      top: 12,
-                                      right: 12,
-                                      child: Material(
-                                        color: Colors.transparent,
-                                        child: InkWell(
-                                          borderRadius:
-                                              BorderRadius.circular(30),
-                                          onTap: () async {
-                                            final uri = Uri.tryParse(gistUrl);
-                                            if (uri != null &&
-                                                await canLaunchUrl(uri)) {
-                                              await launchUrl(uri,
-                                                  mode: LaunchMode
-                                                      .externalApplication);
-                                            }
-                                          },
-                                          child: Container(
-                                            padding: const EdgeInsets.all(12),
-                                            decoration: const BoxDecoration(
-                                                color: Colors.black54,
-                                                shape: BoxShape.circle),
-                                            child: const Icon(Icons.link,
-                                                size: 24, color: Colors.white),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-
-                                  // LIKE BUTTON (bottom right)
-                                  Positioned(
-                                    bottom: 12,
-                                    right: 12,
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(
-                                          vertical: 8, horizontal: 8),
-                                      decoration: BoxDecoration(
-                                          color: Colors.black45,
-                                          borderRadius:
-                                              BorderRadius.circular(20)),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          IconButton(
-                                            padding: EdgeInsets.zero,
-                                            constraints: const BoxConstraints(),
-                                            onPressed: () =>
-                                                _toggleGistLike(gistId),
-                                            icon: Icon(
-                                                isLiked
-                                                    ? Icons.favorite
-                                                    : Icons.favorite_border,
-                                                color: isLiked
-                                                    ? Colors.red
-                                                    : Colors.white,
-                                                size: 28),
-                                          ),
-                                          Text(likeCount.toString(),
-                                              style: const TextStyle(
-                                                  color: Colors.white,
-                                                  fontSize: 15,
-                                                  fontWeight: FontWeight.bold)),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-
-                                  // Big play icon when paused in feed
-                                  if (!controller.value.isPlaying)
-                                    const Center(
-                                      child: IgnorePointer(
-                                        child: Icon(
-                                          Icons.play_circle_fill,
-                                          size: 80,
-                                          color: Colors.white70,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              )
-                            : const Center(child: CircularProgressIndicator()),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-
-                    // Username + Title
-                    GestureDetector(
-                      onTap: () =>
-                          _showProfileCard(username ?? '', avatarUrl, bio),
-                      child: RichText(
-                        textAlign: TextAlign.center,
-                        text: TextSpan(
-                          style: const TextStyle(
-                              fontFamily: 'SanFrancisco', fontSize: 18),
-                          children: [
-                            TextSpan(
-                                text: username != null ? "@$username" : '',
-                                style: TextStyle(
-                                    color: themeColor,
-                                    fontWeight: FontWeight.bold)),
-                            TextSpan(
-                                text: username != null ? ": " : "",
-                                style: TextStyle(
-                                    color: themeColor,
-                                    fontWeight: FontWeight.bold)),
-                            TextSpan(
-                              text: fullTitle.length > 100
-                                  ? "${fullTitle.substring(0, 100)}..."
-                                  : fullTitle,
-                              style: const TextStyle(color: Colors.white),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-
-                    if (fullTitle.length > 100)
-                      GestureDetector(
-                        onTap: () {
-                          showModalBottomSheet(
-                            context: context,
-                            isScrollControlled: true,
-                            backgroundColor: Colors.transparent,
-                            builder: (context) => DraggableScrollableSheet(
-                              initialChildSize: 0.55,
-                              minChildSize: 0.4,
-                              maxChildSize: 0.9,
-                              expand: false,
-                              builder: (_, scrollController) => Container(
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFF1E1E1E),
-                                  borderRadius: BorderRadius.vertical(
-                                      top: Radius.circular(24)),
-                                ),
-                                child: ListView(
-                                  controller: scrollController,
-                                  padding: const EdgeInsets.all(24),
-                                  children: [
-                                    const Text("Full Gist Title",
-                                        style: TextStyle(
-                                            fontSize: 22,
-                                            fontWeight: FontWeight.bold,
-                                            color: Colors.white),
-                                        textAlign: TextAlign.center),
-                                    const SizedBox(height: 16),
-                                    Text(
-                                      fullTitle.replaceAll('\\n', '\n'),
-                                      style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 16,
-                                          height: 1.5),
-                                    ),
-                                    const SizedBox(height: 32),
-                                    Align(
-                                      alignment: Alignment.center,
-                                      child: TextButton(
-                                        onPressed: () => Navigator.pop(context),
-                                        child: const Text('Close',
-                                            style: TextStyle(
-                                                color: Color(0xFF4CAF50),
-                                                fontSize: 18)),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                        child: const Padding(
-                          padding: EdgeInsets.only(top: 4),
-                          child: Text("...see more",
-                              style: TextStyle(
-                                  color: Color(0xFF4CAF50),
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.bold)),
-                        ),
-                      ),
-                  ],
-                ),
-              );
-            }
-
-            // ====================== IMAGE GIST ======================
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 32.0),
-              child: Column(
-                children: [
-                  // CAROUSEL IMAGE AREA
-                  SizedBox(
-                    height: MediaQuery.of(context).size.height * 0.36,
-                    width: MediaQuery.of(context).size.width * 0.85,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(24),
-                      child: Stack(
-                        children: [
-                          Positioned.fill(
-                              child: Container(
-                                  color: _isDarkMode
-                                      ? Colors.grey[750]
-                                      : Colors.grey[300])),
-                          imagesToShow.isEmpty
-                              ? Container(
-                                  color: _isDarkMode
-                                      ? Colors.grey[750]
-                                      : Colors.grey[300])
-                              : PageView.builder(
-                                  itemCount: imagesToShow.length,
-                                  onPageChanged: (page) {
-                                    setState(() => currentPage = page);
-                                  },
-                                  itemBuilder: (context, i) {
-                                    return CachedNetworkImage(
-                                      imageUrl: imagesToShow[i],
-                                      fit: BoxFit.cover,
-                                      placeholder: (_, __) => const Center(
-                                          child: CircularProgressIndicator()),
-                                      errorWidget: (_, __, ___) => const Icon(
-                                          Icons.broken_image,
-                                          size: 50),
-                                    );
-                                  },
-                                ),
-                          if (imagesToShow.length > 1)
-                            Positioned(
-                              top: 12,
-                              left: 12,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                    color: Colors.black.withOpacity(0.7),
-                                    borderRadius: BorderRadius.circular(20)),
-                                child: Text(
-                                  "${currentPage + 1}/${imagesToShow.length}",
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          // Zoom + Download gesture
-                          GestureDetector(
-                            onTap: () {
-                              if (imagesToShow.isNotEmpty) {
-                                showDialog(
-                                  context: context,
-                                  builder: (context) => Dialog(
-                                    backgroundColor: Colors.black,
-                                    insetPadding: EdgeInsets.zero,
-                                    child: Stack(
-                                      children: [
-                                        PageView.builder(
-                                          itemCount: imagesToShow.length,
-                                          itemBuilder: (context, i) =>
-                                              InteractiveViewer(
-                                            panEnabled: true,
-                                            minScale: 0.5,
-                                            maxScale: 4.0,
-                                            child: CachedNetworkImage(
-                                                imageUrl: imagesToShow[i],
-                                                fit: BoxFit.contain),
-                                          ),
-                                        ),
-                                        Positioned(
-                                          top: 40,
-                                          right: 20,
-                                          child: IconButton(
-                                            icon: const Icon(Icons.close,
-                                                color: Colors.white, size: 30),
-                                            onPressed: () =>
-                                                Navigator.pop(context),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              }
-                            },
-                            onLongPress: () => _downloadGistImage(
-                                imagesToShow.isNotEmpty
-                                    ? imagesToShow.first
-                                    : imageUrl),
-                          ),
-                          // Link button
-                          if (gistUrl.isNotEmpty)
-                            Positioned(
-                              top: 12,
-                              right: 12,
-                              child: Material(
-                                color: Colors.transparent,
-                                child: InkWell(
-                                  borderRadius: BorderRadius.circular(30),
-                                  onTap: () async {
-                                    final uri = Uri.tryParse(gistUrl);
-                                    if (uri != null &&
-                                        await canLaunchUrl(uri)) {
-                                      await launchUrl(uri,
-                                          mode: LaunchMode.externalApplication);
-                                    }
-                                  },
-                                  child: Container(
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: const BoxDecoration(
-                                        color: Colors.black54,
-                                        shape: BoxShape.circle),
-                                    child: const Icon(Icons.link,
-                                        size: 24, color: Colors.white),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          // Like button
-                          Positioned(
-                            bottom: 12,
-                            right: 12,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  vertical: 8, horizontal: 8),
-                              decoration: BoxDecoration(
-                                  color: Colors.black45,
-                                  borderRadius: BorderRadius.circular(20)),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                    onPressed: () => _toggleGistLike(gistId),
-                                    icon: Icon(
-                                        isLiked
-                                            ? Icons.favorite
-                                            : Icons.favorite_border,
-                                        color:
-                                            isLiked ? Colors.red : Colors.white,
-                                        size: 28),
-                                  ),
-                                  Text(likeCount.toString(),
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  // Username + Title
-                  GestureDetector(
-                    onTap: () =>
-                        _showProfileCard(username ?? '', avatarUrl, bio),
-                    child: RichText(
-                      textAlign: TextAlign.center,
-                      text: TextSpan(
-                        style: const TextStyle(
-                            fontFamily: 'SanFrancisco', fontSize: 18),
-                        children: [
-                          TextSpan(
-                              text: username != null ? "@$username" : '',
-                              style: TextStyle(
-                                  color: themeColor,
-                                  fontWeight: FontWeight.bold)),
-                          TextSpan(
-                              text: username != null ? ": " : "",
-                              style: TextStyle(
-                                  color: themeColor,
-                                  fontWeight: FontWeight.bold)),
-                          TextSpan(
-                            text: fullTitle.length > 100
-                                ? "${fullTitle.substring(0, 100)}..."
-                                : fullTitle,
-                            style: const TextStyle(color: Colors.white),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  // "...see more"
-                  if (fullTitle.length > 100)
-                    GestureDetector(
-                      onTap: () {
-                        showModalBottomSheet(
-                          context: context,
-                          isScrollControlled: true,
-                          backgroundColor: Colors.transparent,
-                          builder: (context) => DraggableScrollableSheet(
-                            initialChildSize: 0.55,
-                            minChildSize: 0.4,
-                            maxChildSize: 0.9,
-                            expand: false,
-                            builder: (_, scrollController) => Container(
-                              decoration: const BoxDecoration(
-                                color: Color(0xFF1E1E1E),
-                                borderRadius: BorderRadius.vertical(
-                                    top: Radius.circular(24)),
-                              ),
-                              child: ListView(
-                                controller: scrollController,
-                                padding: const EdgeInsets.all(24),
-                                children: [
-                                  const Text(
-                                    "Full Gist Title",
-                                    style: TextStyle(
-                                        fontSize: 22,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.white),
-                                    textAlign: TextAlign.center,
-                                  ),
-                                  const SizedBox(height: 16),
-                                  Text(
-                                    fullTitle.replaceAll('\\n', '\n'),
-                                    style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 16,
-                                        height: 1.5),
-                                  ),
-                                  const SizedBox(height: 32),
-                                  Align(
-                                    alignment: Alignment.center,
-                                    child: TextButton(
-                                      onPressed: () => Navigator.pop(context),
-                                      child: const Text('Close',
-                                          style: TextStyle(
-                                              color: Color(0xFF4CAF50),
-                                              fontSize: 18)),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                      child: const Padding(
-                        padding: EdgeInsets.only(top: 4),
-                        child: Text("...see more",
-                            style: TextStyle(
-                                color: Color(0xFF4CAF50),
-                                fontSize: 15,
-                                fontWeight: FontWeight.bold)),
-                      ),
-                    ),
-                ],
-              ),
+            // Using an isolated StatefulWidget drastically improves scroll performance
+            return _GistItemCard(
+              key: ValueKey(
+                  gistId), // Critical for Flutter to cache the scroll items
+              gist: gist,
+              gistId: gistId,
+              videoController: _videoControllers[gistId],
+              isMutedInitial: _isVideoMuted[gistId] ?? true,
+              likeCount: _gistLikeCounts[gistId] ?? 0,
+              isLiked: _likedGistIds.contains(gistId),
+              onToggleLike: () => _toggleGistLike(gistId),
+              onShowComments: () => _showCommentsSheet(gistId.toString()),
+              onDownload: _downloadGistImage,
+              onToggleMute: (muted) => _isVideoMuted[gistId] = muted,
+              themeColor: themeColor,
+              prefs: _prefs,
             );
           },
           childCount: filteredGists.length,
+          addAutomaticKeepAlives: true,
+          addRepaintBoundaries: true,
         ),
       ),
     );
@@ -1666,7 +1008,6 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final Color bgColor = _isDarkMode ? Colors.grey[900]! : Colors.grey[100]!;
-
     return Theme(
       data: _isDarkMode
           ? ThemeData.dark().copyWith(scaffoldBackgroundColor: bgColor)
@@ -1692,6 +1033,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
 
             // The standard Message/Chat Icon
+            // The standard Message/Chat Icon
             FloatingActionButton(
               heroTag: 'chat_btn',
               backgroundColor: Colors.transparent,
@@ -1700,7 +1042,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 width: 58,
                 height: 58,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF4CAF50),
+                  color: const Color(0xFF4CAF50), // Your green background
                   borderRadius: BorderRadius.circular(18),
                   boxShadow: [
                     BoxShadow(
@@ -1710,8 +1052,73 @@ class _HomeScreenState extends State<HomeScreen> {
                     )
                   ],
                 ),
-                child: const Icon(Icons.chat_bubble_rounded,
-                    color: Colors.white, size: 30),
+                child: StreamBuilder<List<Map<String, dynamic>>>(
+                  stream: supabase.auth.currentUser == null
+                      ? const Stream.empty()
+                      : supabase
+                          .from('messages')
+                          .stream(primaryKey: ['id']).eq('is_read', false),
+                  builder: (context, snapshot) {
+                    final myId = supabase.auth.currentUser?.id;
+                    final allUnread = snapshot.data ?? [];
+
+                    // Count only messages NOT sent by me
+                    final unreadCount = allUnread
+                        .where((msg) => msg['sender_id'] != myId)
+                        .length;
+
+                    return Stack(
+                      clipBehavior: Clip
+                          .none, // Allows the badge to sit right on the edge
+                      children: [
+                        // 1. The White Chat Icon (Perfectly Centered)
+                        const Center(
+                          child: Icon(
+                            Icons.chat_bubble_rounded,
+                            color: Colors.white,
+                            size: 28,
+                          ),
+                        ),
+
+                        // 2. The Red Badge (Positioned on the Green Background)
+                        if (unreadCount > 0)
+                          Positioned(
+                            top: 6, // Adjusted to sit on the green area
+                            right: 6, // Adjusted to sit on the green area
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 5, vertical: 2),
+                              constraints: const BoxConstraints(
+                                minWidth: 18,
+                                minHeight: 18,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent,
+                                borderRadius: BorderRadius.circular(10),
+                                // This thin green border makes the red look "cut out" of the background
+                                border: Border.all(
+                                  color: const Color(0xFF4CAF50),
+                                  width: 1.5,
+                                ),
+                              ),
+                              child: Center(
+                                child: Text(
+                                  unreadCount > 99
+                                      ? '99+'
+                                      : unreadCount.toString(),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
               ),
               onPressed: () {
                 Navigator.push(
@@ -2254,4 +1661,315 @@ class _GistBarHeaderDelegate extends SliverPersistentHeaderDelegate {
   @override
   bool shouldRebuild(covariant SliverPersistentHeaderDelegate oldDelegate) =>
       true;
+}
+
+class _GistItemCard extends StatefulWidget {
+  final Map<String, dynamic> gist;
+  final int gistId;
+  final VideoPlayerController? videoController;
+  final bool isMutedInitial;
+  final int likeCount;
+  final bool isLiked;
+  final VoidCallback onToggleLike;
+  final VoidCallback onShowComments;
+  final Function(String) onDownload;
+  final Function(bool) onToggleMute;
+  final Color themeColor;
+  final UserPreferences prefs;
+
+  const _GistItemCard({
+    super.key,
+    required this.gist,
+    required this.gistId,
+    this.videoController,
+    required this.isMutedInitial,
+    required this.likeCount,
+    required this.isLiked,
+    required this.onToggleLike,
+    required this.onShowComments,
+    required this.onDownload,
+    required this.onToggleMute,
+    required this.themeColor,
+    required this.prefs,
+  });
+
+  @override
+  State<_GistItemCard> createState() => _GistItemCardState();
+}
+
+class _GistItemCardState extends State<_GistItemCard>
+    with AutomaticKeepAliveClientMixin {
+  int _localPageIndex = 0;
+  late bool _isMuted;
+
+  // 1. THIS IS THE MAGIC KEY: It prevents the item from being destroyed when it scrolls off-screen
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _isMuted = widget.isMutedInitial;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 2. REQUIRED FOR AUTOMATIC KEEP ALIVE
+    super.build(context);
+
+    final imageUrl = (widget.gist['image_url'] as String?) ?? '';
+    final imageUrls =
+        (widget.gist['image_urls'] as List?)?.cast<String>() ?? [];
+    final mediaType = (widget.gist['media_type'] as String?) ?? 'image';
+    final gistUrl = (widget.gist['url'] as String?) ?? '';
+    final String fullTitle = widget.gist['title'] as String? ?? '';
+    final imagesToShow = imageUrls.isNotEmpty
+        ? imageUrls
+        : (imageUrl.isNotEmpty ? [imageUrl] : []);
+
+    final profileData = widget.gist['profiles'];
+    final userId = widget.gist['user_id']?.toString() ?? '';
+    final String username =
+        (profileData is Map ? profileData['username']?.toString() : null) ??
+            'User';
+    final avatarUrl =
+        (profileData is Map) ? profileData['avatar_url'] as String? : null;
+
+    // --- 1. MEDIA WIDGET ---
+    Widget mediaWidget;
+    if (mediaType == 'video') {
+      final controller = widget.videoController;
+      mediaWidget = controller != null && controller.value.isInitialized
+          ? Column(
+              children: [
+                AspectRatio(
+                  aspectRatio: controller.value.aspectRatio,
+                  child: Stack(
+                    alignment: Alignment.bottomCenter,
+                    children: [
+                      GestureDetector(
+                        onTap: () => setState(() {
+                          controller.value.isPlaying
+                              ? controller.pause()
+                              : controller.play();
+                        }),
+                        child: VideoPlayer(controller),
+                      ),
+                      Positioned(
+                        bottom: 12,
+                        right: 12,
+                        child: GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              _isMuted = !_isMuted;
+                              controller.setVolume(_isMuted ? 0.0 : 1.0);
+                            });
+                            widget.onToggleMute(_isMuted);
+                          },
+                          child: CircleAvatar(
+                            backgroundColor: Colors.black54,
+                            radius: 14,
+                            child: Icon(
+                                _isMuted ? Icons.volume_off : Icons.volume_up,
+                                color: Colors.white,
+                                size: 16),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                VideoProgressIndicator(controller,
+                    allowScrubbing: true,
+                    colors: const VideoProgressColors(
+                        playedColor: Color(0xFF4CAF50),
+                        bufferedColor: Colors.white24)),
+              ],
+            )
+          : Container(
+              height: 300,
+              color: Colors.black,
+              child: const Center(
+                  child: CircularProgressIndicator(color: Color(0xFF4CAF50))));
+    } else {
+      mediaWidget = imagesToShow.isEmpty
+          ? Container(height: 300, color: Colors.grey[900])
+          : SizedBox(
+              width: double.infinity,
+              height: MediaQuery.of(context).size.width,
+              child: Stack(
+                children: [
+                  PageView.builder(
+                    itemCount: imagesToShow.length,
+                    onPageChanged: (p) => setState(() => _localPageIndex = p),
+                    itemBuilder: (ctx, i) => CachedNetworkImage(
+                      imageUrl: imagesToShow[i],
+                      fit: BoxFit.cover,
+                      // 3. THIS STOPS THE UI THREAD FREEZE BY DOWNSAMPLING LARGE IMAGES
+                      memCacheWidth: 800,
+                      memCacheHeight: 800,
+                    ),
+                  ),
+                  if (imagesToShow.length > 1)
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(20)),
+                        child: Text(
+                            "${_localPageIndex + 1}/${imagesToShow.length}",
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 12)),
+                      ),
+                    ),
+                ],
+              ),
+            );
+    }
+
+    // --- 2. ACTION BAR ---
+    Widget actionBar = Row(
+      children: [
+        IconButton(
+          icon: Icon(widget.isLiked ? Icons.favorite : Icons.favorite_border,
+              color: widget.isLiked ? Colors.red : Colors.white, size: 28),
+          onPressed: widget.onToggleLike,
+        ),
+        IconButton(
+          icon: const Icon(CupertinoIcons.chat_bubble,
+              color: Colors.white, size: 26),
+          onPressed: widget.onShowComments,
+        ),
+        const IconButton(
+            icon: Text('🚀', style: TextStyle(fontSize: 22)), onPressed: null),
+        IconButton(
+          icon: const Icon(Icons.download_for_offline_outlined,
+              color: Colors.white, size: 26),
+          onPressed: () {
+            final target = imagesToShow.isNotEmpty
+                ? imagesToShow[_localPageIndex]
+                : imageUrl;
+            if (target.isNotEmpty) widget.onDownload(target);
+          },
+        ),
+        const Spacer(),
+        if (gistUrl.isNotEmpty)
+          IconButton(
+            icon: const Icon(Icons.link, color: Colors.white, size: 24),
+            onPressed: () async {
+              final uri = Uri.tryParse(gistUrl);
+              if (uri != null && await canLaunchUrl(uri)) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
+            },
+          ),
+      ],
+    );
+
+    // --- 3. CAPTION AREA ---
+    Widget captionArea = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (widget.likeCount > 0)
+            Text('${widget.likeCount} likes',
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13)),
+          const SizedBox(height: 8),
+          GestureDetector(
+            onTap: () => userId.isNotEmpty
+                ? UniversalProfileCard.show(context, userId, widget.prefs)
+                : null,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(
+                  radius: 14,
+                  backgroundColor: Colors.grey[800],
+                  // 4. DOWN-SAMPLE AVATARS AS WELL
+                  backgroundImage: avatarUrl != null
+                      ? CachedNetworkImageProvider(avatarUrl,
+                          maxWidth: 100, maxHeight: 100)
+                      : null,
+                  child: avatarUrl == null
+                      ? Text(username[0].toUpperCase(),
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold))
+                      : null,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      RichText(
+                        text: TextSpan(
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 14, height: 1.3),
+                          children: [
+                            TextSpan(
+                                text: '$username  ',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold)),
+                            TextSpan(
+                                text: fullTitle.length > 90
+                                    ? "${fullTitle.substring(0, 90)}..."
+                                    : fullTitle),
+                          ],
+                        ),
+                      ),
+                      if (fullTitle.length > 90)
+                        GestureDetector(
+                          onTap: () {
+                            showModalBottomSheet(
+                              context: context,
+                              backgroundColor: const Color(0xFF1E1E1E),
+                              shape: const RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.vertical(
+                                      top: Radius.circular(24))),
+                              builder: (context) => Padding(
+                                padding: const EdgeInsets.all(24),
+                                child: SingleChildScrollView(
+                                  child: Text(fullTitle,
+                                      style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 16,
+                                          height: 1.5)),
+                                ),
+                              ),
+                            );
+                          },
+                          child: const Padding(
+                            padding: EdgeInsets.only(top: 4),
+                            child: Text("see more...",
+                                style: TextStyle(
+                                    color: Color(0xFF4CAF50),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13)),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 30),
+        ],
+      ),
+    );
+
+    return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [mediaWidget, actionBar, captionArea]);
+  }
 }

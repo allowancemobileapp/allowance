@@ -1,6 +1,7 @@
 // lib/screens/chat/individual_chat_screen.dart
 import 'dart:async';
 import 'package:allowance/models/user_preferences.dart';
+import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -37,6 +38,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   final bool _showScrollToBottom = false;
   // For file/media logic
   final Map<String, Color> _userColors = {};
+  final Map<String, GlobalKey> _messageKeys = {};
+  String? _highlightedMessageId;
 
   // FIX: Declare the stream here
   late final Stream<List<Map<String, dynamic>>> _messageStream;
@@ -215,6 +218,10 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       };
 
       await supabase.from('messages').insert(payload);
+      await supabase
+          .from('chats')
+          .update({'updated_at': DateTime.now().toIso8601String()}).eq(
+              'id', widget.chatId);
 
       // Update chat's last activity
       await supabase.from('chats').update({
@@ -400,57 +407,67 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
   Widget _buildBubble(List<Map<String, dynamic>> messages, int index) {
     final message = messages[index];
+    final messageId = message['id'].toString();
+    // Register a key for this specific message for scrolling
+    _messageKeys.putIfAbsent(messageId, () => GlobalKey());
+
     final isMe = message['sender_id'] == supabase.auth.currentUser!.id;
     final content = message['content'] ?? '';
     final timeStr = _formatTime(message['created_at']);
     final isRead = message['is_read'] == true;
     final hasMedia = message['media_url'] != null;
 
-    return Dismissible(
-      key: Key(message['id'].toString()),
-      direction: DismissDirection.startToEnd,
-      confirmDismiss: (_) {
-        HapticFeedback.lightImpact();
-        setState(() => _replyMessage = message);
-        return Future.value(false);
-      },
-      background: Container(
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.only(left: 20),
-        child: const Icon(Icons.reply, color: Color(0xFF4CAF50)),
-      ),
-      child: Align(
-        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-          constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.75),
-          decoration: BoxDecoration(
-            color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
-            borderRadius: BorderRadius.circular(16).copyWith(
-              bottomRight: isMe ? Radius.zero : const Radius.circular(16),
-              bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
+    // Check if this specific message should be highlighted
+    final bool isHighlighted = _highlightedMessageId == messageId;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 600), // Smooth fade transition
+      color: isHighlighted
+          ? const Color(0xFF4CAF50).withOpacity(0.3)
+          : Colors.transparent,
+      child: Dismissible(
+        key: Key('dismiss_$messageId'),
+        direction: DismissDirection.startToEnd,
+        confirmDismiss: (_) {
+          HapticFeedback.lightImpact();
+          setState(() => _replyMessage = message);
+          return Future.value(false);
+        },
+        background: Container(
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.only(left: 20),
+          child: const Icon(Icons.reply, color: Color(0xFF4CAF50)),
+        ),
+        child: Align(
+          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+          child: Container(
+            key: _messageKeys[messageId], // Attach the scroll key here!
+            margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+            constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.75),
+            decoration: BoxDecoration(
+              color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
+              borderRadius: BorderRadius.circular(16).copyWith(
+                bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+                bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
+              ),
             ),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 1. Reply UI
-                if (message['reply_to_id'] != null)
-                  _buildReplyInsideBubble(message),
-
-                // 2. Media UI
-                if (hasMedia)
-                  _buildMediaSection(message, isMe, isRead, timeStr),
-
-                // 3. Text UI
-                if (content.toString().isNotEmpty &&
-                    content != '📸 Photo' &&
-                    content != '🎥 Video')
-                  _buildTextAndTimestamp(content, timeStr, isMe, isRead),
-              ],
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (message['reply_to_id'] != null ||
+                      (message['reply_content']?.startsWith('Story_') ?? false))
+                    _buildReplyInsideBubble(message),
+                  if (hasMedia)
+                    _buildMediaSection(message, isMe, isRead, timeStr),
+                  if (content.toString().isNotEmpty &&
+                      content != '📸 Photo' &&
+                      content != '🎥 Video')
+                    _buildTextAndTimestamp(content, timeStr, isMe, isRead),
+                ],
+              ),
             ),
           ),
         ),
@@ -459,34 +476,152 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   Widget _buildReplyInsideBubble(Map<String, dynamic> message) {
-    return Container(
-      margin: const EdgeInsets.all(4),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: Colors.black12,
-        borderRadius: BorderRadius.circular(8),
-        border:
-            const Border(left: BorderSide(color: Color(0xFF4CAF50), width: 4)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            "Replying to",
-            style: TextStyle(
-                color: _userColors['reply'] ?? Colors.greenAccent,
-                fontSize: 11,
-                fontWeight: FontWeight.bold),
-          ),
-          Text(
-            message['reply_content'] ?? '',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: Colors.white70, fontSize: 12),
-          ),
-        ],
+    final replyContent = message['reply_content']?.toString() ?? '';
+    final bool isStoryReply =
+        replyContent.startsWith('Story_') || replyContent == 'Story';
+    final String? storyImageUrl = message['thumbnail_url'];
+
+    // Extract the caption if it exists
+    String displayReplyText = replyContent;
+    if (isStoryReply && replyContent.startsWith('Story_')) {
+      final parts = replyContent.split('_');
+      if (parts.length > 2) {
+        displayReplyText = parts.sublist(2).join('_'); // Get the caption
+      } else {
+        displayReplyText = "Story";
+      }
+    }
+
+    return GestureDetector(
+      onTap: () => _handleReplyReferenceTap(message),
+      child: Container(
+        margin: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: Colors.black12,
+          borderRadius: BorderRadius.circular(8),
+          border: const Border(
+              left: BorderSide(color: Color(0xFF4CAF50), width: 4)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isStoryReply ? "Replying to Story" : "Replying to",
+                      style: TextStyle(
+                          color: _userColors['reply'] ?? Colors.greenAccent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      displayReplyText,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // Renders the Story thumbnail on the right side
+            if (isStoryReply && storyImageUrl != null)
+              ClipRRect(
+                borderRadius: const BorderRadius.only(
+                  topRight: Radius.circular(8),
+                  bottomRight: Radius.circular(8),
+                ),
+                child: CachedNetworkImage(
+                  imageUrl: storyImageUrl,
+                  width: 50,
+                  height: 50,
+                  fit: BoxFit.cover,
+                  placeholder: (context, url) =>
+                      Container(color: Colors.white10, width: 50, height: 50),
+                  errorWidget: (context, url, error) => const Icon(
+                      Icons.image_not_supported,
+                      color: Colors.white54,
+                      size: 20),
+                ),
+              ),
+          ],
+        ),
       ),
     );
+  }
+
+  Future<void> _handleReplyReferenceTap(Map<String, dynamic> message) async {
+    final String replyContent = message['reply_content'] ?? '';
+
+    if (replyContent.startsWith('Story_')) {
+      // 1. It's a Story! Extract the ID
+      final storyId = replyContent.split('_')[1];
+
+      // Fetch the single story from Supabase before opening
+      final response = await supabase
+          .from('stories')
+          .select('*, profiles:user_id(username, avatar_url, school_name)')
+          .eq('id', storyId)
+          .maybeSingle();
+
+      if (response != null && mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => StoryViewerScreen(
+              stories: [response],
+              initialIndex: 0,
+              userPreferences: widget.userPreferences,
+              storyId: storyId,
+            ),
+          ),
+        );
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Story is no longer available.'),
+            backgroundColor: Colors.black87,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } else if (message['reply_to_id'] != null) {
+      // 2. It's a Chat Message! Find its key and scroll to it.
+      final targetId = message['reply_to_id'].toString();
+      final key = _messageKeys[targetId];
+
+      // Trigger the WhatsApp-style visual highlight
+      setState(() => _highlightedMessageId = targetId);
+
+      // Remove highlight after 1.5 seconds
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _highlightedMessageId = null);
+      });
+
+      if (key != null && key.currentContext != null) {
+        Scrollable.ensureVisible(
+          key.currentContext!,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          alignment: 0.5, // 0.5 places the message right in the middle
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Message is too far back. Scroll up to load older messages.'),
+            backgroundColor: Colors.black87,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    }
   }
 
   Widget _buildMediaSection(

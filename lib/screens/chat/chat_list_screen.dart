@@ -164,10 +164,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   if (participantSnapshot.connectionState ==
                       ConnectionState.waiting) {
                     return const Center(
-                      child: CircularProgressIndicator(
-                        color: Color(0xFF4CAF50),
-                      ),
-                    );
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF4CAF50)));
                   }
 
                   final participantRecords = participantSnapshot.data ?? [];
@@ -184,14 +182,13 @@ class _ChatListScreenState extends State<ChatListScreen> {
                         .from('chats')
                         .stream(primaryKey: ['id'])
                         .inFilter('id', myChatIds)
-                        .order('updated_at', ascending: false),
+                        .order('updated_at',
+                            ascending: false), // Database-level sort
                     builder: (context, chatSnapshot) {
                       if (!chatSnapshot.hasData) {
                         return const Center(
-                          child: CircularProgressIndicator(
-                            color: Color(0xFF4CAF50),
-                          ),
-                        );
+                            child: CircularProgressIndicator(
+                                color: Color(0xFF4CAF50)));
                       }
 
                       return StreamBuilder<List<Map<String, dynamic>>>(
@@ -202,10 +199,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                         builder: (context, followerSnapshot) {
                           if (!followerSnapshot.hasData) {
                             return const Center(
-                              child: CircularProgressIndicator(
-                                color: Color(0xFF4CAF50),
-                              ),
-                            );
+                                child: CircularProgressIndicator(
+                                    color: Color(0xFF4CAF50)));
                           }
 
                           final followingIds = followerSnapshot.data!
@@ -219,15 +214,14 @@ class _ChatListScreenState extends State<ChatListScreen> {
                             builder: (context, allParticipantsSnapshot) {
                               if (!allParticipantsSnapshot.hasData) {
                                 return const Center(
-                                  child: CircularProgressIndicator(
-                                    color: Color(0xFF4CAF50),
-                                  ),
-                                );
+                                    child: CircularProgressIndicator(
+                                        color: Color(0xFF4CAF50)));
                               }
 
                               final allParticipants =
                                   allParticipantsSnapshot.data!;
 
+                              // 1. Filter the chats based on Tab and Search
                               final filteredChats =
                                   chatSnapshot.data!.where((chat) {
                                 final isGroup = chat['is_group'] == true;
@@ -239,10 +233,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                     _searchController.text.toLowerCase();
 
                                 if (searchText.isNotEmpty &&
-                                    !chatName.contains(searchText)) {
+                                    !chatName.contains(searchText))
                                   return false;
-                                }
-
                                 if (_selectedTabIndex == 2) return isGroup;
                                 if (isGroup) return false;
 
@@ -267,14 +259,21 @@ class _ChatListScreenState extends State<ChatListScreen> {
                                 return false;
                               }).toList();
 
+                              // 2. FORCE SORT (The Fix):
+                              // This ensures that even after filtering, the list is re-sorted by time.
                               filteredChats.sort((a, b) {
+                                // We check 'last_message_at' first, then 'updated_at' as a fallback.
                                 final aTime = DateTime.tryParse(
-                                        (a['updated_at'] ?? '').toString()) ??
-                                    DateTime.fromMillisecondsSinceEpoch(0);
+                                        a['last_message_at']?.toString() ??
+                                            a['updated_at']?.toString() ??
+                                            '') ??
+                                    DateTime(0);
                                 final bTime = DateTime.tryParse(
-                                        (b['updated_at'] ?? '').toString()) ??
-                                    DateTime.fromMillisecondsSinceEpoch(0);
-                                return bTime.compareTo(aTime);
+                                        b['last_message_at']?.toString() ??
+                                            b['updated_at']?.toString() ??
+                                            '') ??
+                                    DateTime(0);
+                                return bTime.compareTo(aTime); // Newest first
                               });
 
                               if (filteredChats.isEmpty) {

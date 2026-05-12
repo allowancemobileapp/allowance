@@ -13,12 +13,14 @@ class StoryViewerScreen extends StatefulWidget {
   final List<dynamic> stories;
   final int initialIndex;
   final UserPreferences userPreferences;
+  final String? storyId;
 
   const StoryViewerScreen({
     super.key,
     required this.stories,
     required this.initialIndex,
     required this.userPreferences,
+    this.storyId, // Change 'required String storyId' to 'this.storyId'
   });
 
   @override
@@ -40,6 +42,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   bool _isTransitioning = false;
   int _viewCount = 0;
   StreamSubscription<List<Map<String, dynamic>>>? _viewSubscription;
+  final TextEditingController _replyController = TextEditingController();
+  bool _isSendingReply = false;
 
   late final List<dynamic> _sortedStories;
 
@@ -50,10 +54,18 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   void initState() {
     super.initState();
     _sortedStories = widget.stories;
-    _currentIndex = widget.initialIndex;
+
+    // If a storyId is passed (from chat), find its index in the list
+    if (widget.storyId != null) {
+      final index = _sortedStories
+          .indexWhere((s) => s['id'].toString() == widget.storyId);
+      _currentIndex = index != -1 ? index : widget.initialIndex;
+    } else {
+      _currentIndex = widget.initialIndex;
+    }
+
     _pageController = PageController(initialPage: _currentIndex);
     _progressValues = List.filled(_sortedStories.length, 0.0);
-
     _loadLikedStories();
     _playCurrentStory();
     _startProgressForCurrentStory();
@@ -527,6 +539,85 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
+  // Helper to find existing chat or create a new one
+  Future<String> _getOrCreateDirectChat(
+      String currentUserId, String otherUserId) async {
+    try {
+      // This calls the existing function in your Supabase schema
+      final response = await Supabase.instance.client.rpc(
+        'get_or_create_personal_chat',
+        params: {
+          'user_a': currentUserId,
+          'user_b': otherUserId,
+        },
+      );
+
+      // Returns the UUID String of the chat
+      return response.toString();
+    } catch (e) {
+      debugPrint("RPC Chat Error: $e");
+      rethrow;
+    }
+  }
+
+  // Method to send the reply
+  Future<void> _sendStoryReply(Map<String, dynamic> story) async {
+    final text = _replyController.text.trim();
+    if (text.isEmpty || _isSendingReply) return;
+
+    final currentUser = Supabase.instance.client.auth.currentUser;
+    if (currentUser == null) return;
+
+    final storyCreatorId = story['user_id'];
+    if (currentUser.id == storyCreatorId) return;
+
+    setState(() => _isSendingReply = true);
+    final originalText = text;
+    _replyController.clear();
+    FocusScope.of(context).unfocus();
+
+    try {
+      final String chatId =
+          await _getOrCreateDirectChat(currentUser.id, storyCreatorId);
+
+      final String? storyImage = story['media_type'] == 'video'
+          ? story['thumbnail_url'] ?? story['media_url']
+          : story['media_url'];
+
+      // Extract caption and format the reply payload
+      final String caption = (story['caption'] ?? '').toString().trim();
+      final String replyPayload = caption.isNotEmpty
+          ? 'Story_${story['id']}_$caption'
+          : 'Story_${story['id']}';
+
+      await Supabase.instance.client.from('messages').insert({
+        'chat_id': chatId,
+        'sender_id': currentUser.id,
+        'content': text,
+        'reply_content': replyPayload,
+        'thumbnail_url': storyImage,
+      });
+
+      if (mounted) {
+        _resumeStory();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Sent ✓', style: TextStyle(color: Colors.white)),
+            backgroundColor: Colors.black87,
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Story Reply Error: $e');
+      if (mounted) {
+        _replyController.text = originalText;
+      }
+    } finally {
+      if (mounted) setState(() => _isSendingReply = false);
+    }
+  }
+
   Future<void> _deleteStory() async {
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null) return;
@@ -605,6 +696,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   // === REPLACE dispose WITH THIS ===
   @override
   void dispose() {
+    _replyController.dispose();
     _progressTimer?.cancel();
     _videoController?.removeListener(_videoProgressListener);
     _videoController?.dispose();
@@ -625,6 +717,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
     return Scaffold(
       backgroundColor: Colors.black,
+      // FIX: Prevents the Scaffold from pushing the Stack up,
+      // allowing our AnimatedPositioned to handle it cleanly.
+      resizeToAvoidBottomInset: false,
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -699,8 +794,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                               color: Colors.white, size: 60),
                         ),
                       ),
-
-                    // Story Caption Overlay
                     if (!isText && caption.isNotEmpty)
                       Positioned(
                         bottom: 160,
@@ -839,10 +932,10 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               ),
             ),
 
-          // 4.5 URL Link Icon (Restored Fix)
+          // 4.5 URL Link Icon
           if (story['url'] != null && story['url'].toString().trim().isNotEmpty)
             Positioned(
-              bottom: 140, // Positioned above the scrubber
+              bottom: 140,
               right: 24,
               child: GestureDetector(
                 onTap: () async {
@@ -924,96 +1017,112 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          // 6. BOTTOM BAR (WhatsApp-Style)
-          Positioned(
-            bottom: 30,
+          // 6. BOTTOM BAR (Fixed positioning)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 200),
+            // FIX: Adjust bottom position so it's flush with the keyboard but has
+            // a small margin for a cleaner look.
+            bottom: MediaQuery.of(context).viewInsets.bottom > 0
+                ? MediaQuery.of(context).viewInsets.bottom + 10
+                : 30,
             left: 16,
             right: 16,
             child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                // Message Bar
                 Expanded(
-                  child: GestureDetector(
-                    onTap: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('MESSAGES & RESPONSES COMING SOON'),
-                          backgroundColor: Colors.blueGrey,
-                          duration: Duration(seconds: 2),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(30),
+                      border: Border.all(color: Colors.white12),
+                    ),
+                    child: Row(
+                      children: [
+                        const SizedBox(width: 12),
+                        const Icon(Icons.emoji_emotions_outlined,
+                            color: Colors.white60, size: 22),
+                        Expanded(
+                          child: TextField(
+                            controller: _replyController,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 16),
+                            onTap: _pauseStory,
+                            // FIX: Rebuilds UI so the Send icon appears/disappears as you type
+                            onChanged: (value) => setState(() {}),
+                            decoration: const InputDecoration(
+                              hintText: 'Reply...',
+                              hintStyle: TextStyle(color: Colors.white70),
+                              border: InputBorder.none,
+                              contentPadding: EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 12),
+                            ),
+                            onSubmitted: (_) => _sendStoryReply(story),
+                          ),
                         ),
-                      );
-                    },
-                    child: Container(
-                      height: 50,
-                      padding: const EdgeInsets.symmetric(horizontal: 20),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(30),
-                        border: Border.all(color: Colors.white12),
-                      ),
-                      child: const Row(
-                        children: [
-                          Icon(Icons.emoji_emotions_outlined,
-                              color: Colors.white60, size: 22),
-                          SizedBox(width: 12),
-                          Text('Reply...',
-                              style: TextStyle(
-                                  color: Colors.white70, fontSize: 16)),
-                        ],
-                      ),
+                        if (_replyController.text.isNotEmpty)
+                          IconButton(
+                            icon: const Icon(Icons.send, color: Colors.white),
+                            onPressed: () => _sendStoryReply(story),
+                          ),
+                      ],
                     ),
                   ),
                 ),
                 const SizedBox(width: 12),
-
-                // Reshare Button
                 if (!isOwnStory)
                   GestureDetector(
                     onTap: _reshareStory,
-                    child:
-                        const Icon(Icons.repeat, color: Colors.white, size: 28),
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: const Icon(Icons.repeat,
+                          color: Colors.white, size: 28),
+                    ),
                   ),
-
-                // View Count
                 if (isOwnStory)
-                  Row(
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.remove_red_eye,
+                            color: Colors.white, size: 24),
+                        const SizedBox(width: 4),
+                        Text('$_viewCount',
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 14)),
+                      ],
+                    ),
+                  ),
+                const SizedBox(width: 16),
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.remove_red_eye,
-                          color: Colors.white, size: 24),
-                      const SizedBox(width: 4),
-                      Text('$_viewCount',
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 14)),
+                      IconButton(
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        icon: Icon(
+                          _likedStoryIds.contains(story['id'])
+                              ? Icons.favorite
+                              : Icons.favorite_border,
+                          color: _likedStoryIds.contains(story['id'])
+                              ? Colors.red
+                              : Colors.white,
+                          size: 28,
+                        ),
+                        onPressed: _toggleLike,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        '${story['likes_count'] ?? 0}',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold),
+                      ),
                     ],
                   ),
-
-                const SizedBox(width: 16),
-
-                // Like Button & Count
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
-                      icon: Icon(
-                        _likedStoryIds.contains(story['id'])
-                            ? Icons.favorite
-                            : Icons.favorite_border,
-                        color: Colors.white,
-                        size: 28,
-                      ),
-                      onPressed: _toggleLike,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      '${story['likes_count'] ?? 0}',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold),
-                    ),
-                  ],
                 ),
               ],
             ),
