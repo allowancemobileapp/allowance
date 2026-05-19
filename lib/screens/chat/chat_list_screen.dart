@@ -1,9 +1,10 @@
 // lib/screens/chat/chat_list_screen.dart
+import 'dart:async';
 import 'package:allowance/screens/chat/chat_room_screen.dart';
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:allowance/screens/chat/create_group_screen.dart';
 import 'package:allowance/screens/chat/explore_screen.dart';
-import 'package:allowance/screens/home/story_viewer_screen.dart'; // Added for Stories
+import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -23,6 +24,103 @@ class _ChatListScreenState extends State<ChatListScreen> {
   int _selectedTabIndex = 0; // 0: Friends, 1: General, 2: Groups
   final TextEditingController _searchController = TextEditingController();
   final supabase = Supabase.instance.client;
+
+  // --- Highly Optimized State Variables ---
+  StreamSubscription? _participantsSub;
+  StreamSubscription? _chatsSub;
+  StreamSubscription? _followersSub;
+  StreamSubscription? _allParticipantsSub;
+  StreamSubscription? _unreadSub;
+
+  List<Map<String, dynamic>> _chats = [];
+  Set<String> _followingIds = {};
+  List<Map<String, dynamic>> _allParticipants = [];
+  List<Map<String, dynamic>> _unreadMessages = [];
+
+  bool _isLoading = true;
+  String? _myId;
+
+  @override
+  void initState() {
+    super.initState();
+    _myId = supabase.auth.currentUser?.id;
+    if (_myId != null) {
+      _setupStreams();
+    }
+  }
+
+  // Set up streams ONCE so the app doesn't freeze when typing in search
+  void _setupStreams() {
+    final myId = _myId!;
+
+    // 1. My participants
+    _participantsSub = supabase
+        .from('chat_participants')
+        .stream(primaryKey: ['chat_id', 'user_id'])
+        .eq('user_id', myId)
+        .listen((records) {
+          final myChatIds = records.map((p) => p['chat_id'] as Object).toList();
+
+          if (myChatIds.isEmpty) {
+            if (mounted) setState(() => _isLoading = false);
+            return;
+          }
+
+          // 2. Chats (Using myChatIds)
+          _chatsSub?.cancel();
+          _chatsSub = supabase
+              .from('chats')
+              .stream(primaryKey: ['id'])
+              .inFilter('id', myChatIds)
+              .listen((chats) {
+                _chats = chats;
+                if (mounted) setState(() => _isLoading = false);
+              });
+
+          // 3. All Participants in those chats
+          _allParticipantsSub?.cancel();
+          _allParticipantsSub = supabase
+              .from('chat_participants')
+              .stream(primaryKey: ['chat_id', 'user_id'])
+              .inFilter('chat_id', myChatIds)
+              .listen((parts) {
+                _allParticipants = parts;
+                if (mounted) setState(() {});
+              });
+        });
+
+    // 4. Followers (To determine Friends vs General)
+    _followersSub = supabase
+        .from('followers')
+        .stream(primaryKey: ['follower_id', 'following_id'])
+        .eq('follower_id', myId)
+        .listen((folls) {
+          _followingIds =
+              folls.map((f) => f['following_id'].toString()).toSet();
+          if (mounted) setState(() {});
+        });
+
+    // 5. Unread Messages Global Stream
+    _unreadSub = supabase
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('is_read', false)
+        .listen((msgs) {
+          _unreadMessages = msgs;
+          if (mounted) setState(() {});
+        });
+  }
+
+  @override
+  void dispose() {
+    _participantsSub?.cancel();
+    _chatsSub?.cancel();
+    _followersSub?.cancel();
+    _allParticipantsSub?.cancel();
+    _unreadSub?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
 
   void _showPlusMenu() {
     showModalBottomSheet(
@@ -45,13 +143,11 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 ),
                 child: const Icon(Icons.explore, color: Colors.blueAccent),
               ),
-              title: const Text(
-                'Explore',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold),
-              ),
+              title: const Text('Explore',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
               subtitle: const Text('Discover new users and public groups',
                   style: TextStyle(color: Colors.white54)),
               onTap: () {
@@ -59,9 +155,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) =>
-                        ExploreScreen(userPreferences: widget.userPreferences),
-                  ),
+                      builder: (_) => ExploreScreen(
+                          userPreferences: widget.userPreferences)),
                 );
               },
             ),
@@ -75,13 +170,11 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 ),
                 child: Icon(Icons.group_add, color: themeColor),
               ),
-              title: const Text(
-                'Create Group',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold),
-              ),
+              title: const Text('Create Group',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
               subtitle: const Text('Start a public or private community',
                   style: TextStyle(color: Colors.white54)),
               onTap: () {
@@ -89,9 +182,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                 Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => CreateGroupScreen(
-                        userPreferences: widget.userPreferences),
-                  ),
+                      builder: (context) => CreateGroupScreen(
+                          userPreferences: widget.userPreferences)),
                 );
               },
             ),
@@ -103,21 +195,111 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final myId = supabase.auth.currentUser?.id;
-
-    if (myId == null) {
+    if (_myId == null) {
       return const Scaffold(body: Center(child: Text("Please log in")));
     }
+
+    if (_isLoading) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          elevation: 0,
+          title: const Text('Messages',
+              style:
+                  TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        ),
+        body: const Center(
+            child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
+      );
+    }
+
+    // 1. Calculate Unread Counts per tab
+    int friendsUnread = 0;
+    int generalUnread = 0;
+    int groupsUnread = 0;
+
+    final unreadMsgs =
+        _unreadMessages.where((m) => m['sender_id'] != _myId).toList();
+    final unreadByChat = <String, int>{};
+    for (var msg in unreadMsgs) {
+      final cId = msg['chat_id'].toString();
+      unreadByChat[cId] = (unreadByChat[cId] ?? 0) + 1;
+    }
+
+    for (var chat in _chats) {
+      final chatIdStr = chat['id'].toString();
+      final unreadCount = unreadByChat[chatIdStr] ?? 0;
+
+      if (unreadCount > 0) {
+        final isGroup = chat['is_group'] == true;
+        if (isGroup) {
+          groupsUnread += unreadCount;
+        } else {
+          final otherParticipant = _allParticipants.firstWhere(
+            (p) =>
+                p['chat_id'].toString() == chatIdStr && p['user_id'] != _myId,
+            orElse: () => <String, dynamic>{},
+          );
+          if (otherParticipant.isNotEmpty) {
+            final targetUserId = otherParticipant['user_id'].toString();
+            if (_followingIds.contains(targetUserId)) {
+              friendsUnread += unreadCount;
+            } else {
+              generalUnread += unreadCount;
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Filter Chats based on Tab and Search
+    final filteredChats = _chats.where((chat) {
+      final isGroup = chat['is_group'] == true;
+      final chatIdStr = chat['id'].toString();
+      final chatName = (chat['name'] ?? '').toString().toLowerCase();
+      final searchText = _searchController.text.toLowerCase();
+
+      if (searchText.isNotEmpty && !chatName.contains(searchText)) return false;
+      if (_selectedTabIndex == 2) return isGroup;
+      if (isGroup) return false;
+
+      final otherParticipant = _allParticipants.firstWhere(
+        (p) => p['chat_id'].toString() == chatIdStr && p['user_id'] != _myId,
+        orElse: () => <String, dynamic>{},
+      );
+
+      if (otherParticipant.isEmpty) return false;
+
+      final targetUserId = otherParticipant['user_id'].toString();
+      final isFollowing = _followingIds.contains(targetUserId);
+
+      if (_selectedTabIndex == 0) return isFollowing;
+      if (_selectedTabIndex == 1) return !isFollowing;
+
+      return false;
+    }).toList();
+
+    // 3. WHATSAPP STYLE SORTING
+    filteredChats.sort((a, b) {
+      final aTime = DateTime.tryParse(a['updated_at']?.toString() ??
+              a['created_at']?.toString() ??
+              '') ??
+          DateTime(0);
+      final bTime = DateTime.tryParse(b['updated_at']?.toString() ??
+              b['created_at']?.toString() ??
+              '') ??
+          DateTime(0);
+      return bTime.compareTo(aTime); // Newest first
+    });
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
         elevation: 0,
-        title: const Text(
-          'Messages',
-          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-        ),
+        title: const Text('Messages',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
         centerTitle: false,
       ),
       body: SafeArea(
@@ -143,9 +325,9 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   thumbColor: Colors.grey[700]!,
                   groupValue: _selectedTabIndex,
                   children: {
-                    0: _buildTabLabel('Friends', 0),
-                    1: _buildTabLabel('General', 1),
-                    2: _buildTabLabel('Groups', 2),
+                    0: _buildTabLabel('Friends', 0, friendsUnread),
+                    1: _buildTabLabel('General', 1, generalUnread),
+                    2: _buildTabLabel('Groups', 2, groupsUnread),
                   },
                   onValueChanged: (int? value) {
                     if (value != null) {
@@ -156,153 +338,21 @@ class _ChatListScreenState extends State<ChatListScreen> {
               ),
             ),
             Expanded(
-              child: StreamBuilder<List<Map<String, dynamic>>>(
-                stream: supabase.from('chat_participants').stream(
-                  primaryKey: ['chat_id', 'user_id'],
-                ).eq('user_id', myId),
-                builder: (context, participantSnapshot) {
-                  if (participantSnapshot.connectionState ==
-                      ConnectionState.waiting) {
-                    return const Center(
-                        child: CircularProgressIndicator(
-                            color: Color(0xFF4CAF50)));
-                  }
-
-                  final participantRecords = participantSnapshot.data ?? [];
-                  if (participantRecords.isEmpty) {
-                    return _buildPlaceholder('No messages yet.');
-                  }
-
-                  final List<Object> myChatIds = participantRecords
-                      .map((p) => p['chat_id'] as Object)
-                      .toList();
-
-                  return StreamBuilder<List<Map<String, dynamic>>>(
-                    stream: supabase
-                        .from('chats')
-                        .stream(primaryKey: ['id'])
-                        .inFilter('id', myChatIds)
-                        .order('updated_at',
-                            ascending: false), // Database-level sort
-                    builder: (context, chatSnapshot) {
-                      if (!chatSnapshot.hasData) {
-                        return const Center(
-                            child: CircularProgressIndicator(
-                                color: Color(0xFF4CAF50)));
-                      }
-
-                      return StreamBuilder<List<Map<String, dynamic>>>(
-                        stream: supabase.from('followers').stream(primaryKey: [
-                          'follower_id',
-                          'following_id'
-                        ]).eq('follower_id', myId),
-                        builder: (context, followerSnapshot) {
-                          if (!followerSnapshot.hasData) {
-                            return const Center(
-                                child: CircularProgressIndicator(
-                                    color: Color(0xFF4CAF50)));
-                          }
-
-                          final followingIds = followerSnapshot.data!
-                              .map((f) => f['following_id'].toString())
-                              .toSet();
-
-                          return StreamBuilder<List<Map<String, dynamic>>>(
-                            stream: supabase.from('chat_participants').stream(
-                              primaryKey: ['chat_id', 'user_id'],
-                            ).inFilter('chat_id', myChatIds),
-                            builder: (context, allParticipantsSnapshot) {
-                              if (!allParticipantsSnapshot.hasData) {
-                                return const Center(
-                                    child: CircularProgressIndicator(
-                                        color: Color(0xFF4CAF50)));
-                              }
-
-                              final allParticipants =
-                                  allParticipantsSnapshot.data!;
-
-                              // 1. Filter the chats based on Tab and Search
-                              final filteredChats =
-                                  chatSnapshot.data!.where((chat) {
-                                final isGroup = chat['is_group'] == true;
-                                final chatIdStr = chat['id'].toString();
-                                final chatName = (chat['name'] ?? '')
-                                    .toString()
-                                    .toLowerCase();
-                                final searchText =
-                                    _searchController.text.toLowerCase();
-
-                                if (searchText.isNotEmpty &&
-                                    !chatName.contains(searchText))
-                                  return false;
-                                if (_selectedTabIndex == 2) return isGroup;
-                                if (isGroup) return false;
-
-                                final otherParticipant =
-                                    allParticipants.firstWhere(
-                                  (p) =>
-                                      p['chat_id'].toString() == chatIdStr &&
-                                      p['user_id'] != myId,
-                                  orElse: () => <String, dynamic>{},
-                                );
-
-                                if (otherParticipant.isEmpty) return false;
-
-                                final targetUserId =
-                                    otherParticipant['user_id'].toString();
-                                final isFollowing =
-                                    followingIds.contains(targetUserId);
-
-                                if (_selectedTabIndex == 0) return isFollowing;
-                                if (_selectedTabIndex == 1) return !isFollowing;
-
-                                return false;
-                              }).toList();
-
-                              // 2. FORCE SORT (The Fix):
-                              // This ensures that even after filtering, the list is re-sorted by time.
-                              filteredChats.sort((a, b) {
-                                // We check 'last_message_at' first, then 'updated_at' as a fallback.
-                                final aTime = DateTime.tryParse(
-                                        a['last_message_at']?.toString() ??
-                                            a['updated_at']?.toString() ??
-                                            '') ??
-                                    DateTime(0);
-                                final bTime = DateTime.tryParse(
-                                        b['last_message_at']?.toString() ??
-                                            b['updated_at']?.toString() ??
-                                            '') ??
-                                    DateTime(0);
-                                return bTime.compareTo(aTime); // Newest first
-                              });
-
-                              if (filteredChats.isEmpty) {
-                                return _buildPlaceholder('No messages yet.');
-                              }
-
-                              return ListView.builder(
-                                itemCount: filteredChats.length,
-                                itemBuilder: (context, index) {
-                                  final chat = filteredChats[index];
-                                  return _ChatTile(
-                                    key: Key(chat['id'].toString()),
-                                    chat: chat,
-                                    myId: myId,
-                                    tabIndex: _selectedTabIndex,
-                                    themeColor: themeColor,
-                                    userPreferences: widget.userPreferences,
-                                    isAdmin: false,
-                                  );
-                                },
-                              );
-                            },
-                          );
-                        },
-                      );
-                    },
-                  );
-                },
-              ),
+              child: filteredChats.isEmpty
+                  ? _buildPlaceholder('No messages yet.')
+                  : ListView.builder(
+                      itemCount: filteredChats.length,
+                      itemBuilder: (context, index) {
+                        final chat = filteredChats[index];
+                        return _ChatTile(
+                          key: Key(chat['id'].toString()),
+                          chat: chat,
+                          myId: _myId!,
+                          themeColor: themeColor,
+                          userPreferences: widget.userPreferences,
+                        );
+                      },
+                    ),
             ),
           ],
         ),
@@ -315,12 +365,14 @@ class _ChatListScreenState extends State<ChatListScreen> {
     );
   }
 
-  Widget _buildTabLabel(String text, int index) {
+  Widget _buildTabLabel(String text, int index, int unreadCount) {
     final isSelected = _selectedTabIndex == index;
+    final displayText = unreadCount > 0 ? '$text ($unreadCount)' : text;
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Text(
-        text,
+        displayText,
         style: TextStyle(
           color: isSelected ? Colors.white : Colors.white54,
           fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
@@ -331,31 +383,26 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   Widget _buildPlaceholder(String text) {
     return Center(
-      child: Text(
-        text,
-        style: const TextStyle(color: Colors.white54, fontSize: 16),
-      ),
+      child: Text(text,
+          style: const TextStyle(color: Colors.white54, fontSize: 16)),
     );
   }
 }
 
-/// A dedicated widget for each chat row to handle its own real-time streams and metadata
+/// A dedicated widget for each chat row.
+/// FIX: Moved its streams to initState to stop it from crashing the app!
 class _ChatTile extends StatefulWidget {
   final Map<String, dynamic> chat;
   final String myId;
-  final int tabIndex;
   final Color themeColor;
   final UserPreferences userPreferences;
-  final bool isAdmin;
 
   const _ChatTile({
     super.key,
     required this.chat,
     required this.myId,
-    required this.tabIndex,
     required this.themeColor,
     required this.userPreferences,
-    required this.isAdmin,
   });
 
   @override
@@ -368,9 +415,22 @@ class _ChatTileState extends State<_ChatTile> {
   bool _isLoadingMeta = true;
   String _targetUserId = '';
 
+  late final Stream<List<Map<String, dynamic>>> _messagesStream;
+  late final Stream<List<Map<String, dynamic>>> _participantsStream;
+
   @override
   void initState() {
     super.initState();
+    // Cache streams here so they don't rebuild infinitely
+    _messagesStream = supabase
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('chat_id', widget.chat['id'])
+        .order('created_at', ascending: false);
+
+    _participantsStream = supabase.from('chat_participants').stream(
+        primaryKey: ['chat_id', 'user_id']).eq('chat_id', widget.chat['id']);
+
     _fetchMetaData();
   }
 
@@ -391,7 +451,6 @@ class _ChatTileState extends State<_ChatTile> {
         return;
       }
 
-      // 1. Get the other participant's user_id
       final participantData = await supabase
           .from('chat_participants')
           .select('user_id')
@@ -416,14 +475,12 @@ class _ChatTileState extends State<_ChatTile> {
 
       _targetUserId = participantData['user_id'] ?? '';
 
-      // 2. Fetch profile (checking subscription_tier for the star)
       final profileData = await supabase
           .from('profiles')
           .select('username, avatar_url, school_name, subscription_tier')
           .eq('id', _targetUserId)
           .maybeSingle();
 
-      // 3. Check for active stories (created in last 24 hours)
       final DateTime yesterday =
           DateTime.now().subtract(const Duration(hours: 24));
       final storyCheck = await supabase
@@ -439,16 +496,13 @@ class _ChatTileState extends State<_ChatTile> {
             'title': profileData?['username'] ?? "User",
             'avatar_url': profileData?['avatar_url'],
             'school_name': profileData?['school_name'],
-            'is_plus': profileData?['subscription_tier'] ==
-                'plus', // Check for Plus status
-            'has_story':
-                storyCheck.isNotEmpty, // Check if they have an active story
+            'is_plus': profileData?['subscription_tier'] == 'Membership',
+            'has_story': storyCheck.isNotEmpty,
           };
           _isLoadingMeta = false;
         });
       }
     } catch (e) {
-      debugPrint("Error fetching chat metadata: $e");
       if (mounted) {
         setState(() {
           _metaData = {
@@ -463,7 +517,6 @@ class _ChatTileState extends State<_ChatTile> {
     }
   }
 
-  // FIX: Stories now start from the first posted (Oldest to Newest)
   Future<void> _openStory() async {
     if (_targetUserId.isEmpty) return;
     final response = await supabase
@@ -472,7 +525,7 @@ class _ChatTileState extends State<_ChatTile> {
             'id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)')
         .eq('user_id', _targetUserId)
         .gt('expires_at', DateTime.now().toUtc().toIso8601String())
-        .order('created_at', ascending: true); // CHANGED TO TRUE
+        .order('created_at', ascending: true);
 
     final stories = response as List<dynamic>;
 
@@ -530,18 +583,13 @@ class _ChatTileState extends State<_ChatTile> {
     final hasStory = _metaData?['has_story'] == true;
     final isPlus = _metaData?['is_plus'] == true;
 
-    // FIX: Enhanced check to ensure it correctly identifies group vs individual
     final dynamic isGroupRaw = widget.chat['is_group'];
     final bool isGroup = isGroupRaw == true ||
         isGroupRaw == 1 ||
         isGroupRaw.toString() == 'true';
 
     return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: supabase
-          .from('messages')
-          .stream(primaryKey: ['id'])
-          .eq('chat_id', chatId)
-          .order('created_at', ascending: false),
+      stream: _messagesStream,
       builder: (context, msgSnapshot) {
         final messages = msgSnapshot.data ?? [];
         int unreadCount = messages
@@ -556,15 +604,12 @@ class _ChatTileState extends State<_ChatTile> {
             : '';
 
         return StreamBuilder<List<Map<String, dynamic>>>(
-          stream: supabase
-              .from('chat_participants')
-              .stream(primaryKey: ['chat_id', 'user_id']).eq('chat_id', chatId),
+          stream: _participantsStream,
           builder: (context, partSnapshot) {
             final participants = partSnapshot.data ?? [];
             bool isTyping = participants.any(
                 (p) => p['user_id'] != widget.myId && p['is_typing'] == true);
 
-            // Calculate Admin status specifically for THIS chat[cite: 3]
             final myParticipant = participants.firstWhere(
               (p) => p['user_id'] == widget.myId,
               orElse: () => <String, dynamic>{},
@@ -575,7 +620,6 @@ class _ChatTileState extends State<_ChatTile> {
             return ListTile(
               onTap: () {
                 if (isGroup) {
-                  // SUCCESS: Navigating to Group Chat Room with UI flags[cite: 3]
                   Navigator.push(
                     context,
                     MaterialPageRoute(
@@ -584,14 +628,12 @@ class _ChatTileState extends State<_ChatTile> {
                         chatTitle: title,
                         isAdmin: localIsAdmin,
                         userPreferences: widget.userPreferences,
-                        isGroup: true, // Tells the AppBar to use Group style
-                        creatorId: widget.chat['creator_id']
-                            ?.toString(), // Passes the creator for the admin menu
+                        isGroup: true,
+                        creatorId: widget.chat['creator_id']?.toString(),
                       ),
                     ),
                   );
                 } else {
-                  // Navigate to Individual Chat[cite: 3]
                   Navigator.push(
                     context,
                     MaterialPageRoute(
@@ -655,8 +697,7 @@ class _ChatTileState extends State<_ChatTile> {
                         ),
                         if (isPlus) ...[
                           const SizedBox(width: 4),
-                          const Icon(Icons.stars,
-                              color: Colors.amber, size: 16),
+                          const Icon(Icons.star, color: Colors.amber, size: 16),
                         ],
                       ],
                     ),

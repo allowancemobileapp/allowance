@@ -2,19 +2,21 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // <-- Needed for Sound & Haptics
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:developer' as developer;
 
-/// Top-level background handler (required by Firebase)
+// --- GLOBAL CHAT TRACKER ---
+String? activeChatId;
+
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
   developer.log('Background message: ${message.messageId}', name: 'fcm');
 }
 
-/// Mobile (Android/iOS) — get token + save to profiles
 Future<void> initFcmAndSaveToken() async {
   if (kIsWeb) return;
 
@@ -29,13 +31,9 @@ Future<void> initFcmAndSaveToken() async {
       alert: true,
       badge: true,
       sound: true,
-      carPlay: false,
-      criticalAlert: false,
-      provisional: false,
     );
 
     if (settings.authorizationStatus == AuthorizationStatus.denied) {
-      developer.log('User denied notification permission');
       return;
     }
 
@@ -49,10 +47,8 @@ Future<void> initFcmAndSaveToken() async {
       await supabase
           .from('profiles')
           .update({'fcm_token': token}).eq('id', user.id);
-      developer.log('Mobile FCM token saved');
     }
 
-    // Auto-update on token refresh
     messaging.onTokenRefresh.listen((newToken) async {
       if (supabase.auth.currentUser != null) {
         await supabase.from('profiles').update({'fcm_token': newToken}).eq(
@@ -64,7 +60,6 @@ Future<void> initFcmAndSaveToken() async {
   }
 }
 
-/// Web — get token + save to profiles
 Future<void> requestWebPushPermissionAndSaveToken() async {
   if (!kIsWeb) return;
 
@@ -78,7 +73,6 @@ Future<void> requestWebPushPermissionAndSaveToken() async {
     );
 
     if (settings.authorizationStatus == AuthorizationStatus.denied) {
-      developer.log('Web push permission denied');
       return;
     }
 
@@ -87,10 +81,7 @@ Future<void> requestWebPushPermissionAndSaveToken() async {
           "BOMEfy6tL0GjcSnjfjTB-Jzk9UXCn8u0_1D2lcISqkzpktaq3cpq0eRA-wHaNSBicK5xdOsMyt2PjNamcbEv6Co",
     );
 
-    if (token == null) {
-      developer.log('No web FCM token received');
-      return;
-    }
+    if (token == null) return;
 
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
@@ -98,10 +89,8 @@ Future<void> requestWebPushPermissionAndSaveToken() async {
       await supabase
           .from('profiles')
           .update({'fcm_token': token}).eq('id', user.id);
-      developer.log('WEB FCM TOKEN SAVED SUCCESSFULLY: $token');
     }
 
-    // Listen for token refresh on web too
     messaging.onTokenRefresh.listen((newToken) async {
       if (supabase.auth.currentUser != null) {
         await supabase.from('profiles').update({'fcm_token': newToken}).eq(
@@ -113,43 +102,98 @@ Future<void> requestWebPushPermissionAndSaveToken() async {
   }
 }
 
-/// Register foreground + tap listeners (Android/iOS/Web)
 void registerFcmListeners(BuildContext context) {
-  // Foreground message (show snackbar)
+  // Foreground message
   FirebaseMessaging.onMessage.listen((RemoteMessage message) {
     final title = message.notification?.title ?? '';
     final body = message.notification?.body ?? '';
+    final data = message.data;
+    final type = data['type']?.toString().toLowerCase();
+    final chatId = data['chat_id']?.toString();
 
     if (title.isNotEmpty || body.isNotEmpty) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(
-          content: Text(
-            '$title\n$body',
-            style: const TextStyle(
-              color: Colors.white, // ← WHITE TEXT (fixed)
-              fontSize: 16,
-            ),
-          ),
-          duration: const Duration(seconds: 5),
-          backgroundColor: Colors.black87,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      // --- FIX: WHATSAPP STYLE SILENCER ---
+      if (type == 'chat' && chatId != null && chatId == activeChatId) {
+        // We are currently in this chat! Do NOT show visual popup.
+        HapticFeedback.lightImpact();
+        SystemSound.play(SystemSoundType.click); // Play a subtle sound
+        return;
+      }
+
+      // Show Custom Top Drop-down Notification
+      _showTopNotification(context, title, body, data);
     }
   });
 
-  // When app is in background and user taps notification
   FirebaseMessaging.onMessageOpenedApp.listen((message) {
     _handleNavigation(context, message.data);
   });
 
-  // When app is terminated and opened via notification
   FirebaseMessaging.instance.getInitialMessage().then((message) {
     if (message != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _handleNavigation(context, message.data);
       });
     }
+  });
+}
+
+// --- FIX: CUSTOM TOP NOTIFICATION BANNER ---
+void _showTopNotification(BuildContext context, String title, String body,
+    Map<String, dynamic> data) {
+  final overlay = Overlay.of(context);
+  late OverlayEntry entry;
+
+  entry = OverlayEntry(
+    builder: (context) => Positioned(
+      top: MediaQuery.of(context).padding.top +
+          10, // Drops right below the phone notch
+      left: 16,
+      right: 16,
+      child: Material(
+        color: Colors.transparent,
+        child: GestureDetector(
+          onTap: () {
+            entry.remove();
+            _handleNavigation(context, data);
+          },
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E1E1E),
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: const [
+                BoxShadow(
+                    color: Colors.black45, blurRadius: 10, spreadRadius: 2)
+              ],
+              border: Border.all(color: const Color(0xFF4CAF50), width: 1.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16)),
+                const SizedBox(height: 4),
+                Text(body,
+                    style: const TextStyle(color: Colors.white70, fontSize: 14),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  overlay.insert(entry);
+
+  // Auto-dismiss after 4 seconds
+  Future.delayed(const Duration(seconds: 4), () {
+    if (entry.mounted) entry.remove();
   });
 }
 

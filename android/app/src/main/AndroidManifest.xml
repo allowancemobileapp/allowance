@@ -61,6 +61,21 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- ============================================================== -->
+            <!-- NEW: APP LINKS INTENT FILTER (Makes the OS open Allowance app) -->
+            <!-- ============================================================== -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                
+                <!-- Handles: https://allowanceapp.org/gist/XXX -->
+                <data android:scheme="https" android:host="allowanceapp.org" android:pathPrefix="/gist" />
+                <!-- Handles: https://www.allowanceapp.org/gist/XXX -->
+                <data android:scheme="https" android:host="www.allowanceapp.org" android:pathPrefix="/gist" />
+            </intent-filter>
+
         </activity>
 
         <activity

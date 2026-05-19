@@ -2,11 +2,14 @@
 import 'dart:async';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
+import 'package:allowance/shared/services/fcm_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../widgets/universal_profile_card.dart';
 
 class IndividualChatScreen extends StatefulWidget {
@@ -47,6 +50,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   @override
   void initState() {
     super.initState();
+    activeChatId = widget.chatId; // <--- TELLS THE APP WE ARE IN THIS CHAT
     _setupMessageStream();
     _setupTypingListener();
     _checkFollowStatus();
@@ -237,6 +241,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
   @override
   void dispose() {
+    if (activeChatId == widget.chatId) {
+      activeChatId = null; // <--- CLEARS IT WHEN WE LEAVE
+    }
     _typingTimer?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
@@ -656,9 +663,30 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         crossAxisAlignment: WrapCrossAlignment.end,
         spacing: 8,
         children: [
-          Text(
-            content,
+          Linkify(
+            onOpen: (link) async {
+              final String urlString = link.url;
+
+              // 1. INTERCEPT ALLOWANCE GIST LINKS USING NEW DOMAIN!
+              if (urlString.contains('allowanceapp.org/gist/')) {
+                final gistId = urlString.split('/').last;
+                Navigator.pushNamed(context, '/gist',
+                    arguments: {'id': gistId});
+                return;
+              }
+
+              // 2. Open normal links in browser
+              final Uri url = Uri.parse(urlString);
+              if (await canLaunchUrl(url)) {
+                await launchUrl(url, mode: LaunchMode.externalApplication);
+              }
+            },
+            text: content,
             style: const TextStyle(color: Colors.white, fontSize: 16),
+            linkStyle: const TextStyle(
+              color: Color(0xFF53BDEB),
+              decoration: TextDecoration.underline,
+            ),
           ),
           Row(
             mainAxisSize: MainAxisSize.min,

@@ -1,0 +1,13 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.jahmezzz.allowance",
+      "sha256_cert_fingerprints": [
+        "7C:E7:C1:A5:EC:A4:EF:B0:91:D1:4D:D8:66:E9:F1:26:6B:1B:72:1C:EF:E7:BD:26:1D:8C:27:8F:71:13:9A:C1",
+        "1F:D2:E3:AA:4D:D7:12:F4:21:89:86:5C:E5:F2:59:77:5A:2B:22:5C:18:1C:AE:CA:E5:0A:AF:4C:83:0B:5E:48"
+      ]
+    }
+  }
+]

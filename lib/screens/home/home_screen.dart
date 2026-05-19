@@ -5,6 +5,7 @@ import 'package:allowance/screens/home/media_editor_screen.dart';
 import 'package:allowance/widgets/stories_bar.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:icons_plus/icons_plus.dart';
 import 'package:allowance/models/user_preferences.dart';
@@ -13,6 +14,8 @@ import 'package:allowance/screens/home/favorites_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/screens/home/ticket_screen.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:wechat_camera_picker/wechat_camera_picker.dart';
 import 'order_screen.dart';
@@ -46,14 +49,16 @@ class _HomeScreenState extends State<HomeScreen> {
   final Map<int, VideoPlayerController> _videoControllers = {};
   final Map<int, bool> _isVideoMuted = {};
   // 1. Updated _colorfulTabs (changed Order icon to food-related)
+  // 1. Updated _colorfulTabs (Circular icons, Library added)
   final List<Map<String, dynamic>> _colorfulTabs = [
     {"label": "Favorites", "icon": BoxIcons.bxs_heart, "color": Colors.orange},
     {"label": "Tickets", "icon": BoxIcons.bxs_chat, "color": Colors.purple},
+    {"label": "Order", "icon": BoxIcons.bx_food_menu, "color": Colors.teal},
     {
-      "label": "Order",
-      "icon": BoxIcons.bx_food_menu,
-      "color": Colors.teal
-    }, // ← food icon
+      "label": "Library",
+      "icon": BoxIcons.bx_book_reader,
+      "color": Colors.blueAccent
+    }, // ← New Library Tab
   ];
 
   List<String> _restaurants = [];
@@ -139,9 +144,9 @@ class _HomeScreenState extends State<HomeScreen> {
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
           .select('''
-            id, title, image_url, image_urls, media_type, type, school_id, url, created_at, category,
+            id, user_id, title, image_url, image_urls, media_type, type, school_id, url, created_at, category,
             profiles:user_id (username, avatar_url, bio)
-          ''')
+          ''') // <--- FIX: Added 'user_id' to the select query here!
           .eq('paid', true)
           .eq('status', 'active')
           .order('created_at', ascending: false)
@@ -178,7 +183,6 @@ class _HomeScreenState extends State<HomeScreen> {
       // SPEED HACK: PRELOAD IMAGES INTO RAM
       // ==========================================
       if (mounted) {
-        // Preload the first 5 images so the initial scroll is instant
         for (var i = 0; i < list.length && i < 5; i++) {
           final gist = list[i];
           final mediaType = gist['media_type'] as String?;
@@ -637,8 +641,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildRectangularTab(Map<String, dynamic> tab) {
+  Widget _buildCircularTab(Map<String, dynamic> tab) {
     return InkWell(
+      borderRadius: BorderRadius.circular(30),
       onTap: () {
         if (tab["label"] == "Favorites") {
           Navigator.push(
@@ -653,26 +658,23 @@ class _HomeScreenState extends State<HomeScreen> {
               context,
               MaterialPageRoute(
                   builder: (_) => OrderScreen(userPreferences: _prefs)));
+        } else if (tab["label"] == "Library") {
+          // Placeholder for the upcoming Library feature!
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Library feature coming soon! 📚')),
+          );
         }
       },
       child: Container(
-        width: 130,
-        height: 42,
-        margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        width: 48,
+        height: 48,
         decoration: BoxDecoration(
-            color: (tab["color"] as Color).withOpacity(0.65),
-            borderRadius: BorderRadius.circular(12)),
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(tab["icon"] as IconData?, color: Colors.white, size: 20),
-          const SizedBox(width: 6),
-          Text(tab["label"] as String,
-              style: const TextStyle(
-                  fontFamily: 'SanFrancisco',
-                  fontSize: 14,
-                  color: Colors.white),
-              overflow: TextOverflow.ellipsis)
-        ]),
+          color: (tab["color"] as Color).withOpacity(0.65),
+          shape: BoxShape.circle, // Made perfectly round!
+        ),
+        child: Center(
+          child: Icon(tab["icon"] as IconData?, color: Colors.white, size: 24),
+        ),
       ),
     );
   }
@@ -789,74 +791,17 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showCommentsSheet(String gistId) {
-    showModalBottomSheet(
+  Future<void> _showCommentsSheet(String gistId) async {
+    await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF111111),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (context) => Padding(
-        padding:
-            EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-        child: FractionallySizedBox(
-          heightFactor: 0.7,
-          child: Column(
-            children: [
-              const SizedBox(height: 12),
-              Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                      color: Colors.grey[700],
-                      borderRadius: BorderRadius.circular(10))),
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 15),
-                child: Text('Comments',
-                    style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold)),
-              ),
-              const Divider(color: Colors.white10, height: 1),
-              const Expanded(
-                  child: Center(
-                      child: Text("No comments yet",
-                          style: TextStyle(color: Colors.white54)))),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: const BoxDecoration(
-                    border: Border(top: BorderSide(color: Colors.white10))),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        style: const TextStyle(color: Colors.white),
-                        decoration: InputDecoration(
-                          hintText: 'Add a comment...',
-                          hintStyle: const TextStyle(color: Colors.white54),
-                          filled: true,
-                          fillColor: Colors.grey[900],
-                          border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(30),
-                              borderSide: BorderSide.none),
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 8),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    const Text('Post',
-                        style: TextStyle(
-                            color: Color(0xFF4CAF50),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16)),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
+      builder: (context) => GistCommentsSheet(
+        gistId: gistId,
+        themeColor: themeColor,
+        userPreferences: _prefs,
       ),
     );
   }
@@ -877,8 +822,9 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     }
 
-    if (filteredGists.isEmpty)
+    if (filteredGists.isEmpty) {
       return const SliverToBoxAdapter(child: SizedBox());
+    }
 
     return SliverPadding(
       padding: const EdgeInsets.only(bottom: 40, top: 8),
@@ -919,18 +865,21 @@ class _HomeScreenState extends State<HomeScreen> {
   // Helper method to download the image
   Future<void> _downloadGistImage(String imageUrl) async {
     try {
-      // Check if we have permission to save images
       final hasAccess = await Gal.hasAccess();
       if (!hasAccess) {
-        await Gal.requestAccess();
+        final request = await Gal.requestAccess();
+        if (!request) return;
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Downloading to gallery...')),
       );
 
-      // This package handles the heavy lifting of downloading and saving
-      await Gal.putImage(imageUrl);
+      // Download the network image to a temporary local file
+      final file = await DefaultCacheManager().getSingleFile(imageUrl);
+
+      // Save the local file to the gallery
+      await Gal.putImage(file.path);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -944,7 +893,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('❌ Could not save image'),
+            content: Text('❌ Could not save image.'),
             backgroundColor: Colors.red,
           ),
         );
@@ -953,19 +902,41 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _pickMemoryFlow(BuildContext context) async {
-    // Trigger WeChat style picker which includes Camera in the first slot
+    // === 1. WEB IMPLEMENTATION ===
+    if (kIsWeb) {
+      final picker = ImagePicker();
+      final XFile? pickedFile = await picker.pickMedia();
+
+      if (pickedFile != null && mounted) {
+        final isVideo = pickedFile.mimeType?.startsWith('video/') == true ||
+            pickedFile.name.toLowerCase().endsWith('.mp4') ||
+            pickedFile.name.toLowerCase().endsWith('.mov');
+
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MediaEditorScreen(
+              file: pickedFile,
+              isVideo: isVideo,
+              userPreferences: _prefs,
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    // === 2. MOBILE IMPLEMENTATION ===
     final List<AssetEntity>? result = await AssetPicker.pickAssets(
       context,
       pickerConfig: AssetPickerConfig(
         maxAssets: 1,
         requestType: RequestType.common,
         themeColor: themeColor,
-        specialItemPosition:
-            SpecialItemPosition.prepend, // Puts Camera at the start
+        specialItemPosition: SpecialItemPosition.prepend,
         specialItemBuilder: (context, _, __) {
           return GestureDetector(
             onTap: () async {
-              // WhatsApp style: Take Photo/Video directly
               final AssetEntity? cameraResult =
                   await CameraPicker.pickFromCamera(
                 context,
@@ -976,8 +947,20 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               );
               if (cameraResult != null) {
-                if (mounted) Navigator.pop(context); // Close the gallery picker
-                _navigateToCreateStory(cameraResult);
+                if (mounted) Navigator.pop(context);
+                final file = await cameraResult.file;
+                if (file != null && mounted) {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => MediaEditorScreen(
+                        file: XFile(file.path),
+                        isVideo: cameraResult.type == AssetType.video,
+                        userPreferences: _prefs,
+                      ),
+                    ),
+                  );
+                }
               }
             },
             child: const Center(
@@ -989,20 +972,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     if (result != null && result.isNotEmpty) {
-      _navigateToCreateStory(result.first);
+      final file = await result.first.file;
+      if (file != null && mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MediaEditorScreen(
+              file: XFile(file.path),
+              isVideo: result.first.type == AssetType.video,
+              userPreferences: _prefs,
+            ),
+          ),
+        );
+      }
     }
-  }
-
-  void _navigateToCreateStory(AssetEntity asset) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => MediaEditorScreen(
-          asset: asset,
-          userPreferences: _prefs, // This will now match the class type
-        ),
-      ),
-    );
   }
 
   @override
@@ -1015,25 +998,19 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Scaffold(
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         bottomNavigationBar: _buildCustomFooter(bgColor),
-
-        // UPDATED: Conditional Floating Action Button Stack
         floatingActionButton: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Show the Plus icon ONLY on the Profile Screen (Index 3)
             if (_selectedIndex == 3) ...[
               FloatingActionButton(
                 heroTag: 'add_memory_btn',
-                mini: true, // Makes it slightly smaller than the Message icon
+                mini: true,
                 backgroundColor: themeColor,
                 onPressed: () => _pickMemoryFlow(context),
                 child: const Icon(Icons.add, color: Colors.white, size: 24),
               ),
-              const SizedBox(height: 12), // Space between the two icons
+              const SizedBox(height: 12),
             ],
-
-            // The standard Message/Chat Icon
-            // The standard Message/Chat Icon
             FloatingActionButton(
               heroTag: 'chat_btn',
               backgroundColor: Colors.transparent,
@@ -1042,7 +1019,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 width: 58,
                 height: 58,
                 decoration: BoxDecoration(
-                  color: const Color(0xFF4CAF50), // Your green background
+                  color: const Color(0xFF4CAF50),
                   borderRadius: BorderRadius.circular(18),
                   boxShadow: [
                     BoxShadow(
@@ -1062,16 +1039,13 @@ class _HomeScreenState extends State<HomeScreen> {
                     final myId = supabase.auth.currentUser?.id;
                     final allUnread = snapshot.data ?? [];
 
-                    // Count only messages NOT sent by me
                     final unreadCount = allUnread
                         .where((msg) => msg['sender_id'] != myId)
                         .length;
 
                     return Stack(
-                      clipBehavior: Clip
-                          .none, // Allows the badge to sit right on the edge
+                      clipBehavior: Clip.none,
                       children: [
-                        // 1. The White Chat Icon (Perfectly Centered)
                         const Center(
                           child: Icon(
                             Icons.chat_bubble_rounded,
@@ -1079,12 +1053,10 @@ class _HomeScreenState extends State<HomeScreen> {
                             size: 28,
                           ),
                         ),
-
-                        // 2. The Red Badge (Positioned on the Green Background)
                         if (unreadCount > 0)
                           Positioned(
-                            top: 6, // Adjusted to sit on the green area
-                            right: 6, // Adjusted to sit on the green area
+                            top: 6,
+                            right: 6,
                             child: Container(
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 5, vertical: 2),
@@ -1095,7 +1067,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               decoration: BoxDecoration(
                                 color: Colors.redAccent,
                                 borderRadius: BorderRadius.circular(10),
-                                // This thin green border makes the red look "cut out" of the background
                                 border: Border.all(
                                   color: const Color(0xFF4CAF50),
                                   width: 1.5,
@@ -1131,7 +1102,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ],
         ),
-
         body: SafeArea(
           child: Stack(
             children: [
@@ -1252,17 +1222,21 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ]),
                                 ),
                                 const SizedBox(height: 12),
+                                // ==========================================
+                                // CHANGED to spaceBetween to align perfectly with the edges!
+                                // ==========================================
                                 SizedBox(
-                                    width: MediaQuery.of(context).size.width *
-                                        0.85,
-                                    height: 50,
-                                    child: SingleChildScrollView(
-                                        scrollDirection: Axis.horizontal,
-                                        child: Row(
-                                            children: _colorfulTabs
-                                                .map((tab) =>
-                                                    _buildRectangularTab(tab))
-                                                .toList()))),
+                                  width:
+                                      MediaQuery.of(context).size.width * 0.85,
+                                  height: 60,
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment
+                                        .spaceBetween, // <-- Fixes the spacing
+                                    children: _colorfulTabs
+                                        .map((tab) => _buildCircularTab(tab))
+                                        .toList(),
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -1419,6 +1393,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // NEW: method to fetch notifications for current user
+  // --- REPLACED: Fetch Notifications (Much cleaner now!) ---
   Future<List<Map<String, dynamic>>> _fetchNotifications() async {
     try {
       final user = supabase.auth.currentUser;
@@ -1431,43 +1406,46 @@ class _HomeScreenState extends State<HomeScreen> {
           .order('sent_at', ascending: false)
           .limit(50);
 
-      // Add avatar from the gist author OR from ticket sender
       final List<Map<String, dynamic>> result = [];
       for (var notif in resp) {
         final data = notif['data'] as Map<String, dynamic>? ?? {};
+        final type = data['type']?.toString() ?? '';
         final gistId = data['gist_id'];
 
-        String? avatarUrl;
-        String? username;
+        // Automatically falls back through all image possibilities
+        String? avatarUrl = data['avatar_url']?.toString() ??
+            data['sender_avatar']?.toString() ??
+            data['photo_url']?.toString();
+        String? username =
+            data['username']?.toString() ?? data['sender_username']?.toString();
+        bool isNewTicket = false;
 
-        if (gistId != null) {
-          // === FOR GISTS (your old code - unchanged) ===
+        // Fetch Gist author if missing
+        if (gistId != null && avatarUrl == null) {
           try {
             final gist = await supabase
                 .from('gists')
                 .select('profiles:user_id (username, avatar_url)')
                 .eq('id', gistId)
                 .single();
-
             final profile = gist['profiles'];
             if (profile is Map) {
               avatarUrl = profile['avatar_url'] as String?;
               username = profile['username'] as String?;
             }
           } catch (_) {}
-        } else if (data['type'] == 'ticket_transfer' ||
-            data['type'] == 'ticket_gift') {
-          // === NEW: FOR TICKET TRANSFERS / GIFTS ===
-          avatarUrl = data['sender_avatar'] as String?;
-          username = data['sender_username'] as String?;
+        } else if (type == 'ticket' ||
+            (notif['title']?.toString() ?? '')
+                .contains('New Ticket Available')) {
+          isNewTicket = true;
+          username = 'Allowance';
         }
 
-        // Attach to the notification so your UI can show the avatar
         notif['avatar_url'] = avatarUrl;
         notif['username'] = username;
+        notif['isNewTicket'] = isNewTicket;
         result.add(notif);
       }
-
       return result;
     } catch (e) {
       developer.log('Error fetching notifications: $e', name: 'notifications');
@@ -1475,7 +1453,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // NEW: show slide-up notifications bottom sheet WITH PROFILE PHOTOS
+  // --- REPLACED: Show Notifications Bottom Sheet (Added routing logic!) ---
   void _showNotifications() async {
     final notifications = await _fetchNotifications();
     if (!mounted) return;
@@ -1485,8 +1463,7 @@ class _HomeScreenState extends State<HomeScreen> {
       isScrollControlled: true,
       backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (sheetContext) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.6,
@@ -1502,26 +1479,20 @@ class _HomeScreenState extends State<HomeScreen> {
               Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                child: Text(
-                  'Notifications',
-                  style: TextStyle(
-                    fontFamily: 'Montserrat',
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: themeColor,
-                  ),
-                ),
+                child: Text('Notifications',
+                    style: TextStyle(
+                        fontFamily: 'Montserrat',
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: themeColor)),
               ),
               Expanded(
                 child: notifications.isEmpty
                     ? Center(
-                        child: Text(
-                          'No notifications yet.',
-                          style: TextStyle(
-                            color: _isDarkMode ? Colors.white : Colors.black,
-                          ),
-                        ),
-                      )
+                        child: Text('No notifications yet.',
+                            style: TextStyle(
+                                color:
+                                    _isDarkMode ? Colors.white : Colors.black)))
                     : ListView.builder(
                         controller: scrollController,
                         itemCount: notifications.length,
@@ -1530,50 +1501,30 @@ class _HomeScreenState extends State<HomeScreen> {
                           final title = notif['title'] ?? 'Notification';
                           final body = notif['body'] ?? '';
                           final data = notif['data'] ?? {};
+                          final type = data['type']?.toString();
+
                           final gistId = data['gist_id']?.toString();
                           final ticketId = data['ticket_id']?.toString();
+                          final followerId = data['follower_id']?.toString();
+                          final senderId = data['sender_id']?.toString();
 
-                          // ────── IMAGE LOGIC ──────
-                          // 1. For new tickets → use event poster (photo_url)
-                          // 2. For gists / transfers → use avatar (as before)
-                          final String? photoUrl = data['photo_url'] as String?;
-                          final String? avatarUrl =
+                          final String? displayImage =
                               notif['avatar_url'] as String?;
                           final String? username = notif['username'] as String?;
-
-                          final String? displayImage = photoUrl ?? avatarUrl;
-
-                          final bool isTicketNotification =
-                              (data['type'] == 'ticket' ||
-                                  data['type'] == 'ticket_transfer');
+                          final bool isNewTicket =
+                              notif['isNewTicket'] as bool? ?? false;
 
                           return ListTile(
-                            leading: displayImage != null &&
-                                    displayImage.isNotEmpty
-                                ? ClipRRect(
-                                    borderRadius: BorderRadius.circular(8),
-                                    child: CachedNetworkImage(
-                                      imageUrl: displayImage,
-                                      width: 48,
-                                      height: 48,
-                                      fit: BoxFit.cover,
-                                      placeholder: (_, __) => Container(
-                                        width: 48,
-                                        height: 48,
-                                        color: Colors.grey[700],
-                                      ),
-                                      errorWidget: (_, __, ___) => const Icon(
-                                        Icons.broken_image,
-                                        size: 48,
-                                        color: Colors.white70,
-                                      ),
-                                    ),
+                            leading: isNewTicket
+                                ? CircleAvatar(
+                                    radius: 22,
+                                    backgroundColor: const Color(0xFF4CAF50),
+                                    child: const Icon(Icons.confirmation_number,
+                                        color: Colors.white, size: 26),
                                   )
                                 : CircleAvatar(
                                     radius: 22,
-                                    backgroundColor: isTicketNotification
-                                        ? const Color(0xFF4CAF50)
-                                        : Colors.grey[700],
+                                    backgroundColor: Colors.grey[700],
                                     backgroundImage: (displayImage != null &&
                                             displayImage.isNotEmpty)
                                         ? NetworkImage(displayImage)
@@ -1586,37 +1537,52 @@ class _HomeScreenState extends State<HomeScreen> {
                                                 : '?',
                                             style: const TextStyle(
                                                 fontSize: 18,
-                                                color: Colors.white),
-                                          )
+                                                color: Colors.white))
                                         : null,
                                   ),
-                            title: Text(
-                              title,
-                              style: TextStyle(
-                                color:
-                                    _isDarkMode ? Colors.white : Colors.black,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            subtitle: Text(
-                              body,
-                              style: TextStyle(
-                                color: _isDarkMode
-                                    ? Colors.white70
-                                    : Colors.grey[700],
-                              ),
-                            ),
+                            title: Text(title,
+                                style: TextStyle(
+                                    color: _isDarkMode
+                                        ? Colors.white
+                                        : Colors.black,
+                                    fontWeight: FontWeight.w600)),
+                            subtitle: Text(body,
+                                style: TextStyle(
+                                    color: _isDarkMode
+                                        ? Colors.white70
+                                        : Colors.grey[700])),
                             onTap: () async {
+                              // Mark as read silently
                               try {
                                 await supabase.from('notifications').update(
                                     {'read': true}).eq('id', notif['id']);
                               } catch (_) {}
+
+                              // Route to correct screen based on type!
                               if (gistId != null) {
                                 Navigator.pushNamed(context, '/gist',
                                     arguments: {'id': gistId});
                               } else if (ticketId != null) {
                                 Navigator.pushNamed(context, '/ticket',
                                     arguments: {'id': ticketId});
+                              } else if (type == 'follow' &&
+                                  followerId != null) {
+                                Navigator.pop(sheetContext);
+                                UniversalProfileCard.show(
+                                    context, followerId, _prefs);
+                              } else if (type == 'chat') {
+                                Navigator.pop(sheetContext);
+                                Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                        builder: (_) => ChatListScreen(
+                                            userPreferences: _prefs)));
+                              } else if ((type == 'memory' ||
+                                      type == 'story') &&
+                                  senderId != null) {
+                                Navigator.pop(sheetContext);
+                                UniversalProfileCard.show(
+                                    context, senderId, _prefs);
                               }
                             },
                           );
@@ -1671,7 +1637,7 @@ class _GistItemCard extends StatefulWidget {
   final int likeCount;
   final bool isLiked;
   final VoidCallback onToggleLike;
-  final VoidCallback onShowComments;
+  final Future<void> Function() onShowComments; // <-- Changed to Future
   final Function(String) onDownload;
   final Function(bool) onToggleMute;
   final Color themeColor;
@@ -1701,8 +1667,8 @@ class _GistItemCardState extends State<_GistItemCard>
     with AutomaticKeepAliveClientMixin {
   int _localPageIndex = 0;
   late bool _isMuted;
+  int _commentCount = 0;
 
-  // 1. THIS IS THE MAGIC KEY: It prevents the item from being destroyed when it scrolls off-screen
   @override
   bool get wantKeepAlive => true;
 
@@ -1710,11 +1676,303 @@ class _GistItemCardState extends State<_GistItemCard>
   void initState() {
     super.initState();
     _isMuted = widget.isMutedInitial;
+    _fetchCommentCount();
+  }
+
+  Future<void> _fetchCommentCount() async {
+    try {
+      final res = await Supabase.instance.client
+          .from('gist_comments')
+          .select('id')
+          .eq('gist_id', widget.gistId)
+          .count(CountOption.exact);
+      if (mounted) setState(() => _commentCount = res.count);
+    } catch (_) {}
+  }
+
+  void _expandMedia(String url) {
+    showDialog(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: EdgeInsets.zero,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            InteractiveViewer(
+              panEnabled: true,
+              minScale: 1.0,
+              maxScale: 4.0,
+              child: CachedNetworkImage(
+                imageUrl: url,
+                fit: BoxFit.contain,
+              ),
+            ),
+            Positioned(
+              top: 40,
+              right: 20,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 32),
+                onPressed: () => Navigator.pop(context),
+              ),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --- NEW: Fetch friends for shipping ---
+  Future<List<dynamic>> _fetchFriends(String myId) async {
+    try {
+      final res = await Supabase.instance.client
+          .from('followers')
+          .select('following_id')
+          .eq('follower_id', myId);
+
+      final followingIds = res.map((e) => e['following_id']).toList();
+      if (followingIds.isEmpty) return [];
+
+      final profilesRes = await Supabase.instance.client
+          .from('profiles')
+          .select('id, username, avatar_url')
+          .inFilter('id', followingIds);
+
+      return profilesRes;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // --- NEW: Send Gist to a friend's DM ---
+  // --- UPDATED: Send Gist to MULTIPLE friends' DMs ---
+  Future<void> _sendGistToFriends(
+      Set<String> friendIds, String truncatedTitle, String gistLink) async {
+    try {
+      final myId = Supabase.instance.client.auth.currentUser!.id;
+
+      final imageUrl = widget.gist['image_url'] ?? '';
+      final mediaUrlToUse = widget.gist['image_urls'] != null &&
+              (widget.gist['image_urls'] as List).isNotEmpty
+          ? widget.gist['image_urls'][0]
+          : imageUrl;
+
+      // Loop through selected friends and send the message to each
+      for (String friendId in friendIds) {
+        final response = await Supabase.instance.client.rpc(
+            'get_or_create_personal_chat',
+            params: {'user_a': myId, 'user_b': friendId});
+        final chatId = response.toString();
+
+        await Supabase.instance.client.from('messages').insert({
+          'chat_id': chatId,
+          'sender_id': myId,
+          'content':
+              'Check out this Gist: $truncatedTitle\n$gistLink', // Deep link format!
+          'media_url': mediaUrlToUse,
+          'media_type': widget.gist['media_type'] ?? 'image',
+          'is_read': false,
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to batch send gist: $e');
+    }
+  }
+
+  // --- UPDATED: Show Ship (Share) Sheet with Multi-Select ---
+  // --- UPDATED: Show Ship (Share) Sheet with Multi-Select ---
+  // --- UPDATED: Show Ship (Share) Sheet with Multi-Select ---
+  void _showShipSheet(BuildContext context) {
+    final myId = Supabase.instance.client.auth.currentUser?.id;
+    if (myId == null) return;
+
+    // 1. Truncate title to 50 characters with an ellipsis
+    final String title = widget.gist['title'] ?? '';
+    final String truncatedTitle =
+        title.length > 50 ? '${title.substring(0, 50)}...' : title;
+
+    // 2. Use your ACTUAL domain!
+    final String gistLink =
+        'https://www.allowanceapp.org/gist/${widget.gistId}';
+
+    // FIX THE LAG: Cache the future outside the StatefulBuilder so it only loads ONCE!
+    final friendsFuture = _fetchFriends(myId);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        Set<String> selectedFriends = {};
+        bool isSending = false;
+
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setModalState) {
+            return DraggableScrollableSheet(
+              initialChildSize: 0.6,
+              minChildSize: 0.4,
+              maxChildSize: 0.9,
+              expand: false,
+              builder: (_, scrollController) => Column(
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: Text('Share Gist',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold)),
+                  ),
+
+                  // External Share (WhatsApp, Twitter, etc.)
+                  ListTile(
+                    leading: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                          color: Colors.grey[800], shape: BoxShape.circle),
+                      child: const Icon(Icons.share, color: Colors.white),
+                    ),
+                    title: const Text('Share to other apps',
+                        style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      Share.share('$truncatedTitle\n$gistLink');
+                    },
+                  ),
+                  const Divider(color: Colors.white10),
+
+                  const Padding(
+                    padding: EdgeInsets.all(8.0),
+                    child: Text('Send to friends',
+                        style: TextStyle(color: Colors.white54, fontSize: 14)),
+                  ),
+
+                  // In-App Share (Multi-Select List)
+                  Expanded(
+                    child: FutureBuilder<List<dynamic>>(
+                        future:
+                            friendsFuture, // <-- We now use the cached future!
+                        builder: (context, snapshot) {
+                          if (snapshot.connectionState ==
+                              ConnectionState.waiting) {
+                            return Center(
+                                child: CircularProgressIndicator(
+                                    color: widget.themeColor));
+                          }
+                          final friends = snapshot.data ?? [];
+                          if (friends.isEmpty) {
+                            return const Center(
+                                child: Text("Follow people to see them here",
+                                    style: TextStyle(color: Colors.white54)));
+                          }
+                          return ListView.builder(
+                            controller: scrollController,
+                            itemCount: friends.length,
+                            itemBuilder: (context, index) {
+                              final friend = friends[index];
+                              final friendId = friend['id'];
+                              final isSelected =
+                                  selectedFriends.contains(friendId);
+
+                              return ListTile(
+                                leading: CircleAvatar(
+                                  backgroundColor: Colors.grey[800],
+                                  backgroundImage: friend['avatar_url'] != null
+                                      ? CachedNetworkImageProvider(
+                                          friend['avatar_url'])
+                                      : null,
+                                  child: friend['avatar_url'] == null
+                                      ? const Icon(Icons.person,
+                                          color: Colors.white54)
+                                      : null,
+                                ),
+                                title: Text(friend['username'] ?? 'User',
+                                    style:
+                                        const TextStyle(color: Colors.white)),
+                                trailing: Checkbox(
+                                  value: isSelected,
+                                  activeColor: widget.themeColor,
+                                  checkColor: Colors.black,
+                                  onChanged: (bool? value) {
+                                    setModalState(() {
+                                      if (value == true)
+                                        selectedFriends.add(friendId);
+                                      else
+                                        selectedFriends.remove(friendId);
+                                    });
+                                  },
+                                ),
+                                onTap: () {
+                                  setModalState(() {
+                                    if (isSelected)
+                                      selectedFriends.remove(friendId);
+                                    else
+                                      selectedFriends.add(friendId);
+                                  });
+                                },
+                              );
+                            },
+                          );
+                        }),
+                  ),
+
+                  // Send Button
+                  if (selectedFriends.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: widget.themeColor,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12)),
+                          ),
+                          onPressed: isSending
+                              ? null
+                              : () async {
+                                  setModalState(() => isSending = true);
+                                  await _sendGistToFriends(selectedFriends,
+                                      truncatedTitle, gistLink);
+
+                                  if (mounted) {
+                                    Navigator.pop(ctx);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                          content: Text(
+                                              'Sent to ${selectedFriends.length} friend(s)!'),
+                                          backgroundColor: Colors.green),
+                                    );
+                                  }
+                                },
+                          child: isSending
+                              ? const SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                      color: Colors.black, strokeWidth: 2))
+                              : Text('Send to ${selectedFriends.length}',
+                                  style: const TextStyle(
+                                      color: Colors.black,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16)),
+                        ),
+                      ),
+                    )
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // 2. REQUIRED FOR AUTOMATIC KEEP ALIVE
     super.build(context);
 
     final imageUrl = (widget.gist['image_url'] as String?) ?? '';
@@ -1805,9 +2063,22 @@ class _GistItemCardState extends State<_GistItemCard>
                     itemBuilder: (ctx, i) => CachedNetworkImage(
                       imageUrl: imagesToShow[i],
                       fit: BoxFit.cover,
-                      // 3. THIS STOPS THE UI THREAD FREEZE BY DOWNSAMPLING LARGE IMAGES
                       memCacheWidth: 800,
                       memCacheHeight: 800,
+                    ),
+                  ),
+                  Positioned(
+                    top: 12,
+                    left: 12,
+                    child: GestureDetector(
+                      onTap: () => _expandMedia(imagesToShow[_localPageIndex]),
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: const BoxDecoration(
+                            color: Colors.black54, shape: BoxShape.circle),
+                        child: const Icon(Icons.fullscreen,
+                            color: Colors.white, size: 20),
+                      ),
                     ),
                   ),
                   if (imagesToShow.length > 1)
@@ -1831,69 +2102,84 @@ class _GistItemCardState extends State<_GistItemCard>
             );
     }
 
-    // --- 2. ACTION BAR ---
-    Widget actionBar = Row(
-      children: [
-        IconButton(
-          icon: Icon(widget.isLiked ? Icons.favorite : Icons.favorite_border,
-              color: widget.isLiked ? Colors.red : Colors.white, size: 28),
-          onPressed: widget.onToggleLike,
-        ),
-        IconButton(
-          icon: const Icon(CupertinoIcons.chat_bubble,
-              color: Colors.white, size: 26),
-          onPressed: widget.onShowComments,
-        ),
-        const IconButton(
-            icon: Text('🚀', style: TextStyle(fontSize: 22)), onPressed: null),
-        IconButton(
-          icon: const Icon(Icons.download_for_offline_outlined,
-              color: Colors.white, size: 26),
-          onPressed: () {
-            final target = imagesToShow.isNotEmpty
-                ? imagesToShow[_localPageIndex]
-                : imageUrl;
-            if (target.isNotEmpty) widget.onDownload(target);
-          },
-        ),
-        const Spacer(),
-        if (gistUrl.isNotEmpty)
+    // --- 2. ACTION BAR (Centered with tight spacing, no text underneath) ---
+    Widget actionBar = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center, // Centered!
+        children: [
           IconButton(
-            icon: const Icon(Icons.link, color: Colors.white, size: 24),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            icon: Icon(widget.isLiked ? Icons.favorite : Icons.favorite_border,
+                color: widget.isLiked ? Colors.red : Colors.white, size: 28),
+            onPressed: widget.onToggleLike,
+          ),
+          const SizedBox(width: 16),
+          IconButton(
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            icon: const Icon(CupertinoIcons.chat_bubble,
+                color: Colors.white, size: 26),
             onPressed: () async {
-              final uri = Uri.tryParse(gistUrl);
-              if (uri != null && await canLaunchUrl(uri)) {
-                await launchUrl(uri, mode: LaunchMode.externalApplication);
-              }
+              await widget.onShowComments();
+              _fetchCommentCount(); // Refresh count
             },
           ),
-      ],
+          const SizedBox(width: 16),
+          IconButton(
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            icon: const Text('🚀', style: TextStyle(fontSize: 22)),
+            onPressed: () => _showShipSheet(context), // <--- FIRED UP
+          ),
+          const SizedBox(width: 16),
+          IconButton(
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            icon: const Icon(Icons.download_for_offline_outlined,
+                color: Colors.white, size: 26),
+            onPressed: () {
+              final target = imagesToShow.isNotEmpty
+                  ? imagesToShow[_localPageIndex]
+                  : imageUrl;
+              if (target.isNotEmpty) widget.onDownload(target);
+            },
+          ),
+        ],
+      ),
     );
 
-    // --- 3. CAPTION AREA ---
+    // --- 3. CAPTION AREA (Counts restored to the left side) ---
     Widget captionArea = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (widget.likeCount > 0)
-            Text('${widget.likeCount} likes',
+          if (widget.likeCount > 0 || _commentCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8.0),
+              child: Text(
+                '${widget.likeCount} likes${_commentCount > 0 ? ' • $_commentCount replies' : ''}',
                 style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.bold,
-                    fontSize: 13)),
-          const SizedBox(height: 8),
+                    fontSize: 13),
+              ),
+            ),
           GestureDetector(
-            onTap: () => userId.isNotEmpty
-                ? UniversalProfileCard.show(context, userId, widget.prefs)
-                : null,
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              if (userId.isNotEmpty) {
+                UniversalProfileCard.show(context, userId, widget.prefs);
+              }
+            },
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 CircleAvatar(
-                  radius: 14,
+                  radius: 16,
                   backgroundColor: Colors.grey[800],
-                  // 4. DOWN-SAMPLE AVATARS AS WELL
                   backgroundImage: avatarUrl != null
                       ? CachedNetworkImageProvider(avatarUrl,
                           maxWidth: 100, maxHeight: 100)
@@ -1963,6 +2249,28 @@ class _GistItemCardState extends State<_GistItemCard>
               ],
             ),
           ),
+          if (gistUrl.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () async {
+                final uri = Uri.tryParse(gistUrl);
+                if (uri != null && await canLaunchUrl(uri)) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              },
+              child: Row(
+                children: [
+                  const Icon(Icons.link, color: Colors.blueAccent, size: 18),
+                  const SizedBox(width: 4),
+                  Expanded(
+                      child: Text(gistUrl,
+                          style: const TextStyle(
+                              color: Colors.blueAccent, fontSize: 13),
+                          overflow: TextOverflow.ellipsis)),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 30),
         ],
       ),
@@ -1971,5 +2279,371 @@ class _GistItemCardState extends State<_GistItemCard>
     return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [mediaWidget, actionBar, captionArea]);
+  }
+} // <--- THIS CLOSING BRACKET FIXES YOUR ERROR
+
+// ========================================================================
+// GIST COMMENTS SHEET CLASS
+// ========================================================================
+class GistCommentsSheet extends StatefulWidget {
+  final String gistId;
+  final Color themeColor;
+  final UserPreferences userPreferences;
+
+  const GistCommentsSheet({
+    super.key,
+    required this.gistId,
+    required this.themeColor,
+    required this.userPreferences,
+  });
+
+  @override
+  State<GistCommentsSheet> createState() => _GistCommentsSheetState();
+}
+
+class _GistCommentsSheetState extends State<GistCommentsSheet> {
+  final _commentController = TextEditingController();
+  final FocusNode _focusNode =
+      FocusNode(); // NEW: Focus node to pop open keyboard
+  final supabase = Supabase.instance.client;
+  bool _isPosting = false;
+
+  @override
+  void dispose() {
+    _commentController.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _postComment() async {
+    final text = _commentController.text.trim();
+    final user = supabase.auth.currentUser;
+    if (text.isEmpty || user == null) return;
+
+    setState(() => _isPosting = true);
+    try {
+      await supabase.from('gist_comments').insert({
+        'gist_id': int.parse(widget.gistId),
+        'user_id': user.id,
+        'content': text,
+      });
+      _commentController.clear();
+      FocusScope.of(context).unfocus();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to post comment')),
+      );
+    } finally {
+      if (mounted) setState(() => _isPosting = false);
+    }
+  }
+
+  void _showCommentOptions(int commentId, String currentContent) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.edit, color: Colors.white),
+            title: const Text('Edit', style: TextStyle(color: Colors.white)),
+            onTap: () {
+              Navigator.pop(ctx);
+              _editComment(commentId, currentContent);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete, color: Colors.red),
+            title: const Text('Delete', style: TextStyle(color: Colors.red)),
+            onTap: () {
+              Navigator.pop(ctx);
+              _deleteComment(commentId);
+            },
+          ),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+
+  void _editComment(int commentId, String currentContent) {
+    final editController = TextEditingController(text: currentContent);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title:
+            const Text('Edit Comment', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: editController,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'Update your comment...',
+            hintStyle: TextStyle(color: Colors.white54),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child:
+                const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () async {
+              if (editController.text.trim().isNotEmpty) {
+                await supabase
+                    .from('gist_comments')
+                    .update({'content': editController.text.trim()}).eq(
+                        'id', commentId);
+                if (mounted) Navigator.pop(ctx);
+              }
+            },
+            child: Text('Save',
+                style: TextStyle(
+                    color: widget.themeColor, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _deleteComment(int commentId) async {
+    try {
+      await supabase.from('gist_comments').delete().eq('id', commentId);
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Failed to delete')));
+    }
+  }
+
+  String _timeAgo(String timestamp) {
+    final diff = DateTime.now().difference(DateTime.parse(timestamp).toLocal());
+    if (diff.inMinutes < 1) return 'now';
+    if (diff.inHours < 1) return '${diff.inMinutes}m';
+    if (diff.inDays < 1) return '${diff.inHours}h';
+    return '${diff.inDays}d';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: FractionallySizedBox(
+        heightFactor: 0.7,
+        child: Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                  color: Colors.grey[700],
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 15),
+              child: Text('Comments',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold)),
+            ),
+            const Divider(color: Colors.white10, height: 1),
+            Expanded(
+              child: StreamBuilder<List<Map<String, dynamic>>>(
+                  stream: supabase
+                      .from('gist_comments')
+                      .stream(primaryKey: ['id'])
+                      .eq('gist_id', int.parse(widget.gistId))
+                      .order('created_at', ascending: true),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return Center(
+                          child: CircularProgressIndicator(
+                              color: widget.themeColor));
+                    }
+
+                    final comments = snapshot.data ?? [];
+                    if (comments.isEmpty) {
+                      return const Center(
+                          child: Text("No comments yet. Be the first!",
+                              style: TextStyle(color: Colors.white54)));
+                    }
+
+                    return ListView.builder(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      itemCount: comments.length,
+                      itemBuilder: (context, index) {
+                        final comment = comments[index];
+                        final userId = comment['user_id'] as String;
+                        final isMyComment =
+                            userId == supabase.auth.currentUser?.id;
+
+                        return FutureBuilder<Map<String, dynamic>?>(
+                            // FIX: Added 'school_name' to the select query!
+                            future: supabase
+                                .from('profiles')
+                                .select(
+                                    'username, avatar_url, subscription_tier, school_name')
+                                .eq('id', userId)
+                                .maybeSingle(),
+                            builder: (ctx, profileSnap) {
+                              final profile = profileSnap.data;
+                              final isPlus =
+                                  profile?['subscription_tier'] == 'Membership';
+
+                              return ListTile(
+                                leading: GestureDetector(
+                                  onTap: () => UniversalProfileCard.show(
+                                      context, userId, widget.userPreferences),
+                                  child: CircleAvatar(
+                                    backgroundColor: Colors.grey[800],
+                                    backgroundImage:
+                                        profile?['avatar_url'] != null
+                                            ? CachedNetworkImageProvider(
+                                                profile!['avatar_url'])
+                                            : null,
+                                    child: profile?['avatar_url'] == null
+                                        ? const Icon(Icons.person,
+                                            color: Colors.white54, size: 20)
+                                        : null,
+                                  ),
+                                ),
+                                title: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => UniversalProfileCard.show(
+                                      context, userId, widget.userPreferences),
+                                  child: Row(
+                                    children: [
+                                      Text('@${profile?['username'] ?? 'User'}',
+                                          style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.bold)),
+                                      if (isPlus) ...[
+                                        const SizedBox(width: 4),
+                                        const Icon(Icons.star,
+                                            color: Colors.amber, size: 12),
+                                      ],
+                                      // NEW: Show School Name safely without overflowing
+                                      if (profile?['school_name'] != null &&
+                                          profile!['school_name']
+                                              .toString()
+                                              .isNotEmpty) ...[
+                                        const Text(' • ',
+                                            style: TextStyle(
+                                                color: Colors.white38,
+                                                fontSize: 11)),
+                                        Expanded(
+                                          child: Text(
+                                            profile['school_name'],
+                                            style: const TextStyle(
+                                                color: Colors.white54,
+                                                fontSize: 11),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                      const SizedBox(width: 8),
+                                      Text(_timeAgo(comment['created_at']),
+                                          style: const TextStyle(
+                                              color: Colors.white38,
+                                              fontSize: 11)),
+                                    ],
+                                  ),
+                                ),
+                                // NEW: Adding the Reply Button underneath the text
+                                subtitle: Padding(
+                                  padding: const EdgeInsets.only(top: 4.0),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(comment['content'] ?? '',
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 14)),
+                                      const SizedBox(height: 6),
+                                      GestureDetector(
+                                        onTap: () {
+                                          _commentController.text =
+                                              '@${profile?['username']} ';
+                                          FocusScope.of(context)
+                                              .requestFocus(_focusNode);
+                                        },
+                                        child: const Text('Reply',
+                                            style: TextStyle(
+                                                color: Colors.white54,
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.bold)),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                trailing: isMyComment
+                                    ? IconButton(
+                                        icon: const Icon(Icons.more_vert,
+                                            color: Colors.white54, size: 18),
+                                        onPressed: () => _showCommentOptions(
+                                            comment['id'], comment['content']),
+                                      )
+                                    : null,
+                              );
+                            });
+                      },
+                    );
+                  }),
+            ),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: const BoxDecoration(
+                  border: Border(top: BorderSide(color: Colors.white10))),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _commentController,
+                      focusNode: _focusNode, // Hooked up focus node here
+                      style: const TextStyle(color: Colors.white),
+                      decoration: InputDecoration(
+                        hintText: 'Add a comment...',
+                        hintStyle: const TextStyle(color: Colors.white54),
+                        filled: true,
+                        fillColor: Colors.grey[900],
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(30),
+                            borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  GestureDetector(
+                    onTap: _isPosting ? null : _postComment,
+                    child: _isPosting
+                        ? SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                                color: widget.themeColor, strokeWidth: 2))
+                        : Text('Post',
+                            style: TextStyle(
+                                color: widget.themeColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16)),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

@@ -7,6 +7,10 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
+// Deep Linking
+import 'package:app_links/app_links.dart';
+import 'screens/home/single_gist_screen.dart';
+
 // Firebase
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -54,6 +58,10 @@ class _AllowanceAppState extends State<AllowanceApp> {
 
   StreamSubscription<AuthState>? _authSub;
 
+  // Deep Link Variables
+  late AppLinks _appLinks;
+  StreamSubscription<Uri>? _linkSubscription;
+
   static final GlobalKey<NavigatorState> navigatorKey =
       GlobalKey<NavigatorState>();
 
@@ -61,6 +69,35 @@ class _AllowanceAppState extends State<AllowanceApp> {
   void initState() {
     super.initState();
     _initializeApp();
+    _initDeepLinks(); // <-- Start listening for YouTube-style links!
+  }
+
+  // --- NEW: YOUTUBE STYLE DEEP LINK LISTENER ---
+  void _initDeepLinks() {
+    _appLinks = AppLinks();
+
+    // Handle link when app is in background and opened via link
+    _linkSubscription = _appLinks.uriLinkStream.listen((uri) {
+      _handleDeepLink(uri);
+    });
+
+    // Handle link when app is completely closed (cold start)
+    _appLinks.getInitialLink().then((uri) {
+      if (uri != null) _handleDeepLink(uri);
+    });
+  }
+
+  void _handleDeepLink(Uri uri) {
+    // If link is allowanceapp.org/gist/123
+    if (uri.pathSegments.contains('gist')) {
+      final gistId = uri.pathSegments.last;
+
+      // Delay slightly to ensure Navigator is mounted during a cold start
+      Future.delayed(const Duration(milliseconds: 500), () {
+        navigatorKey.currentState
+            ?.pushNamed('/gist', arguments: {'id': gistId});
+      });
+    }
   }
 
   Future<void> _initializeApp() async {
@@ -113,6 +150,7 @@ class _AllowanceAppState extends State<AllowanceApp> {
   @override
   void dispose() {
     _authSub?.cancel();
+    _linkSubscription?.cancel(); // Clear the link listener
     super.dispose();
   }
 
@@ -124,7 +162,6 @@ class _AllowanceAppState extends State<AllowanceApp> {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.indigo),
 
-      // ADDED: Localization delegates to fix the Camera Picker language
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
@@ -133,6 +170,18 @@ class _AllowanceAppState extends State<AllowanceApp> {
       supportedLocales: const [
         Locale('en', ''), // English
       ],
+
+      // --- ROUTE GENERATOR (Catches the /gist link) ---
+      onGenerateRoute: (settings) {
+        if (settings.name == '/gist') {
+          final args = settings.arguments as Map<String, dynamic>?;
+          final gistId = args?['id'] ?? '';
+          return MaterialPageRoute(
+            builder: (_) => SingleGistScreen(gistId: gistId.toString()),
+          );
+        }
+        return null;
+      },
 
       home: _isInitialized ? _buildHome() : const CustomLoadingScreen(),
     );

@@ -1112,7 +1112,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 // --- SUB-WIDGET: TEXT & TIME (For standard bubbles) ---
   Widget _buildTextAndTimestamp(
       String text, String time, bool isMe, bool isRead) {
-    // 1. Check if the group rules allow clickable links
     final rules = _chatMeta?['rules'] as Map<String, dynamic>? ?? {};
     final bool linksEnabled = rules['links'] ?? true;
 
@@ -1124,11 +1123,20 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         spacing: 12,
         runSpacing: 2,
         children: [
-          // 2. Conditional Rendering: Linkify vs Standard Text
           linksEnabled
               ? Linkify(
                   onOpen: (link) async {
-                    final Uri url = Uri.parse(link.url);
+                    final String urlString = link.url;
+
+                    // INTERCEPT ALLOWANCE GIST LINKS USING NEW DOMAIN
+                    if (urlString.contains('allowanceapp.org/gist/')) {
+                      final gistId = urlString.split('/').last;
+                      Navigator.pushNamed(context, '/gist',
+                          arguments: {'id': gistId});
+                      return;
+                    }
+
+                    final Uri url = Uri.parse(urlString);
                     if (await canLaunchUrl(url)) {
                       await launchUrl(url,
                           mode: LaunchMode.externalApplication);
@@ -1141,7 +1149,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   text: text,
                   style: const TextStyle(color: Colors.white, fontSize: 15),
                   linkStyle: const TextStyle(
-                    color: Color(0xFF53BDEB), // Light blue for links
+                    color: Color(0xFF53BDEB),
                     decoration: TextDecoration.underline,
                   ),
                 )
@@ -1149,8 +1157,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   text,
                   style: const TextStyle(color: Colors.white, fontSize: 15),
                 ),
-
-          // 3. Timestamp and Read Receipts[cite: 6]
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [

@@ -1,17 +1,25 @@
+// lib/screens/home/media_editor_screen.dart
 import 'dart:io';
 import 'package:allowance/models/user_preferences.dart';
+import 'package:allowance/screens/home/video_trimmer_screen.dart'; // Ensure this exists
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
-import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
+import 'package:image_picker/image_picker.dart';
 
 class MediaEditorScreen extends StatefulWidget {
-  final AssetEntity asset;
-  final UserPreferences userPreferences; // Use the actual class name here
+  final XFile file;
+  final bool isVideo;
+  final UserPreferences userPreferences;
 
-  const MediaEditorScreen(
-      {super.key, required this.asset, required this.userPreferences});
+  const MediaEditorScreen({
+    super.key,
+    required this.file,
+    required this.isVideo,
+    required this.userPreferences,
+  });
 
   @override
   State<MediaEditorScreen> createState() => _MediaEditorScreenState();
@@ -19,10 +27,17 @@ class MediaEditorScreen extends StatefulWidget {
 
 class _MediaEditorScreenState extends State<MediaEditorScreen> {
   final TextEditingController _captionController = TextEditingController();
-  File? _processedFile;
+  late XFile _currentFile;
   late Color themeColor;
   VideoPlayerController? _videoController;
-  bool _isUploading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentFile = widget.file;
+    themeColor = Color(widget.userPreferences.themeColorValue);
+    _prepareMedia();
+  }
 
   @override
   void dispose() {
@@ -31,39 +46,142 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
     super.dispose();
   }
 
-  @override
-  void initState() {
-    super.initState();
-
-    // This is exactly where you use it!
-    themeColor = Color(widget.userPreferences.themeColorValue);
-
-    _prepareMedia();
-  }
-
   Future<void> _prepareMedia() async {
-    final file = await widget.asset.file;
-    if (file == null) return;
+    _videoController?.dispose(); // Clean up old controller if trimming
 
-    setState(() => _processedFile = file);
+    if (widget.isVideo) {
+      if (kIsWeb) {
+        // Web uses networkUrl for blob data
+        _videoController =
+            VideoPlayerController.networkUrl(Uri.parse(_currentFile.path));
+      } else {
+        // Mobile uses standard file loader
+        _videoController = VideoPlayerController.file(File(_currentFile.path));
+      }
 
-    // Initialize video player if it's a video
-    if (widget.asset.type == AssetType.video) {
-      _videoController = VideoPlayerController.file(file)
-        ..initialize().then((_) {
-          setState(() {});
-          _videoController!.play();
-          _videoController!.setLooping(true);
-        });
+      await _videoController!.initialize();
+      _videoController!.setLooping(true);
+      _videoController!.play();
+      if (mounted) setState(() {});
+    } else {
+      if (mounted) setState(() {});
     }
   }
 
-  Widget _buildMediaPreview() {
-    if (_processedFile == null) {
-      return const CircularProgressIndicator();
-    }
+  // =====================================
+  // EDITING METHODS (Mobile Only)
+  // =====================================
+  Future<void> _cropImage() async {
+    if (kIsWeb) return; // Cropping requires complex web setup, disable for now
 
-    if (widget.asset.type == AssetType.video) {
+    final croppedFile = await ImageCropper().cropImage(
+      sourcePath: _currentFile.path,
+      uiSettings: [
+        AndroidUiSettings(
+          toolbarTitle: 'Crop Image',
+          toolbarColor: Colors.black,
+          toolbarWidgetColor: themeColor,
+          initAspectRatio: CropAspectRatioPreset.original,
+          lockAspectRatio: false,
+        ),
+        IOSUiSettings(title: 'Crop Image'),
+      ],
+    );
+
+    if (croppedFile != null) {
+      setState(() => _currentFile = XFile(croppedFile.path));
+      _prepareMedia();
+    }
+  }
+
+  Future<void> _trimVideo() async {
+    if (kIsWeb) return; // video_trimmer package does not support web
+
+    final String? trimmedPath = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => VideoTrimmerScreen(file: File(_currentFile.path)),
+      ),
+    );
+
+    if (trimmedPath != null) {
+      setState(() => _currentFile = XFile(trimmedPath));
+      _prepareMedia();
+    }
+  }
+
+  // =====================================
+  // BACKGROUND POSTING
+  // =====================================
+  void _startBackgroundUpload() async {
+    final supabase = Supabase.instance.client;
+    final userId = supabase.auth.currentUser!.id;
+    final caption = _captionController.text.trim();
+    final fileToUpload = _currentFile;
+    final isVideo = widget.isVideo;
+
+    // 1. Close the screen immediately so user isn't stuck waiting
+    Navigator.pop(context);
+
+    // 2. Show loading snackbar
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Uploading memory to your profile... 🚀'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+
+    // 3. Process the upload silently in the background
+    try {
+      final extension = isVideo ? '.mp4' : '.jpg';
+      final fileName = '${DateTime.now().millisecondsSinceEpoch}$extension';
+
+      // Use readAsBytes() – it works flawlessly on BOTH Web and Mobile!
+      final bytes = await fileToUpload.readAsBytes();
+
+      await supabase.storage.from('memories-bucket').uploadBinary(
+            fileName,
+            bytes,
+            fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
+          );
+
+      final publicUrl =
+          supabase.storage.from('memories-bucket').getPublicUrl(fileName);
+
+      await supabase.from('memories').insert({
+        'user_id': userId,
+        'media_url': publicUrl,
+        'caption': caption,
+        'media_type': isVideo ? 'video' : 'image',
+        'created_at': DateTime.now().toUtc().toIso8601String(),
+      });
+
+      // 4. Show success message
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Memory posted successfully!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Background Upload error: $e');
+      // 5. Show friendly error message
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              '❌ Could not post memory. Please check your internet connection and try again.'),
+          backgroundColor: Colors.redAccent,
+          duration: Duration(seconds: 4),
+        ),
+      );
+    }
+  }
+
+  // =====================================
+  // UI BUILDER
+  // =====================================
+  Widget _buildMediaPreview() {
+    if (widget.isVideo) {
       return _videoController != null && _videoController!.value.isInitialized
           ? AspectRatio(
               aspectRatio: _videoController!.value.aspectRatio,
@@ -71,97 +189,9 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
             )
           : const CircularProgressIndicator(color: Colors.white);
     } else {
-      return Image.file(_processedFile!, fit: BoxFit.contain);
-    }
-  }
-
-  Future<void> _uploadMemory() async {
-    if (_processedFile == null || _isUploading) return;
-    setState(() => _isUploading = true);
-
-    try {
-      final supabase = Supabase.instance.client;
-      final userId = supabase.auth.currentUser!.id;
-      final isVideo = widget.asset.type == AssetType.video;
-
-      // Create unique filename with correct extension
-      final extension = isVideo ? '.mp4' : '.jpg';
-      final fileName = '${DateTime.now().millisecondsSinceEpoch}$extension';
-
-      // 1. Upload to storage bucket (Ensure 'memories-bucket' is created in Supabase)
-      await supabase.storage.from('memories-bucket').upload(
-            fileName,
-            _processedFile!,
-            fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
-          );
-
-      final publicUrl =
-          supabase.storage.from('memories-bucket').getPublicUrl(fileName);
-
-      // 2. Insert into memories table - MATCHING SCHEMA
-      await supabase.from('memories').insert({
-        'user_id': userId,
-        'media_url': publicUrl,
-        'caption':
-            _captionController.text.trim(), // Added .trim() for cleanliness
-        'media_type':
-            isVideo ? 'video' : 'image', // FIX: Matches media_type in schema
-        'created_at': DateTime.now()
-            .toUtc()
-            .toIso8601String(), // Using UTC for consistency
-      });
-
-      if (mounted) Navigator.pop(context);
-    } catch (e) {
-      debugPrint('Upload error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Upload failed: $e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isUploading = false);
-    }
-  }
-
-// UPDATE: The _cropImage method with the corrected API
-  Future<void> _cropImage() async {
-    if (_processedFile == null) return;
-
-    final croppedFile = await ImageCropper().cropImage(
-      sourcePath: _processedFile!.path,
-      uiSettings: [
-        AndroidUiSettings(
-          toolbarTitle: 'Edit Media',
-          toolbarColor: Colors.black,
-          toolbarWidgetColor: themeColor,
-          initAspectRatio: CropAspectRatioPreset.original,
-          lockAspectRatio: false,
-          // Move presets here for Android
-          aspectRatioPresets: [
-            CropAspectRatioPreset.square,
-            CropAspectRatioPreset.ratio3x2,
-            CropAspectRatioPreset.original,
-            CropAspectRatioPreset.ratio4x3,
-            CropAspectRatioPreset.ratio16x9,
-          ],
-        ),
-        IOSUiSettings(
-          title: 'Edit Media',
-          // Move presets here for iOS
-          aspectRatioPresets: [
-            CropAspectRatioPreset.square,
-            CropAspectRatioPreset.ratio3x2,
-            CropAspectRatioPreset.original,
-            CropAspectRatioPreset.ratio4x3,
-            CropAspectRatioPreset.ratio16x9,
-          ],
-        ),
-      ],
-    );
-
-    if (croppedFile != null) {
-      setState(() => _processedFile = File(croppedFile.path));
+      return kIsWeb
+          ? Image.network(_currentFile.path, fit: BoxFit.contain)
+          : Image.file(File(_currentFile.path), fit: BoxFit.contain);
     }
   }
 
@@ -177,20 +207,23 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
-          if (widget.asset.type == AssetType.image)
-            IconButton(
-              icon: const Icon(Icons.crop, color: Colors.white),
-              onPressed: _cropImage,
-            ),
-          IconButton(
-            icon: const Icon(Icons.text_fields, color: Colors.white),
-            onPressed: () {/* Add text overlay logic here */},
-          ),
+          // Show Crop icon for images, Scissor icon for videos (Mobile only)
+          if (!kIsWeb) ...[
+            if (!widget.isVideo)
+              IconButton(
+                icon: const Icon(Icons.crop, color: Colors.white),
+                onPressed: _cropImage,
+              )
+            else
+              IconButton(
+                icon: const Icon(Icons.content_cut, color: Colors.white),
+                onPressed: _trimVideo,
+              ),
+          ],
         ],
       ),
       body: Stack(
         children: [
-          // Media Preview - Uses the new method
           Center(
             child: _buildMediaPreview(),
           ),
@@ -230,22 +263,12 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                   ),
                   const SizedBox(width: 8),
                   GestureDetector(
-                    // Calls the upload method
-                    onTap: _uploadMemory,
+                    onTap: _startBackgroundUpload, // Triggers background post
                     child: CircleAvatar(
                       backgroundColor: themeColor,
                       radius: 24,
-                      child: _isUploading
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(
-                                color: Colors.white,
-                                strokeWidth: 2,
-                              ),
-                            )
-                          : const Icon(Icons.send,
-                              color: Colors.white, size: 20),
+                      child:
+                          const Icon(Icons.send, color: Colors.white, size: 20),
                     ),
                   ),
                 ],
