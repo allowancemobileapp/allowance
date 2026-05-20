@@ -1,5 +1,6 @@
 // lib/screens/chat/chat_list_screen.dart
 import 'dart:async';
+import 'dart:convert';
 import 'package:allowance/screens/chat/chat_room_screen.dart';
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:allowance/screens/chat/create_group_screen.dart';
@@ -7,6 +8,7 @@ import 'package:allowance/screens/chat/explore_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import '../../models/user_preferences.dart';
@@ -39,13 +41,57 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
   bool _isLoading = true;
   String? _myId;
+  late PageController _pageController; // <--- ADD THIS
 
   @override
   void initState() {
     super.initState();
+    _pageController = PageController(
+        initialPage: _selectedTabIndex); // <--- INITIALIZE PAGE CONTROLLER
     _myId = supabase.auth.currentUser?.id;
     if (_myId != null) {
+      _loadCachedData();
       _setupStreams();
+
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        if (mounted && _isLoading) setState(() => _isLoading = false);
+      });
+    }
+  }
+
+  Future<void> _handleRefresh() async {
+    _setupStreams(); // Re-trigger the backend fetch silently
+    await Future.delayed(
+        const Duration(seconds: 1)); // UX delay to show the spinner
+  }
+
+  Future<void> _loadCachedData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final cachedChats = prefs.getString('cached_chats_$_myId');
+    final cachedParts = prefs.getString('cached_parts_$_myId');
+    final cachedFolls = prefs.getString('cached_folls_$_myId');
+    final cachedUnread = prefs.getString('cached_unread_$_myId');
+
+    if (cachedChats != null && cachedParts != null) {
+      try {
+        if (mounted) {
+          setState(() {
+            _chats = List<Map<String, dynamic>>.from(jsonDecode(cachedChats));
+            _allParticipants =
+                List<Map<String, dynamic>>.from(jsonDecode(cachedParts));
+            if (cachedFolls != null) {
+              _followingIds = Set<String>.from(jsonDecode(cachedFolls));
+            }
+            if (cachedUnread != null) {
+              _unreadMessages =
+                  List<Map<String, dynamic>>.from(jsonDecode(cachedUnread));
+            }
+            _isLoading = false; // Instantly hides spinner!
+          });
+        }
+      } catch (e) {
+        debugPrint('Cache parsing error: $e');
+      }
     }
   }
 
@@ -53,7 +99,7 @@ class _ChatListScreenState extends State<ChatListScreen> {
   void _setupStreams() {
     final myId = _myId!;
 
-    // 1. My participants
+    _participantsSub?.cancel();
     _participantsSub = supabase
         .from('chat_participants')
         .stream(primaryKey: ['chat_id', 'user_id'])
@@ -66,53 +112,68 @@ class _ChatListScreenState extends State<ChatListScreen> {
             return;
           }
 
-          // 2. Chats (Using myChatIds)
           _chatsSub?.cancel();
           _chatsSub = supabase
               .from('chats')
               .stream(primaryKey: ['id'])
               .inFilter('id', myChatIds)
-              .listen((chats) {
-                _chats = chats;
-                if (mounted) setState(() => _isLoading = false);
+              .listen((chats) async {
+                if (mounted) {
+                  setState(() {
+                    _chats = chats;
+                    _isLoading = false;
+                  });
+                }
+                // Save to offline storage
+                final prefs = await SharedPreferences.getInstance();
+                prefs.setString('cached_chats_$myId', jsonEncode(chats));
               });
 
-          // 3. All Participants in those chats
           _allParticipantsSub?.cancel();
           _allParticipantsSub = supabase
               .from('chat_participants')
               .stream(primaryKey: ['chat_id', 'user_id'])
               .inFilter('chat_id', myChatIds)
-              .listen((parts) {
-                _allParticipants = parts;
-                if (mounted) setState(() {});
+              .listen((parts) async {
+                if (mounted) setState(() => _allParticipants = parts);
+                // Save to offline storage
+                final prefs = await SharedPreferences.getInstance();
+                prefs.setString('cached_parts_$myId', jsonEncode(parts));
               });
         });
 
-    // 4. Followers (To determine Friends vs General)
+    _followersSub?.cancel();
     _followersSub = supabase
         .from('followers')
         .stream(primaryKey: ['follower_id', 'following_id'])
         .eq('follower_id', myId)
-        .listen((folls) {
-          _followingIds =
-              folls.map((f) => f['following_id'].toString()).toSet();
-          if (mounted) setState(() {});
+        .listen((folls) async {
+          if (mounted) {
+            setState(() {
+              _followingIds =
+                  folls.map((f) => f['following_id'].toString()).toSet();
+            });
+          }
+          final prefs = await SharedPreferences.getInstance();
+          prefs.setString(
+              'cached_folls_$myId', jsonEncode(_followingIds.toList()));
         });
 
-    // 5. Unread Messages Global Stream
+    _unreadSub?.cancel();
     _unreadSub = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
         .eq('is_read', false)
-        .listen((msgs) {
-          _unreadMessages = msgs;
-          if (mounted) setState(() {});
+        .listen((msgs) async {
+          if (mounted) setState(() => _unreadMessages = msgs);
+          final prefs = await SharedPreferences.getInstance();
+          prefs.setString('cached_unread_$myId', jsonEncode(msgs));
         });
   }
 
   @override
   void dispose() {
+    _pageController.dispose(); // <--- DISPOSE IT
     _participantsSub?.cancel();
     _chatsSub?.cancel();
     _followersSub?.cancel();
@@ -214,7 +275,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
       );
     }
 
-    // 1. Calculate Unread Counts per tab
     int friendsUnread = 0;
     int generalUnread = 0;
     int groupsUnread = 0;
@@ -252,46 +312,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
         }
       }
     }
-
-    // 2. Filter Chats based on Tab and Search
-    final filteredChats = _chats.where((chat) {
-      final isGroup = chat['is_group'] == true;
-      final chatIdStr = chat['id'].toString();
-      final chatName = (chat['name'] ?? '').toString().toLowerCase();
-      final searchText = _searchController.text.toLowerCase();
-
-      if (searchText.isNotEmpty && !chatName.contains(searchText)) return false;
-      if (_selectedTabIndex == 2) return isGroup;
-      if (isGroup) return false;
-
-      final otherParticipant = _allParticipants.firstWhere(
-        (p) => p['chat_id'].toString() == chatIdStr && p['user_id'] != _myId,
-        orElse: () => <String, dynamic>{},
-      );
-
-      if (otherParticipant.isEmpty) return false;
-
-      final targetUserId = otherParticipant['user_id'].toString();
-      final isFollowing = _followingIds.contains(targetUserId);
-
-      if (_selectedTabIndex == 0) return isFollowing;
-      if (_selectedTabIndex == 1) return !isFollowing;
-
-      return false;
-    }).toList();
-
-    // 3. WHATSAPP STYLE SORTING
-    filteredChats.sort((a, b) {
-      final aTime = DateTime.tryParse(a['updated_at']?.toString() ??
-              a['created_at']?.toString() ??
-              '') ??
-          DateTime(0);
-      final bTime = DateTime.tryParse(b['updated_at']?.toString() ??
-              b['created_at']?.toString() ??
-              '') ??
-          DateTime(0);
-      return bTime.compareTo(aTime); // Newest first
-    });
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -332,27 +352,28 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   onValueChanged: (int? value) {
                     if (value != null) {
                       setState(() => _selectedTabIndex = value);
+                      // <--- ANIMATE PAGE VIEW ON TAP
+                      _pageController.animateToPage(value,
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOut);
                     }
                   },
                 ),
               ),
             ),
             Expanded(
-              child: filteredChats.isEmpty
-                  ? _buildPlaceholder('No messages yet.')
-                  : ListView.builder(
-                      itemCount: filteredChats.length,
-                      itemBuilder: (context, index) {
-                        final chat = filteredChats[index];
-                        return _ChatTile(
-                          key: Key(chat['id'].toString()),
-                          chat: chat,
-                          myId: _myId!,
-                          themeColor: themeColor,
-                          userPreferences: widget.userPreferences,
-                        );
-                      },
-                    ),
+              child: PageView(
+                controller: _pageController,
+                onPageChanged: (index) {
+                  // <--- UPDATE TAB WHEN SWIPING
+                  setState(() => _selectedTabIndex = index);
+                },
+                children: [
+                  _buildChatListForTab(0), // Friends Page
+                  _buildChatListForTab(1), // General Page
+                  _buildChatListForTab(2), // Groups Page
+                ],
+              ),
             ),
           ],
         ),
@@ -362,6 +383,74 @@ class _ChatListScreenState extends State<ChatListScreen> {
         onPressed: _showPlusMenu,
         child: const Icon(Icons.add, color: Colors.white, size: 32),
       ),
+    );
+  }
+
+  // --- NEW: Helper method to build lists for each page ---
+  Widget _buildChatListForTab(int tabIndex) {
+    final filteredChats = _chats.where((chat) {
+      final isGroup = chat['is_group'] == true;
+      final chatIdStr = chat['id'].toString();
+      final chatName = (chat['name'] ?? '').toString().toLowerCase();
+      final searchText = _searchController.text.toLowerCase();
+
+      if (searchText.isNotEmpty && !chatName.contains(searchText)) return false;
+      if (tabIndex == 2) return isGroup;
+      if (isGroup) return false;
+
+      final otherParticipant = _allParticipants.firstWhere(
+        (p) => p['chat_id'].toString() == chatIdStr && p['user_id'] != _myId,
+        orElse: () => <String, dynamic>{},
+      );
+
+      if (otherParticipant.isEmpty) return false;
+
+      final targetUserId = otherParticipant['user_id'].toString();
+      final isFollowing = _followingIds.contains(targetUserId);
+
+      if (tabIndex == 0) return isFollowing;
+      if (tabIndex == 1) return !isFollowing;
+
+      return false;
+    }).toList();
+
+    filteredChats.sort((a, b) {
+      final aTime = DateTime.tryParse(a['updated_at']?.toString() ??
+              a['created_at']?.toString() ??
+              '') ??
+          DateTime(0);
+      final bTime = DateTime.tryParse(b['updated_at']?.toString() ??
+              b['created_at']?.toString() ??
+              '') ??
+          DateTime(0);
+      return bTime.compareTo(aTime);
+    });
+
+    return RefreshIndicator(
+      color: themeColor,
+      onRefresh: _handleRefresh,
+      child: filteredChats.isEmpty
+          ? ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              children: [
+                SizedBox(height: MediaQuery.of(context).size.height * 0.3),
+                _buildPlaceholder('No messages yet.'),
+              ],
+            )
+          : ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              itemCount: filteredChats.length,
+              itemBuilder: (context, index) {
+                final chat = filteredChats[index];
+                return _ChatTile(
+                  key: Key(chat['id'].toString()),
+                  chat: chat,
+                  myId: _myId!,
+                  themeColor: themeColor,
+                  userPreferences: widget.userPreferences,
+                );
+              },
+            ),
     );
   }
 

@@ -3,8 +3,10 @@ import 'dart:async';
 import 'dart:io';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/chat/create_group_screen.dart';
+import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -15,6 +17,7 @@ import 'package:video_player/video_player.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../shared/services/fcm_service.dart';
 
 class ChatRoomScreen extends StatefulWidget {
   final String chatId;
@@ -62,11 +65,15 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final Map<String, Color> _userColors = {};
 
   String _memberSearchQuery = '';
+  final Map<String, GlobalKey> _messageKeys = {};
+  String? _highlightedMessageId;
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_scrollListener); // NEW
+    activeChatId = widget
+        .chatId; // <--- TELLS THE APP WE ARE IN THIS CHAT (Triggers Vibration/Silence!)
+    _scrollController.addListener(_scrollListener);
     _setupMessageStream();
     _loadChatMeta();
     _setupTypingListener();
@@ -261,31 +268,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
   // Update this method to handle the jump logic correctly
-  void _scrollToMessage(
-      dynamic replyToId, List<Map<String, dynamic>> currentMessages) {
-    if (replyToId == null) return;
-
-    // 1. Find the index of the message we want to jump to
-    final index = currentMessages
-        .indexWhere((m) => m['id'].toString() == replyToId.toString());
-
-    if (index != -1) {
-      HapticFeedback.mediumImpact();
-
-      // 2. Calculate position. Note: This is an estimate based on average bubble height
-      // For precise jumping in a dynamic list, Scrollable.ensureVisible is usually better
-      // but requires global keys. This is a reliable quick-fix:
-      _scrollController.animateTo(
-        index * 100.0, // Assuming 100px average height
-        duration: const Duration(milliseconds: 500),
-        curve: Curves.easeInOut,
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Message too far back to jump to')),
-      );
-    }
-  }
 
   Widget _buildReplyPreview() {
     final senderId = _replyMessage!['sender_id']?.toString() ?? '';
@@ -376,6 +358,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (allowFiles)
+              _menuTile(Icons.insert_drive_file, 'Add File', () async {
+                Navigator.pop(ctx);
+                await _pickAndUploadFile();
+              }),
             if (allowPhotos)
               _menuTile(Icons.photo_library, 'Add Photo', () async {
                 Navigator.pop(ctx);
@@ -385,14 +372,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               _menuTile(Icons.videocam, 'Add Video', () async {
                 Navigator.pop(ctx);
                 await _pickAndUploadMedia(ImageSource.gallery, 'video');
-              }),
-            if (allowFiles)
-              _menuTile(Icons.insert_drive_file, 'Add File', () async {
-                Navigator.pop(ctx);
-                // TODO: Implement file picker (for PDFs, docs, etc.)
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('File picker coming soon')),
-                );
               }),
             _menuTile(Icons.camera_alt, 'Take Photo/Video', () async {
               Navigator.pop(ctx);
@@ -405,7 +384,50 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     );
   }
 
-  // NEW HELPER METHOD - Add this anywhere in the class
+  // --- NEW: FILE UPLOADER ---
+  // --- NEW: FILE UPLOADER (Memory Optimized) ---
+  Future<void> _pickAndUploadFile() async {
+    try {
+      final result = await FilePicker.platform.pickFiles();
+      if (result == null || result.files.isEmpty) return;
+
+      final file = result.files.first;
+      final filePath = file.path;
+      if (filePath == null) return;
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Uploading file...')));
+
+      final diskFile = File(filePath); // <-- FIX: Load from disk
+      final ext = file.extension ?? 'file';
+      final fileName =
+          '${DateTime.now().millisecondsSinceEpoch}_${file.name.hashCode}.$ext';
+      final path = 'chat_media/${widget.chatId}/$fileName';
+
+      // FIX: .upload() streams the file directly, preventing RAM crashes!
+      await supabase.storage.from('chat_media').upload(path, diskFile);
+      final publicUrl = supabase.storage.from('chat_media').getPublicUrl(path);
+
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return;
+
+      await supabase.from('messages').insert({
+        'chat_id': widget.chatId,
+        'sender_id': myId,
+        'content': file.name, // Uses the file name as the message text!
+        'media_url': publicUrl,
+        'media_type': 'file',
+        'file_size_bytes': file.size,
+        'is_read': false,
+      });
+    } catch (e) {
+      debugPrint("File upload error: $e");
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Failed to send file')));
+    }
+  }
+
+  // --- NEW: MEDIA UPLOADER (Memory Optimized) ---
   Future<void> _pickAndUploadMedia(ImageSource source, String type) async {
     try {
       final picker = ImagePicker();
@@ -454,10 +476,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                       width: double.infinity,
                       color: Colors.black,
                       child: type == 'image'
-                          ? Image.file(
-                              File(pickedFiles.first.path),
-                              fit: BoxFit.contain,
-                            )
+                          ? Image.file(File(pickedFiles.first.path),
+                              fit: BoxFit.contain)
                           : const Center(
                               child: Icon(Icons.play_circle,
                                   size: 80, color: Colors.white70)),
@@ -518,15 +538,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       int totalSizeBytes = 0;
 
       for (var file in pickedFiles) {
-        final bytes = await file.readAsBytes();
-        totalSizeBytes += bytes.length;
+        final diskFile = File(file.path); // <-- FIX: Load from disk!
+        totalSizeBytes += await diskFile.length();
 
         final ext = file.name.split('.').last.toLowerCase();
         final fileName =
             '${DateTime.now().millisecondsSinceEpoch}_${file.name.hashCode}.$ext';
         final path = 'chat_media/${widget.chatId}/$fileName';
 
-        await supabase.storage.from('chat_media').uploadBinary(path, bytes);
+        // FIX: Stream the upload directly from disk to avoid RAM crashes
+        await supabase.storage.from('chat_media').upload(path, diskFile);
         uploadedUrls
             .add(supabase.storage.from('chat_media').getPublicUrl(path));
 
@@ -540,10 +561,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           );
 
           if (thumbPath != null) {
-            final thumbBytes = await File(thumbPath).readAsBytes();
+            final thumbFile = File(thumbPath);
             await supabase.storage
                 .from('chat_media')
-                .uploadBinary('thumbnails/thumb_$fileName.jpg', thumbBytes);
+                .upload('thumbnails/thumb_$fileName.jpg', thumbFile);
             thumbnailUrl = supabase.storage
                 .from('chat_media')
                 .getPublicUrl('thumbnails/thumb_$fileName.jpg');
@@ -570,9 +591,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       });
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Media sent')),
-        );
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Media sent')));
       }
     } catch (e) {
       debugPrint("Media error: $e");
@@ -767,6 +787,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
   Widget _buildBubble(List<Map<String, dynamic>> messages, int index) {
     final message = messages[index];
+    final messageId = message['id'].toString();
+    // Register a key for this specific message for scrolling
+    _messageKeys.putIfAbsent(messageId, () => GlobalKey());
+
     final myId = supabase.auth.currentUser?.id;
     final isMe = message['sender_id']?.toString() == myId;
     final content = (message['content'] ?? '').toString();
@@ -784,220 +808,302 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
     final bubbleColor =
         isMe ? const Color(0xFF4CAF50) : const Color(0xFF202C33);
-
     final Color nameColor =
         _isUserStillInGroup(senderId) ? _getUserColor(senderId) : Colors.grey;
 
-    // Avatar logic: only show for the last message in a sequence from a user
     bool showAvatar = false;
     if (!isMe) {
       if (index == messages.length - 1) {
         showAvatar = true;
       } else {
         final prevMessageSender = messages[index + 1]['sender_id']?.toString();
-        if (prevMessageSender != senderId) {
-          showAvatar = true;
-        }
+        if (prevMessageSender != senderId) showAvatar = true;
       }
     }
 
-    // Media Logic
     final String? mediaUrlStr = message['media_url']?.toString();
     final bool hasMedia = mediaUrlStr != null && mediaUrlStr.isNotEmpty;
     final List<String> mediaUrls = hasMedia ? mediaUrlStr.split(',') : [];
     final String mediaType = message['media_type']?.toString() ?? 'image';
+    final bool isFile = mediaType == 'file';
 
     final bool hasCaption = content.isNotEmpty &&
         content != '📸 Photo' &&
         content != '🎥 Video' &&
         content.trim() != '';
 
-    return Dismissible(
-      key: Key(message['id'].toString()),
-      direction: DismissDirection.startToEnd,
-      confirmDismiss: (direction) {
-        _onSwipeToReply(message);
-        return Future.value(false); // Don't actually dismiss the widget
-      },
-      background: Container(
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.only(left: 20),
-        child: const Icon(Icons.reply, color: Color(0xFF4CAF50), size: 24),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-        child: Row(
-          mainAxisAlignment:
-              isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!isMe) ...[
-              SizedBox(
-                width: 30,
-                child: showAvatar
-                    ? CircleAvatar(
-                        radius: 15,
-                        backgroundImage:
-                            (avatarUrl != null && avatarUrl.isNotEmpty)
-                                ? NetworkImage(avatarUrl)
-                                : null,
-                        child: (avatarUrl == null || avatarUrl.isEmpty)
-                            ? const Icon(Icons.person,
-                                size: 18, color: Colors.white)
-                            : null,
-                      )
-                    : const SizedBox.shrink(),
-              ),
-              const SizedBox(width: 8),
-            ],
-            Flexible(
-              child: Container(
-                constraints: BoxConstraints(
-                    maxWidth: MediaQuery.of(context).size.width * 0.75),
-                decoration: BoxDecoration(
-                  color: bubbleColor,
-                  borderRadius: BorderRadius.circular(16).copyWith(
-                    bottomRight: const Radius.circular(16),
-                    topLeft: !isMe && showAvatar
-                        ? const Radius.circular(2)
-                        : const Radius.circular(16),
-                    topRight: isMe
-                        ? const Radius.circular(2)
-                        : const Radius.circular(16),
-                  ),
+    // Check if this specific message should be highlighted
+    final bool isHighlighted = _highlightedMessageId == messageId;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 600), // Smooth fade transition
+      color: isHighlighted
+          ? const Color(0xFF4CAF50).withOpacity(0.3)
+          : Colors.transparent,
+      child: Dismissible(
+        key: Key('dismiss_$messageId'),
+        direction: DismissDirection.startToEnd,
+        confirmDismiss: (direction) {
+          _onSwipeToReply(message);
+          return Future.value(false);
+        },
+        background: Container(
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.only(left: 20),
+          child: const Icon(Icons.reply, color: Color(0xFF4CAF50), size: 24),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          child: Row(
+            mainAxisAlignment:
+                isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!isMe) ...[
+                SizedBox(
+                  width: 30,
+                  child: showAvatar
+                      ? CircleAvatar(
+                          radius: 15,
+                          backgroundImage:
+                              (avatarUrl != null && avatarUrl.isNotEmpty)
+                                  ? NetworkImage(avatarUrl)
+                                  : null,
+                          child: (avatarUrl == null || avatarUrl.isEmpty)
+                              ? const Icon(Icons.person,
+                                  size: 18, color: Colors.white)
+                              : null,
+                        )
+                      : const SizedBox.shrink(),
                 ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16).copyWith(
-                    bottomRight: const Radius.circular(16),
-                    topLeft: !isMe && showAvatar
-                        ? const Radius.circular(2)
-                        : const Radius.circular(16),
-                    topRight: isMe
-                        ? const Radius.circular(2)
-                        : const Radius.circular(16),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: Container(
+                  key: _messageKeys[messageId], // Attach the scroll key here!
+                  constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.75),
+                  decoration: BoxDecoration(
+                    color: bubbleColor,
+                    borderRadius: BorderRadius.circular(16).copyWith(
+                      bottomRight: const Radius.circular(16),
+                      topLeft: !isMe && showAvatar
+                          ? const Radius.circular(2)
+                          : const Radius.circular(16),
+                      topRight: isMe
+                          ? const Radius.circular(2)
+                          : const Radius.circular(16),
+                    ),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // 1. REPLY UI SECTION
-                      if (message['reply_to_id'] != null)
-                        Builder(
-                          builder: (context) {
-                            final origMsgId = message['reply_to_id'].toString();
-                            final origMsg = messages.firstWhere(
-                              (m) => m['id'].toString() == origMsgId,
-                              orElse: () => <String, dynamic>{},
-                            );
-
-                            String replySenderName = 'User';
-                            Color replyNameColor = const Color(0xFF4CAF50);
-
-                            if (origMsg.isNotEmpty) {
-                              final origSenderId =
-                                  origMsg['sender_id']?.toString() ?? '';
-                              if (origSenderId == myId) {
-                                replySenderName = 'You';
-                              } else {
-                                final origProfile = _memberProfiles.firstWhere(
-                                  (p) => p['id'].toString() == origSenderId,
-                                  orElse: () => {'username': 'User'},
-                                );
-                                replySenderName =
-                                    origProfile['username']?.toString() ??
-                                        'User';
-                                replyNameColor = _getUserColor(origSenderId);
-                              }
-                            }
-
-                            return GestureDetector(
-                              onTap: () => _scrollToMessage(
-                                  message['reply_to_id'], messages),
-                              child: Container(
-                                margin: const EdgeInsets.all(4),
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: Colors.black26,
-                                  borderRadius: BorderRadius.circular(8),
-                                  border: Border(
-                                    left: BorderSide(
-                                        color: replyNameColor, width: 3),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16).copyWith(
+                      bottomRight: const Radius.circular(16),
+                      topLeft: !isMe && showAvatar
+                          ? const Radius.circular(2)
+                          : const Radius.circular(16),
+                      topRight: isMe
+                          ? const Radius.circular(2)
+                          : const Radius.circular(16),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (message['reply_to_id'] != null ||
+                            (message['reply_content']?.startsWith('Story_') ??
+                                false))
+                          _buildReplyInsideBubble(message),
+                        if (widget.isGroup && !isMe && showAvatar)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                            child: Text('@$senderName',
+                                style: TextStyle(
+                                    color: nameColor,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold)),
+                          ),
+                        if (isFile)
+                          Container(
+                            margin: const EdgeInsets.all(4),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                                color: Colors.black26,
+                                borderRadius: BorderRadius.circular(8)),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.insert_drive_file,
+                                    color: Colors.white, size: 30),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    content.isNotEmpty ? content : 'Document',
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
                                 ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      replySenderName == 'You'
-                                          ? 'You'
-                                          : '@$replySenderName',
-                                      style: TextStyle(
-                                        color: replyNameColor,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      message['reply_content'] ??
-                                          'Original message',
-                                      style: const TextStyle(
-                                          color: Colors.white54, fontSize: 12),
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-
-                      // 2. SENDER NAME (For Groups)
-                      if (widget.isGroup && !isMe && showAvatar)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                          child: Text('@$senderName',
-                              style: TextStyle(
-                                  color: nameColor,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold)),
-                        ),
-
-                      // 3. MEDIA SECTION
-                      if (hasMedia)
-                        Container(
-                          decoration: BoxDecoration(
-                            border: hasCaption
-                                ? Border(
-                                    bottom: BorderSide(
-                                        color: isMe
-                                            ? const Color(0xFF388E3C)
-                                            : const Color(0xFF182025),
-                                        width: 1.5))
-                                : null,
+                              ],
+                            ),
                           ),
-                          child: _buildMediaWithOverlay(
-                              mediaUrls,
-                              mediaType,
-                              timeStr,
-                              isMe,
-                              isRead,
-                              message // Fixed: 6th argument added here
-                              ),
-                        ),
-
-                      // 4. TEXT & TIMESTAMP SECTION
-                      if (hasCaption || (!hasMedia && content.isNotEmpty))
-                        _buildTextAndTimestamp(content, timeStr, isMe, isRead),
-                    ],
+                        if (hasMedia && !isFile)
+                          Container(
+                            decoration: BoxDecoration(
+                              border: hasCaption
+                                  ? Border(
+                                      bottom: BorderSide(
+                                          color: isMe
+                                              ? const Color(0xFF388E3C)
+                                              : const Color(0xFF182025),
+                                          width: 1.5))
+                                  : null,
+                            ),
+                            child: _buildMediaWithOverlay(mediaUrls, mediaType,
+                                timeStr, isMe, isRead, message),
+                          ),
+                        if (hasCaption || (!hasMedia && content.isNotEmpty))
+                          _buildTextAndTimestamp(
+                              content, timeStr, isMe, isRead),
+                      ],
+                    ),
                   ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReplyInsideBubble(Map<String, dynamic> message) {
+    final replyContent = message['reply_content']?.toString() ?? '';
+    final bool isStoryReply =
+        replyContent.startsWith('Story_') || replyContent == 'Story';
+    final String? storyImageUrl = message['thumbnail_url'];
+
+    String displayReplyText = replyContent;
+    if (isStoryReply && replyContent.startsWith('Story_')) {
+      final parts = replyContent.split('_');
+      if (parts.length > 2) {
+        displayReplyText = parts.sublist(2).join('_');
+      } else {
+        displayReplyText = "Story";
+      }
+    }
+
+    return GestureDetector(
+      onTap: () => _handleReplyReferenceTap(message),
+      child: Container(
+        margin: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          color: Colors.black12,
+          borderRadius: BorderRadius.circular(8),
+          border: const Border(
+              left: BorderSide(color: Color(0xFF4CAF50), width: 4)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isStoryReply ? "Replying to Story" : "Replying to",
+                      style: TextStyle(
+                          color: _userColors['reply'] ?? Colors.greenAccent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      displayReplyText,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ],
                 ),
               ),
             ),
+            if (isStoryReply && storyImageUrl != null)
+              ClipRRect(
+                borderRadius: const BorderRadius.only(
+                    topRight: Radius.circular(8),
+                    bottomRight: Radius.circular(8)),
+                child: CachedNetworkImage(
+                  imageUrl: storyImageUrl,
+                  width: 50,
+                  height: 50,
+                  fit: BoxFit.cover,
+                  placeholder: (context, url) =>
+                      Container(color: Colors.white10, width: 50, height: 50),
+                  errorWidget: (context, url, error) => const Icon(
+                      Icons.image_not_supported,
+                      color: Colors.white54,
+                      size: 20),
+                ),
+              ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _handleReplyReferenceTap(Map<String, dynamic> message) async {
+    final String replyContent = message['reply_content'] ?? '';
+
+    if (replyContent.startsWith('Story_')) {
+      final storyId = replyContent.split('_')[1];
+
+      final response = await supabase
+          .from('stories')
+          .select('*, profiles:user_id(username, avatar_url, school_name)')
+          .eq('id', storyId)
+          .maybeSingle();
+
+      if (response != null && mounted) {
+        Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (_) => StoryViewerScreen(
+                    stories: [response],
+                    initialIndex: 0,
+                    userPreferences: widget.userPreferences,
+                    storyId: storyId)));
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Story is no longer available.'),
+            backgroundColor: Colors.black87,
+            duration: Duration(seconds: 2)));
+      }
+    } else if (message['reply_to_id'] != null) {
+      final targetId = message['reply_to_id'].toString();
+      final key = _messageKeys[targetId];
+
+      setState(() => _highlightedMessageId = targetId);
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _highlightedMessageId = null);
+      });
+
+      if (key != null && key.currentContext != null) {
+        Scrollable.ensureVisible(key.currentContext!,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            alignment: 0.5);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Message is too far back. Scroll up to load older messages.'),
+            backgroundColor: Colors.black87,
+            duration: Duration(seconds: 2)));
+      }
+    }
   }
 
 // --- SUB-WIDGET: COMPACT MEDIA ---
@@ -1617,17 +1723,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
   // NEW: Jumps back to the present chat
-  void _scrollToBottom() {
-    _scrollController.animateTo(
-      0.0,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-    );
-  }
 
   @override
   void dispose() {
-    _scrollController.removeListener(_scrollListener); // NEW
+    if (activeChatId == widget.chatId) {
+      activeChatId = null; // <--- CLEARS IT WHEN WE LEAVE
+    }
+    _scrollController.removeListener(_scrollListener);
     _memberSearchController.dispose();
     _typingTimer?.cancel();
     _messageController.dispose();
@@ -1639,104 +1741,82 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: _buildAppBar(), // Now correctly calls the updated AppBar
-      body: Stack(
-        children: [
-          Column(
-            children: [
-              Expanded(
-                child: StreamBuilder<List<Map<String, dynamic>>>(
-                  stream: _messageStream,
-                  builder: (context, snapshot) {
-                    if (!snapshot.hasData) {
-                      return const Center(
-                          child: CircularProgressIndicator(
-                              color: Color(0xFF4CAF50)));
-                    }
-                    final messages = snapshot.data!;
-                    return ListView.builder(
-                      controller: _scrollController,
-                      reverse: true,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
-                      itemCount: messages.length,
-                      itemBuilder: (_, index) {
-                        final msg = messages[index];
-                        final date =
-                            DateTime.parse(msg['created_at']).toLocal();
-
-                        bool showDateHeader = false;
-                        if (index == messages.length - 1) {
-                          showDateHeader = true;
-                        } else {
-                          final prevDate =
-                              DateTime.parse(messages[index + 1]['created_at'])
-                                  .toLocal();
-                          if (date.day != prevDate.day ||
-                              date.month != prevDate.month ||
-                              date.year != prevDate.year) {
+      appBar: _buildAppBar(),
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              // <--- THE STACK IS NOW SAFELY INSIDE THE EXPANDED WIDGET
+              child: Stack(
+                children: [
+                  StreamBuilder<List<Map<String, dynamic>>>(
+                    stream: _messageStream,
+                    builder: (context, snapshot) {
+                      if (!snapshot.hasData) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      final messages = snapshot.data!;
+                      return ListView.builder(
+                        controller: _scrollController,
+                        reverse: true,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: messages.length,
+                        itemBuilder: (context, index) {
+                          final msg = messages[index];
+                          final date =
+                              DateTime.parse(msg['created_at']).toLocal();
+                          bool showDateHeader = false;
+                          if (index == messages.length - 1) {
                             showDateHeader = true;
+                          } else {
+                            final prevDate = DateTime.parse(
+                                    messages[index + 1]['created_at'])
+                                .toLocal();
+                            if (date.day != prevDate.day ||
+                                date.year != prevDate.year) {
+                              showDateHeader = true;
+                            }
                           }
-                        }
-
-                        return Column(
-                          children: [
-                            if (showDateHeader)
-                              Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 12),
-                                child: Center(
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 10, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: Colors.grey[850]!.withOpacity(0.7),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Text(
-                                      _getDateLabel(date),
-                                      style: const TextStyle(
-                                          color: Colors.white70, fontSize: 11),
-                                    ),
+                          return Column(
+                            children: [
+                              if (showDateHeader)
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(
+                                    child: Text(_getDateLabel(date),
+                                        style: const TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 12)),
                                   ),
                                 ),
-                              ),
-                            _buildBubble(messages, index),
-                          ],
-                        );
-                      },
-                    );
-                  },
-                ),
-              ),
-              _buildInputBar(),
-            ],
-          ),
-          if (_showScrollToBottom)
-            Positioned(
-              bottom: 80,
-              right: 16,
-              child: GestureDetector(
-                onTap: _scrollToBottom,
-                child: Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF202C33),
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.5),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      )
-                    ],
+                              _buildBubble(messages, index),
+                            ],
+                          );
+                        },
+                      );
+                    },
                   ),
-                  child: const Icon(Icons.keyboard_double_arrow_down,
-                      color: Colors.white, size: 24),
-                ),
+                  if (_showScrollToBottom)
+                    Positioned(
+                      bottom: 16, // Adjusted bottom padding
+                      right: 16,
+                      child: FloatingActionButton.small(
+                        backgroundColor: const Color(0xFF202C33),
+                        onPressed: () => _scrollController.animateTo(0,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeOut),
+                        child: const Icon(Icons.keyboard_double_arrow_down,
+                            color: Colors.white),
+                      ),
+                    ),
+                ],
               ),
             ),
-        ],
+            // Input Bar is now securely anchored at the bottom
+            _buildInputBar(),
+          ],
+        ),
       ),
     );
   }
@@ -1748,47 +1828,46 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         color: Colors.black,
         border: Border(top: BorderSide(color: Colors.grey[900]!)),
       ),
-      child: SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_replyMessage != null) _buildReplyPreview(),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
-                  onPressed: _showPlusOptions,
-                ),
-                Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    onChanged: _handleTyping, // Hooked up to remove the warning
-                    style: const TextStyle(color: Colors.white),
-                    maxLines: 5,
-                    minLines: 1,
-                    decoration: InputDecoration(
-                      hintText: 'Message...',
-                      hintStyle: const TextStyle(color: Colors.white54),
-                      filled: true,
-                      fillColor: const Color(0xFF1C1C1E),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 10),
+      // <--- REMOVED INNER SAFEAREA (Prevented it from anchoring properly)
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_replyMessage != null) _buildReplyPreview(),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
+                onPressed: _showPlusOptions,
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _messageController,
+                  onChanged: _handleTyping,
+                  style: const TextStyle(color: Colors.white),
+                  maxLines: 5,
+                  minLines: 1,
+                  decoration: InputDecoration(
+                    hintText: 'Message...',
+                    hintStyle: const TextStyle(color: Colors.white54),
+                    filled: true,
+                    fillColor: const Color(0xFF1C1C1E),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
                     ),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
-                  onPressed: _sendMessage,
-                ),
-              ],
-            ),
-          ],
-        ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
+                onPressed: _sendMessage,
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

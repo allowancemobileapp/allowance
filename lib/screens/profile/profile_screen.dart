@@ -1,4 +1,7 @@
 // lib/screens/profile/profile_screen.dart
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:allowance/screens/home/create_story_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
@@ -6,6 +9,7 @@ import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/screens/introduction/introduction_screen.dart';
 import 'package:video_player/video_player.dart';
@@ -30,18 +34,49 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _signingOut = false;
   int _selectedSegment = 0;
 
-  late Future<Map<String, dynamic>?> _profileFuture;
+  Map<String, dynamic>? _cachedProfileData;
+  List<Map<String, dynamic>> _memories = [];
+  StreamSubscription? _memoriesSub;
+  bool _isLoadingProfile = true;
 
   @override
   void initState() {
     super.initState();
-    _profileFuture = _fetchProfile();
+    _loadCachedProfile();
+    _fetchProfile();
+    _setupMemoriesStream();
   }
 
-  void _refreshProfile() {
-    setState(() {
-      _profileFuture = _fetchProfile();
-    });
+  @override
+  void dispose() {
+    _memoriesSub?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadCachedProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final myId = Supabase.instance.client.auth.currentUser?.id;
+    if (myId == null) return;
+
+    final cachedProfile = prefs.getString('cached_profile_$myId');
+    final cachedMemories = prefs.getString('cached_memories_$myId');
+
+    if (mounted) {
+      setState(() {
+        if (cachedProfile != null) {
+          _cachedProfileData = jsonDecode(cachedProfile);
+        }
+        if (cachedMemories != null) {
+          _memories =
+              List<Map<String, dynamic>>.from(jsonDecode(cachedMemories));
+        }
+        _isLoadingProfile = _cachedProfileData == null;
+      });
+    }
+  }
+
+  Future<void> _refreshProfile() async {
+    await _fetchProfile();
   }
 
   void _showUserList(String title, bool showFollowers) {
@@ -267,377 +302,284 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<Map<String, dynamic>?>(
-      future: _profileFuture,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            backgroundColor: _bg,
-            body: Center(child: CircularProgressIndicator(color: _accent)),
-          );
-        }
+    if (_isLoadingProfile) {
+      return const Scaffold(
+        backgroundColor: _bg,
+        body: Center(child: CircularProgressIndicator(color: _accent)),
+      );
+    }
 
-        if (snapshot.hasError) {
-          final err = snapshot.error;
-          debugPrint('Profile load error: $err');
-          return Scaffold(
-            backgroundColor: _bg,
-            body: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  'Error loading profile.\n${err.toString()}',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70),
-                ),
-              ),
-            ),
-          );
-        }
+    final profile = _cachedProfileData;
 
-        final profile = snapshot.data;
-
-        if (profile == null) {
-          final supabase = Supabase.instance.client;
-          final user = supabase.auth.currentUser;
-
-          return Scaffold(
-            backgroundColor: _bg,
-            body: Center(
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: _accent),
-                onPressed: () async {
-                  try {
-                    await supabase.from('profiles').insert({
-                      'id': user?.id,
-                      'created_at': DateTime.now().toUtc().toIso8601String(),
-                      'updated_at': DateTime.now().toUtc().toIso8601String(),
-                    });
-                    await widget.userPreferences.loadPreferences();
-                    if (!mounted) return;
-                    _refreshProfile();
-                  } catch (e) {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Create profile failed: $e')),
-                      );
-                    }
-                  }
-                },
-                child: const Text('Set up your profile',
-                    style: TextStyle(color: Colors.black)),
-              ),
-            ),
-          );
-        }
-
-        final up = widget.userPreferences;
-        final isPlus = up.subscriptionTier == 'Membership';
-        final avatarUrl = up.avatarUrl;
-        final imageProvider = (avatarUrl != null && avatarUrl.isNotEmpty)
-            ? NetworkImage(avatarUrl)
-            : null;
-
-        return Scaffold(
+    if (profile == null) {
+      return const Scaffold(
           backgroundColor: _bg,
-          appBar: AppBar(
-            backgroundColor: _bg,
-            elevation: 0,
-            centerTitle: true,
-            title: Image.asset(
-              'assets/images/profile.png',
-              height: 100,
-              fit: BoxFit.contain,
-            ),
-            automaticallyImplyLeading: false,
-            actions: [
-              if (isPlus)
-                IconButton(
-                  icon:
-                      const Icon(Icons.remove_red_eye_outlined, color: _accent),
-                  onPressed: () {
-                    // Logic for profile visibility toggle could go here
-                  },
-                  tooltip: 'Profile Visibility',
-                ),
-            ],
-          ),
-          body: ListView(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            children: [
-              // Stats Header
-              Padding(
-                padding: const EdgeInsets.only(bottom: 20),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _buildStatItem(
-                        'Followers',
-                        (profile['follower_count'] ?? 0).toString(),
-                        () => _showUserList('Followers', true)),
-                    const SizedBox(width: 110),
-                    _buildStatItem(
-                        'Following',
-                        (profile['following_count'] ?? 0).toString(),
-                        () => _showUserList('Following', false)),
-                  ],
-                ),
-              ),
+          body: Center(
+              child: Text("Profile Error",
+                  style: TextStyle(color: Colors.white))));
+    }
 
-              // Avatar with Plus Icon Stack
-              Column(
+    final up = widget.userPreferences;
+    final isPlus = up.subscriptionTier == 'Membership';
+    final avatarUrl = up.avatarUrl;
+    final imageProvider = (avatarUrl != null && avatarUrl.isNotEmpty)
+        ? NetworkImage(avatarUrl)
+        : null;
+
+    // --- REVERTED: Standard Scaffold Body without _buildShell ---
+    return Scaffold(
+      backgroundColor: _bg,
+      appBar: AppBar(
+        backgroundColor: _bg,
+        elevation: 0,
+        centerTitle: true,
+        title: Image.asset('assets/images/profile.png',
+            height: 100, fit: BoxFit.contain),
+        automaticallyImplyLeading: false,
+        actions: [
+          if (isPlus)
+            IconButton(
+                icon: const Icon(Icons.remove_red_eye_outlined, color: _accent),
+                onPressed: () {},
+                tooltip: 'Profile Visibility'),
+        ],
+      ),
+      body: RefreshIndicator(
+        color: _accent,
+        onRefresh: _refreshProfile,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          children: [
+            // Stats Header
+            Padding(
+              padding: const EdgeInsets.only(bottom: 20),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
-                  SizedBox(
-                    width: 110,
-                    height: 110,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        GestureDetector(
-                          onTap: () async {
-                            final supabase = Supabase.instance.client;
-                            final response = await supabase
-                                .from('stories')
-                                .select(
-                                    '*, profiles:user_id(username, avatar_url)')
-                                .eq('user_id', supabase.auth.currentUser!.id)
-                                .gt('expires_at',
-                                    DateTime.now().toUtc().toIso8601String())
-                                .order('created_at', ascending: false);
+                  _buildStatItem(
+                      'Followers',
+                      (profile['follower_count'] ?? 0).toString(),
+                      () => _showUserList('Followers', true)),
+                  const SizedBox(width: 110),
+                  _buildStatItem(
+                      'Following',
+                      (profile['following_count'] ?? 0).toString(),
+                      () => _showUserList('Following', false)),
+                ],
+              ),
+            ),
 
-                            final myStories = response as List<dynamic>;
-
-                            if (myStories.isNotEmpty) {
-                              if (!mounted) return;
-                              Navigator.push(
+            // Avatar with Plus Icon Stack
+            Column(
+              children: [
+                SizedBox(
+                  width: 110,
+                  height: 110,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      GestureDetector(
+                        onTap: () async {
+                          final supabase = Supabase.instance.client;
+                          final response = await supabase
+                              .from('stories')
+                              .select(
+                                  '*, profiles:user_id(username, avatar_url)')
+                              .eq('user_id', supabase.auth.currentUser!.id)
+                              .gt('expires_at',
+                                  DateTime.now().toUtc().toIso8601String())
+                              .order('created_at', ascending: false);
+                          final myStories = response as List<dynamic>;
+                          if (myStories.isNotEmpty && mounted) {
+                            Navigator.push(
                                 context,
                                 MaterialPageRoute(
-                                  builder: (_) => StoryViewerScreen(
-                                    stories: myStories,
-                                    initialIndex: 0,
-                                    userPreferences: widget.userPreferences,
-                                  ),
-                                ),
-                              );
-                            } else {
-                              if (mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text(
-                                          'You have no active stories yet')),
-                                );
-                              }
-                            }
-                          },
-                          child: Container(
-                            width: 110,
-                            height: 110,
-                            decoration: BoxDecoration(
+                                    builder: (_) => StoryViewerScreen(
+                                        stories: myStories,
+                                        initialIndex: 0,
+                                        userPreferences:
+                                            widget.userPreferences)));
+                          } else if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text(
+                                        'You have no active stories yet')));
+                          }
+                        },
+                        child: Container(
+                          width: 110,
+                          height: 110,
+                          decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              border: Border.all(color: _accent, width: 3),
-                            ),
-                            child: CircleAvatar(
-                              radius: 48,
-                              backgroundColor: Colors.grey[850],
-                              backgroundImage: imageProvider,
-                              child: imageProvider == null
-                                  ? Text(
-                                      (up.fullName ?? '?').isNotEmpty
-                                          ? up.fullName![0].toUpperCase()
-                                          : '?',
-                                      style: const TextStyle(
-                                          color: Colors.white, fontSize: 34),
-                                    )
-                                  : null,
-                            ),
+                              border: Border.all(color: _accent, width: 3)),
+                          child: CircleAvatar(
+                            radius: 48,
+                            backgroundColor: Colors.grey[850],
+                            backgroundImage: imageProvider,
+                            child: imageProvider == null
+                                ? Text(
+                                    (up.fullName ?? '?').isNotEmpty
+                                        ? up.fullName![0].toUpperCase()
+                                        : '?',
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 34))
+                                : null,
                           ),
                         ),
-                        // RESTORED: Calls _pickMemoryFlow so the warning is gone and the picker works!
-                        Positioned(
-                          bottom: 4,
-                          right: 4,
-                          child: GestureDetector(
-                            onTap: () {
-                              if (isPlus) {
-                                // FIX: Navigate directly to the screen instead of calling _pickMemoryFlow
-                                Navigator.push(
+                      ),
+                      Positioned(
+                        bottom: 4,
+                        right: 4,
+                        child: GestureDetector(
+                          onTap: () {
+                            if (isPlus)
+                              Navigator.push(
                                   context,
                                   MaterialPageRoute(
-                                    builder: (_) => CreateStoryScreen(
-                                        userPreferences:
-                                            widget.userPreferences),
-                                  ),
-                                );
-                              } else {
-                                _showUpgradeSheet(context);
-                              }
-                            },
-                            child: CircleAvatar(
+                                      builder: (_) => CreateStoryScreen(
+                                          userPreferences:
+                                              widget.userPreferences)));
+                            else
+                              _showUpgradeSheet(context);
+                          },
+                          child: CircleAvatar(
                               radius: 14,
                               backgroundColor: _accent,
                               child: const Icon(Icons.add,
-                                  color: Colors.black, size: 18),
-                            ),
-                          ),
+                                  color: Colors.black, size: 18)),
                         ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    up.fullName ?? 'No name',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold),
-                  ),
-                  Text(
-                    '@${up.username ?? 'nouser'}',
-                    style: const TextStyle(
-                        color: _accent, fontWeight: FontWeight.w500),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    up.bio?.trim().isNotEmpty == true
-                        ? up.bio!
-                        : 'No bio yet • Tap "Edit profile" to add one',
-                    style: TextStyle(
-                      color: up.bio?.trim().isNotEmpty == true
-                          ? Colors.white70
-                          : Colors.white38,
-                      fontSize: 15,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-
-              const SizedBox(height: 24),
-
-              // Segmented Control
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 60),
-                child: Container(
-                  padding: const EdgeInsets.all(3),
-                  decoration: BoxDecoration(
-                    color: _card,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    children: [
-                      _buildSegmentItem("Memories", 0),
-                      _buildSegmentItem("Profile Card", 1),
+                      ),
                     ],
                   ),
                 ),
+                const SizedBox(height: 16),
+                Text(up.fullName ?? 'No name',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold)),
+                Text('@${up.username ?? 'nouser'}',
+                    style: const TextStyle(
+                        color: _accent, fontWeight: FontWeight.w500)),
+                const SizedBox(height: 16),
+                Text(
+                  up.bio?.trim().isNotEmpty == true
+                      ? up.bio!
+                      : 'No bio yet • Tap "Edit profile" to add one',
+                  style: TextStyle(
+                      color: up.bio?.trim().isNotEmpty == true
+                          ? Colors.white70
+                          : Colors.white38,
+                      fontSize: 15),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 60),
+              child: Container(
+                padding: const EdgeInsets.all(3),
+                decoration: BoxDecoration(
+                    color: _card, borderRadius: BorderRadius.circular(12)),
+                child: Row(
+                  children: [
+                    _buildSegmentItem("Memories", 0),
+                    _buildSegmentItem("Profile Card", 1),
+                  ],
+                ),
               ),
-
-              const SizedBox(height: 16),
-
-              // Content Area (Grid or Profile Info)
-              _selectedSegment == 0
-                  ? _buildInstagramStyleGrid()
-                  : Container(
-                      decoration: BoxDecoration(
+            ),
+            const SizedBox(height: 16),
+            _selectedSegment == 0
+                ? _buildInstagramStyleGrid()
+                : Container(
+                    decoration: BoxDecoration(
                         color: _card,
                         borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Column(
-                        children: [
-                          _buildProfileTile(Icons.school_outlined, 'Campus',
-                              up.schoolName ?? 'Not set'),
-                          const Divider(color: Colors.white10, height: 1),
-                          _buildProfileTile(Icons.phone_outlined, 'Phone',
-                              up.phoneNumber ?? 'Not set'),
-                          const Divider(color: Colors.white10, height: 1),
-                          _buildProfileTile(Icons.fitness_center_outlined,
-                              'Weight', '${up.weight ?? 'Not set'} kg'),
-                          const Divider(color: Colors.white10, height: 1),
-                          _buildProfileTile(Icons.height_outlined, 'Height',
-                              '${up.height ?? 'Not set'} cm'),
-                          const Divider(color: Colors.white10, height: 1),
-                          _buildProfileTile(Icons.cake_outlined, 'Age',
-                              '${up.age ?? 'Not set'} years'),
-                        ],
-                      ),
+                        border: Border.all(color: Colors.white10)),
+                    child: Column(
+                      children: [
+                        _buildProfileTile(Icons.school_outlined, 'Campus',
+                            up.schoolName ?? 'Not set'),
+                        const Divider(color: Colors.white10, height: 1),
+                        _buildProfileTile(Icons.phone_outlined, 'Phone',
+                            up.phoneNumber ?? 'Not set'),
+                        const Divider(color: Colors.white10, height: 1),
+                        _buildProfileTile(Icons.fitness_center_outlined,
+                            'Weight', '${up.weight ?? 'Not set'} kg'),
+                        const Divider(color: Colors.white10, height: 1),
+                        _buildProfileTile(Icons.height_outlined, 'Height',
+                            '${up.height ?? 'Not set'} cm'),
+                        const Divider(color: Colors.white10, height: 1),
+                        _buildProfileTile(Icons.cake_outlined, 'Age',
+                            '${up.age ?? 'Not set'} years'),
+                      ],
                     ),
-
-              const SizedBox(height: 24),
-
-              // Action Buttons
-              ElevatedButton.icon(
-                icon: const Icon(Icons.edit_outlined, size: 20),
-                label: const Text('Edit Profile'),
-                style: ElevatedButton.styleFrom(
+                  ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.edit_outlined, size: 20),
+              label: const Text('Edit Profile'),
+              style: ElevatedButton.styleFrom(
                   backgroundColor: _accent,
                   foregroundColor: Colors.black,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12)),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-                onPressed: () async {
-                  final changed = await Navigator.of(context).push<bool>(
+                  padding: const EdgeInsets.symmetric(vertical: 14)),
+              onPressed: () async {
+                final changed = await Navigator.of(context).push<bool>(
                     MaterialPageRoute(
                         builder: (_) => EditProfileScreen(
-                            userPreferences: widget.userPreferences)),
-                  );
-                  if (changed == true) {
-                    await widget.userPreferences.loadPreferences();
-                    _refreshProfile();
-                    widget.onSave();
-                  }
-                },
-              ),
-
-              const SizedBox(height: 12),
-
-              OutlinedButton.icon(
-                icon: _signingOut
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.logout_rounded, size: 20),
-                label: const Text('Log Out'),
-                style: OutlinedButton.styleFrom(
+                            userPreferences: widget.userPreferences)));
+                if (changed == true) {
+                  await widget.userPreferences.loadPreferences();
+                  _refreshProfile();
+                  widget.onSave();
+                }
+              },
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              icon: _signingOut
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.logout_rounded, size: 20),
+              label: const Text('Log Out'),
+              style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.redAccent,
                   side: const BorderSide(color: Colors.redAccent),
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12)),
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-                onPressed: _signingOut ? null : _confirmLogout,
-              ),
-
-              // Privacy and Terms Links
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text("Terms of Agreement",
-                      style: TextStyle(color: Colors.white38, fontSize: 11)),
-                  const Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 14)),
+              onPressed: _signingOut ? null : _confirmLogout,
+            ),
+            const SizedBox(height: 20),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text("Terms of Agreement",
+                    style: TextStyle(color: Colors.white38, fontSize: 11)),
+                const Padding(
                     padding: EdgeInsets.symmetric(horizontal: 6),
-                    child: Text("•", style: TextStyle(color: Colors.white38)),
-                  ),
-                  GestureDetector(
-                    onTap: () {
-                      // Logic to open privacy policy link
-                    },
-                    child: const Text("Privacy Policy",
-                        style: TextStyle(
-                            color: Colors.white38,
-                            fontSize: 11,
-                            decoration: TextDecoration.underline)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 80),
-            ],
-          ),
-        );
-      },
+                    child: Text("•", style: TextStyle(color: Colors.white38))),
+                GestureDetector(
+                  onTap: () {},
+                  child: const Text("Privacy Policy",
+                      style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 11,
+                          decoration: TextDecoration.underline)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 80),
+          ],
+        ),
+      ),
     );
   }
 
@@ -729,101 +671,96 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Future<Map<String, dynamic>?> _fetchProfile() async {
+  Future<void> _fetchProfile() async {
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
-    if (user == null) return null;
+    if (user == null) return;
 
     try {
-      // 1. Fetch basic profile data
       final resp = await supabase
           .from('profiles')
           .select()
           .eq('id', user.id)
           .maybeSingle();
-
-      if (resp == null) return null;
+      if (resp == null) return;
       final data = Map<String, dynamic>.from(resp);
 
-      // 2. Fetch Follower Count (people following YOU)
       final followersResp = await supabase
           .from('followers')
           .select('*')
           .eq('following_id', user.id)
           .count(CountOption.exact);
-
-      // 3. Fetch Following Count (people YOU follow)[cite: 4]
       final followingResp = await supabase
           .from('followers')
           .select('*')
           .eq('follower_id', user.id)
           .count(CountOption.exact);
 
-      // 4. Inject these counts into the data map so the build method sees them[cite: 4]
       data['follower_count'] = followersResp.count;
       data['following_count'] = followingResp.count;
 
-      return data;
-    } catch (e, st) {
-      debugPrint('[_fetchProfile] error: $e\n$st');
-      return null;
+      // Save to cache
+      final prefs = await SharedPreferences.getInstance();
+      prefs.setString('cached_profile_${user.id}', jsonEncode(data));
+
+      if (mounted) {
+        setState(() {
+          _cachedProfileData = data;
+          _isLoadingProfile = false;
+        });
+      }
+    } catch (e) {
+      if (mounted && _cachedProfileData == null) {
+        setState(() => _isLoadingProfile = false);
+      }
     }
   }
 
-  Widget _buildInstagramStyleGrid() {
+  void _setupMemoriesStream() {
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser?.id;
+    if (userId == null) return;
 
-    if (userId == null) return const SizedBox.shrink();
+    _memoriesSub = supabase
+        .from('memories')
+        .stream(primaryKey: ['id'])
+        .eq('user_id', userId)
+        .order('created_at', ascending: false)
+        .listen((data) async {
+          if (mounted) setState(() => _memories = data);
+          final prefs = await SharedPreferences.getInstance();
+          prefs.setString('cached_memories_$userId', jsonEncode(data));
+        });
+  }
 
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: supabase
-          .from('memories')
-          .stream(primaryKey: ['id'])
-          .eq('user_id', userId)
-          .order('created_at', ascending: false),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const SizedBox(
-            height: 200,
-            child: Center(child: CircularProgressIndicator(color: _accent)),
-          );
-        }
+  Widget _buildInstagramStyleGrid() {
+    if (_memories.isEmpty) {
+      return Container(
+        height: 200,
+        alignment: Alignment.center,
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.photo_library_outlined, color: Colors.white24, size: 40),
+            SizedBox(height: 8),
+            Text("No Memories yet", style: TextStyle(color: Colors.white38)),
+          ],
+        ),
+      );
+    }
 
-        final memories = snapshot.data ?? [];
-
-        if (memories.isEmpty) {
-          return Container(
-            height: 200,
-            alignment: Alignment.center,
-            child: const Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.photo_library_outlined,
-                    color: Colors.white24, size: 40),
-                SizedBox(height: 8),
-                Text("No Memories yet",
-                    style: TextStyle(color: Colors.white38)),
-              ],
-            ),
-          );
-        }
-
-        return GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            crossAxisSpacing: 2,
-            mainAxisSpacing: 2,
-            childAspectRatio: 0.8,
-          ),
-          itemCount: memories.length,
-          itemBuilder: (context, index) {
-            // FIX: Pass the whole list and the index
-            return MemoryGridItem(memories: memories, index: index);
-          },
-        );
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 2,
+        mainAxisSpacing: 2,
+        childAspectRatio: 0.8,
+      ),
+      itemCount: _memories.length,
+      itemBuilder: (context, index) {
+        return MemoryGridItem(memories: _memories, index: index);
       },
     );
   }

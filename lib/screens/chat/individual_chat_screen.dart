@@ -1,15 +1,20 @@
 // lib/screens/chat/individual_chat_screen.dart
 import 'dart:async';
+import 'dart:io';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/shared/services/fcm_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_linkify/flutter_linkify.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_thumbnail/video_thumbnail.dart';
 import '../../widgets/universal_profile_card.dart';
 
 class IndividualChatScreen extends StatefulWidget {
@@ -255,81 +260,199 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: _buildAppBar(),
-      body: Stack(
-        children: [
-          Column(
-            children: [
-              Expanded(
-                child: StreamBuilder<List<Map<String, dynamic>>>(
-                  stream: _messageStream,
-                  builder: (context, snapshot) {
-                    if (!snapshot.hasData) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-
-                    final messages = snapshot.data!;
-                    return ListView.builder(
-                      controller: _scrollController,
-                      reverse: true,
-                      padding: const EdgeInsets.all(12),
-                      itemCount: messages.length,
-                      itemBuilder: (context, index) {
-                        final msg = messages[index];
-                        final date =
-                            DateTime.parse(msg['created_at']).toLocal();
-
-                        // Date Header Logic
-                        bool showDateHeader = false;
-                        if (index == messages.length - 1) {
-                          showDateHeader = true;
-                        } else {
-                          final prevDate =
-                              DateTime.parse(messages[index + 1]['created_at'])
-                                  .toLocal();
-                          if (date.day != prevDate.day ||
-                              date.year != prevDate.year) {
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              // <--- THE STACK IS NOW SAFELY INSIDE THE EXPANDED WIDGET
+              child: Stack(
+                children: [
+                  StreamBuilder<List<Map<String, dynamic>>>(
+                    stream: _messageStream,
+                    builder: (context, snapshot) {
+                      if (!snapshot.hasData) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
+                      final messages = snapshot.data!;
+                      return ListView.builder(
+                        controller: _scrollController,
+                        reverse: true,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: messages.length,
+                        itemBuilder: (context, index) {
+                          final msg = messages[index];
+                          final date =
+                              DateTime.parse(msg['created_at']).toLocal();
+                          bool showDateHeader = false;
+                          if (index == messages.length - 1) {
                             showDateHeader = true;
+                          } else {
+                            final prevDate = DateTime.parse(
+                                    messages[index + 1]['created_at'])
+                                .toLocal();
+                            if (date.day != prevDate.day ||
+                                date.year != prevDate.year) {
+                              showDateHeader = true;
+                            }
                           }
-                        }
-
-                        return Column(
-                          children: [
-                            if (showDateHeader)
-                              Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 16),
-                                child: Center(
-                                  child: Text(_getDateLabel(date),
-                                      style: const TextStyle(
-                                          color: Colors.white54, fontSize: 12)),
+                          return Column(
+                            children: [
+                              if (showDateHeader)
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(
+                                    child: Text(_getDateLabel(date),
+                                        style: const TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 12)),
+                                  ),
                                 ),
-                              ),
-                            _buildBubble(messages, index),
-                          ],
-                        );
-                      },
-                    );
-                  },
-                ),
-              ),
-              // Input Bar with Reply Preview
-              _buildInputBar(),
-            ],
-          ),
-          // Scroll to Bottom FAB
-          if (_showScrollToBottom)
-            Positioned(
-              bottom: 100,
-              right: 16,
-              child: FloatingActionButton.small(
-                backgroundColor: const Color(0xFF202C33),
-                onPressed: () => _scrollController.animateTo(0,
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOut),
-                child: const Icon(Icons.keyboard_double_arrow_down,
-                    color: Colors.white),
+                              _buildBubble(messages, index),
+                            ],
+                          );
+                        },
+                      );
+                    },
+                  ),
+                  if (_showScrollToBottom)
+                    Positioned(
+                      bottom: 16, // Adjusted bottom padding
+                      right: 16,
+                      child: FloatingActionButton.small(
+                        backgroundColor: const Color(0xFF202C33),
+                        onPressed: () => _scrollController.animateTo(0,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeOut),
+                        child: const Icon(Icons.keyboard_double_arrow_down,
+                            color: Colors.white),
+                      ),
+                    ),
+                ],
               ),
             ),
+            // Input Bar is now securely anchored at the bottom
+            _buildInputBar(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _cancelReply() {
+    setState(() {
+      _replyMessage = null;
+    });
+  }
+
+  Widget _buildReplyPreview() {
+    final senderId = _replyMessage!['sender_id']?.toString() ?? '';
+    final isMe = senderId == supabase.auth.currentUser?.id;
+    final content = _replyMessage!['content']?.toString() ?? '';
+    final mediaUrl = _replyMessage!['media_url']?.toString();
+
+    String senderName =
+        isMe ? 'You' : (widget.recipientProfile['username'] ?? 'User');
+    Color nameColor = const Color(0xFF4CAF50);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 8),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.grey[900],
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+      ),
+      child: IntrinsicHeight(
+        child: Row(
+          children: [
+            Container(width: 4, color: nameColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isMe ? 'You' : '@$senderName',
+                    style: TextStyle(
+                      color: nameColor,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                  Text(
+                    mediaUrl != null && content.isEmpty ? 'Photo' : content,
+                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            if (mediaUrl != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: Image.network(mediaUrl.split(',').first,
+                      width: 40, height: 40, fit: BoxFit.cover),
+                ),
+              ),
+            GestureDetector(
+              onTap: _cancelReply,
+              child: const Icon(Icons.close, size: 20, color: Colors.white54),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInputBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black,
+        border: Border(top: BorderSide(color: Colors.grey[900]!)),
+      ),
+      // <--- REMOVED INNER SAFEAREA (Prevented it from anchoring properly)
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_replyMessage != null) _buildReplyPreview(),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
+                onPressed: _showPlusOptions,
+              ),
+              Expanded(
+                child: TextField(
+                  controller: _messageController,
+                  onChanged: _handleTyping,
+                  style: const TextStyle(color: Colors.white),
+                  maxLines: 5,
+                  minLines: 1,
+                  decoration: InputDecoration(
+                    hintText: 'Message...',
+                    hintStyle: const TextStyle(color: Colors.white54),
+                    filled: true,
+                    fillColor: const Color(0xFF1C1C1E),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
+                  ),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
+                onPressed: _sendMessage,
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -634,16 +757,53 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   Widget _buildMediaSection(
       Map<String, dynamic> message, bool isMe, bool isRead, String timeStr) {
     final isVideo = message['media_type'] == 'video';
+    final isFile = message['media_type'] == 'file';
+
+    // NEW: Handle Files
+    if (isFile) {
+      return Container(
+        margin: const EdgeInsets.all(4),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+            color: Colors.black26, borderRadius: BorderRadius.circular(8)),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.insert_drive_file, color: Colors.white, size: 30),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                message['content'] ?? 'Document',
+                style: const TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.bold),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // FIX: Handles multiple images sent at once without crashing!
+    final rawUrl =
+        (message['thumbnail_url'] ?? message['media_url']).toString();
+    final firstUrl = rawUrl.split(',').first;
+
     return Stack(
       alignment: Alignment.center,
       children: [
         CachedNetworkImage(
-          imageUrl: message['thumbnail_url'] ?? message['media_url'],
+          imageUrl: firstUrl,
           fit: BoxFit.cover,
           width: double.infinity,
           height: 200,
           placeholder: (context, url) =>
               Container(color: Colors.white10, height: 200),
+          errorWidget: (context, url, error) => Container(
+              color: Colors.white10,
+              height: 200,
+              child: const Icon(Icons.broken_image, color: Colors.white54)),
         ),
         if (isVideo)
           const CircleAvatar(
@@ -710,92 +870,271 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
-  Widget _buildInputBar() {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (_replyMessage != null)
-          Container(
-            color: const Color(0xFF1F2C34),
-            padding: const EdgeInsets.all(8),
-            child: Row(
-              children: [
-                const Icon(Icons.reply, color: Colors.white54),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _replyMessage!['content'] ?? 'Media',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.white70),
-                  ),
-                ),
-                IconButton(
-                  icon:
-                      const Icon(Icons.close, size: 18, color: Colors.white54),
-                  onPressed: () => setState(() => _replyMessage = null),
-                ),
-              ],
-            ),
-          ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          color: Colors.black,
-          child: Row(
-            children: [
-              // FIXED: Wired up the Plus Options menu
-              IconButton(
-                icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
-                onPressed: _showPlusOptions,
-              ),
-              Expanded(
-                child: TextField(
-                  controller: _messageController,
-                  // FIXED: Wired up the Typing indicator logic
-                  onChanged: (value) => _handleTyping(value),
-                  style: const TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
-                    hintText: "Message",
-                    hintStyle: const TextStyle(color: Colors.white38),
-                    filled: true,
-                    fillColor: const Color(0xFF202C33),
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none),
-                    contentPadding:
-                        const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                  ),
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
-                onPressed: () => _sendMessage(),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
   // ... (Keep your existing _showPlusOptions, _plusTile, and _showChatMenu)
-  void _showPlusOptions() {
+  void _showPlusOptions() async {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _plusTile(Icons.insert_drive_file, "Add File"),
-          _plusTile(Icons.photo, "Add Photo"),
-          _plusTile(Icons.videocam, "Add Video"),
-          _plusTile(Icons.camera_alt, "Take Photo/Video"),
-          const SizedBox(height: 20),
-        ],
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+                leading: const Icon(Icons.insert_drive_file,
+                    color: Color(0xFF4CAF50)),
+                title: const Text('Add File',
+                    style: TextStyle(color: Colors.white)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _pickAndUploadFile();
+                }),
+            ListTile(
+                leading:
+                    const Icon(Icons.photo_library, color: Color(0xFF4CAF50)),
+                title: const Text('Add Photo',
+                    style: TextStyle(color: Colors.white)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _pickAndUploadMedia(ImageSource.gallery, 'image');
+                }),
+            ListTile(
+                leading: const Icon(Icons.videocam, color: Color(0xFF4CAF50)),
+                title: const Text('Add Video',
+                    style: TextStyle(color: Colors.white)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _pickAndUploadMedia(ImageSource.gallery, 'video');
+                }),
+            ListTile(
+                leading: const Icon(Icons.camera_alt, color: Color(0xFF4CAF50)),
+                title: const Text('Take Photo/Video',
+                    style: TextStyle(color: Colors.white)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _pickAndUploadMedia(ImageSource.camera, 'image');
+                }),
+            const SizedBox(height: 12),
+          ],
+        ),
       ),
     );
+  }
+
+  // --- NEW: FILE UPLOADER ---
+  // --- NEW: FILE UPLOADER (Memory Optimized) ---
+  Future<void> _pickAndUploadFile() async {
+    try {
+      final result = await FilePicker.platform.pickFiles();
+      if (result == null || result.files.isEmpty) return;
+
+      final file = result.files.first;
+      final filePath = file.path;
+      if (filePath == null) return;
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Uploading file...')));
+
+      final diskFile = File(filePath); // <-- FIX: Load from disk
+      final ext = file.extension ?? 'file';
+      final fileName =
+          '${DateTime.now().millisecondsSinceEpoch}_${file.name.hashCode}.$ext';
+      final path = 'chat_media/${widget.chatId}/$fileName';
+
+      // FIX: .upload() streams the file directly, preventing RAM crashes!
+      await supabase.storage.from('chat_media').upload(path, diskFile);
+      final publicUrl = supabase.storage.from('chat_media').getPublicUrl(path);
+
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return;
+
+      await supabase.from('messages').insert({
+        'chat_id': widget.chatId,
+        'sender_id': myId,
+        'content': file.name, // Uses the file name as the message text!
+        'media_url': publicUrl,
+        'media_type': 'file',
+        'file_size_bytes': file.size,
+        'is_read': false,
+      });
+    } catch (e) {
+      debugPrint("File upload error: $e");
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Failed to send file')));
+    }
+  }
+
+  // --- NEW: MEDIA UPLOADER (Memory Optimized) ---
+  Future<void> _pickAndUploadMedia(ImageSource source, String type) async {
+    try {
+      final picker = ImagePicker();
+      List<XFile> pickedFiles = [];
+
+      if (type == 'image') {
+        if (source == ImageSource.gallery) {
+          pickedFiles = await picker.pickMultiImage(imageQuality: 85);
+        } else {
+          final file = await picker.pickImage(source: source, imageQuality: 85);
+          if (file != null) pickedFiles.add(file);
+        }
+      } else {
+        final file = await picker.pickVideo(source: source);
+        if (file != null) pickedFiles.add(file);
+      }
+
+      if (pickedFiles.isEmpty) return;
+
+      // --- STEP 1: YOUR DIALOG LOGIC ---
+      final captionController = TextEditingController();
+      final shouldSend = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => Dialog(
+          backgroundColor: Colors.grey[900],
+          insetPadding:
+              const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
+          child: SingleChildScrollView(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    type == 'image' ? 'Send Photo(s)' : 'Send Video',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      height: 260,
+                      width: double.infinity,
+                      color: Colors.black,
+                      child: type == 'image'
+                          ? Image.file(File(pickedFiles.first.path),
+                              fit: BoxFit.contain)
+                          : const Center(
+                              child: Icon(Icons.play_circle,
+                                  size: 80, color: Colors.white70)),
+                    ),
+                  ),
+                  if (pickedFiles.length > 1)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0),
+                      child: Text('+ ${pickedFiles.length - 1} more selected',
+                          style: const TextStyle(
+                              color: Colors.white70,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: captionController,
+                    style: const TextStyle(color: Colors.white),
+                    maxLines: 4,
+                    minLines: 1,
+                    decoration: const InputDecoration(
+                      hintText: "Add a caption (optional)",
+                      hintStyle: TextStyle(color: Colors.white54),
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.all(12),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('Cancel',
+                            style: TextStyle(color: Colors.white70)),
+                      ),
+                      const SizedBox(width: 24),
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('Send',
+                            style: TextStyle(
+                                color: Color(0xFF4CAF50),
+                                fontWeight: FontWeight.bold)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+
+      if (shouldSend != true) return;
+
+      // --- STEP 2: METADATA & UPLOAD LOGIC ---
+      List<String> uploadedUrls = [];
+      String? thumbnailUrl;
+      int totalSizeBytes = 0;
+
+      for (var file in pickedFiles) {
+        final diskFile = File(file.path); // <-- FIX: Load from disk!
+        totalSizeBytes += await diskFile.length();
+
+        final ext = file.name.split('.').last.toLowerCase();
+        final fileName =
+            '${DateTime.now().millisecondsSinceEpoch}_${file.name.hashCode}.$ext';
+        final path = 'chat_media/${widget.chatId}/$fileName';
+
+        // FIX: Stream the upload directly from disk to avoid RAM crashes
+        await supabase.storage.from('chat_media').upload(path, diskFile);
+        uploadedUrls
+            .add(supabase.storage.from('chat_media').getPublicUrl(path));
+
+        // Generate Video Thumbnail if it's a video
+        if (type == 'video' && thumbnailUrl == null) {
+          final String? thumbPath = await VideoThumbnail.thumbnailFile(
+            video: file.path,
+            thumbnailPath: (await getTemporaryDirectory()).path,
+            imageFormat: ImageFormat.JPEG,
+            quality: 50,
+          );
+
+          if (thumbPath != null) {
+            final thumbFile = File(thumbPath);
+            await supabase.storage
+                .from('chat_media')
+                .upload('thumbnails/thumb_$fileName.jpg', thumbFile);
+            thumbnailUrl = supabase.storage
+                .from('chat_media')
+                .getPublicUrl('thumbnails/thumb_$fileName.jpg');
+          }
+        }
+      }
+
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return;
+
+      final finalContent = captionController.text.trim().isNotEmpty
+          ? captionController.text.trim()
+          : (type == 'image' ? '📸 Photo' : '🎥 Video');
+
+      await supabase.from('messages').insert({
+        'chat_id': widget.chatId,
+        'sender_id': myId,
+        'content': finalContent,
+        'media_url': uploadedUrls.join(','),
+        'media_type': type,
+        'thumbnail_url': thumbnailUrl,
+        'file_size_bytes': totalSizeBytes,
+        'is_read': false,
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Media sent')));
+      }
+    } catch (e) {
+      debugPrint("Media error: $e");
+    }
   }
 
   Widget _plusTile(IconData icon, String title) => ListTile(

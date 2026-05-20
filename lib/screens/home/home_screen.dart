@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'package:allowance/screens/chat/chat_list_screen.dart';
 import 'package:allowance/screens/home/media_editor_screen.dart';
+import 'package:allowance/shared/services/fcm_service.dart';
 import 'package:allowance/widgets/stories_bar.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:flutter/cupertino.dart';
@@ -73,6 +74,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // NEW: track loading vs loaded-with-zero-items
   bool _isGistsLoading = true;
+  RealtimeChannel? _globalChatChannel;
 
   String _gistFilter = 'All';
   final Map<int, int> _gistLikeCounts = {};
@@ -123,11 +125,13 @@ class _HomeScreenState extends State<HomeScreen> {
     _pageController = PageController(viewportFraction: 0.85);
     _budgetController.text = _prefs.budget?.toString() ?? "";
     _fetchGistsAndStartSlideshow();
+    _setupGlobalChatListener(); // <--- STARTS THE IN-APP NOTIFICATION LISTENER
   }
 
   @override
   void dispose() {
-    _disposeVideoControllers(); // ← NEW
+    _globalChatChannel?.unsubscribe(); // <--- CLEANUP
+    _disposeVideoControllers();
     _slideshowTimer?.cancel();
     _pageController.dispose();
     _budgetController.dispose();
@@ -136,6 +140,127 @@ class _HomeScreenState extends State<HomeScreen> {
     _restaurantFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  // --- NEW: LISTENS FOR MESSAGES ANYWHERE IN THE APP ---
+  void _setupGlobalChatListener() {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    _globalChatChannel = supabase
+        .channel('global-messages')
+        .onPostgresChanges(
+            event: PostgresChangeEvent.insert,
+            schema: 'public',
+            table: 'messages',
+            callback: (payload) async {
+              final newMsg = payload.newRecord;
+              final senderId = newMsg['sender_id'];
+              final chatId = newMsg['chat_id'];
+
+              // If someone else sent it, AND we are NOT currently inside that specific chat screen
+              if (senderId != myId && chatId != activeChatId) {
+                final senderData = await supabase
+                    .from('profiles')
+                    .select('username, avatar_url')
+                    .eq('id', senderId)
+                    .maybeSingle();
+                final senderName = senderData?['username'] ?? 'Someone';
+                final avatarUrl = senderData?['avatar_url'] ?? '';
+
+                _showInAppNotification(
+                    senderName, newMsg['content'] ?? '📷 Media', avatarUrl);
+              }
+            })
+        .subscribe();
+  }
+
+  // --- NEW: THE COOL ROUNDED TOP BANNER ---
+  void _showInAppNotification(
+      String senderName, String message, String avatarUrl) {
+    final overlay = Overlay.of(context);
+    late OverlayEntry entry;
+
+    entry = OverlayEntry(
+      builder: (context) => Positioned(
+        top: MediaQuery.of(context).padding.top + 10,
+        left: 16,
+        right: 16,
+        child: Material(
+          color: Colors.transparent,
+          child: TweenAnimationBuilder<double>(
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeOutBack,
+            tween: Tween<double>(begin: -100, end: 0),
+            builder: (context, value, child) => Transform.translate(
+              offset: Offset(0, value),
+              child: child,
+            ),
+            child: GestureDetector(
+              onTap: () {
+                entry.remove();
+                Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) =>
+                            ChatListScreen(userPreferences: _prefs)));
+              },
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E1E1E),
+                  borderRadius:
+                      BorderRadius.circular(20), // Cool rounded corners!
+                  boxShadow: const [
+                    BoxShadow(
+                        color: Colors.black45, blurRadius: 10, spreadRadius: 2)
+                  ],
+                  border:
+                      Border.all(color: const Color(0xFF4CAF50), width: 1.5),
+                ),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 20,
+                      backgroundColor: Colors.grey[800],
+                      backgroundImage:
+                          avatarUrl.isNotEmpty ? NetworkImage(avatarUrl) : null,
+                      child: avatarUrl.isEmpty
+                          ? const Icon(Icons.person, color: Colors.white54)
+                          : null,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('@$senderName',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16)),
+                          Text(message,
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 14),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    overlay.insert(entry);
+    // Slides back up after 4 seconds
+    Future.delayed(const Duration(seconds: 4), () {
+      if (entry.mounted) entry.remove();
+    });
   }
 
   Future<void> _fetchGistsAndStartSlideshow() async {
@@ -225,7 +350,10 @@ class _HomeScreenState extends State<HomeScreen> {
   // SPEED HACK: CACHE VIDEOS TO PHONE STORAGE
   // ==========================================
   Future<void> _initializeVideoControllers() async {
+    int count = 0;
     for (var gist in _fetchedGists) {
+      if (count >= 2)
+        break; // <--- FIX: Limit to 2 videos to prevent Memory Crash on startup!
       final mediaType = gist['media_type'] as String?;
 
       if (mediaType == 'video') {
@@ -234,25 +362,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
         if (videoUrl.isNotEmpty) {
           try {
-            // 1. Check if the video is already saved in the phone's physical cache
             var fileInfo =
                 await DefaultCacheManager().getFileFromCache(videoUrl);
             VideoPlayerController controller;
 
             if (fileInfo != null) {
-              // PLAY FROM LOCAL DISK: Extremely fast, zero network buffering
               controller = VideoPlayerController.file(fileInfo.file);
             } else {
-              // PLAY FROM NETWORK: But silently download to the disk cache in the background for next time!
               controller =
                   VideoPlayerController.networkUrl(Uri.parse(videoUrl));
-              DefaultCacheManager().downloadFile(videoUrl);
+              // Removed the aggressive background download here to save memory
             }
 
             await controller.initialize();
             controller.setLooping(true);
             _videoControllers[gistId] = controller;
             _isVideoMuted[gistId] = true;
+            count++;
           } catch (e) {
             debugPrint("Video caching error: $e");
           }
