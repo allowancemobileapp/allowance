@@ -180,6 +180,10 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     if (user == null) return;
 
     final story = _sortedStories[index];
+
+    // Fix: Do NOT count the creator viewing their own story
+    if (user.id == story['user_id']) return;
+
     try {
       await Supabase.instance.client.from('story_views').upsert({
         'story_id': story['id'],
@@ -241,23 +245,143 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     return "$twoDigitMinutes:$twoDigitSeconds";
   }
 
-  void _initViewCountAndSubscription() {
+  Future<void> _initViewCountAndSubscription() async {
     final story = _sortedStories[_currentIndex];
-    _viewCount = (story['story_views'] as List?)?.length ?? 0;
-
-    _viewSubscription?.cancel();
     final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+
     if (currentUserId == null || currentUserId != story['user_id']) return;
 
+    final storyId = story['id'] as int;
+
+    // 1. Fetch initial total views directly from DB (excluding creator)
+    try {
+      final response = await Supabase.instance.client
+          .from('story_views')
+          .select('id, user_id')
+          .eq('story_id', storyId)
+          .neq('user_id', currentUserId); // Ignore own views
+      if (mounted) {
+        setState(() => _viewCount = (response as List).length);
+      }
+    } catch (e) {
+      debugPrint('Error fetching views: $e');
+    }
+
+    // 2. Listen for realtime new views
+    _viewSubscription?.cancel();
     _viewSubscription = Supabase.instance.client
         .from('story_views')
         .stream(primaryKey: ['id'])
-        .eq('story_id', story['id'] as int)
+        .eq('story_id', storyId)
         .listen((payload) {
           if (mounted) {
-            setState(() => _viewCount = payload.length);
+            final actualViews =
+                payload.where((v) => v['user_id'] != currentUserId).toList();
+            setState(() => _viewCount = actualViews.length);
           }
         });
+  }
+
+  Future<void> _showViewersList() async {
+    _pauseStory(); // Pause video/timer while viewing list
+
+    final storyId = _sortedStories[_currentIndex]['id'];
+    final supabase = Supabase.instance.client;
+    final currentUserId = supabase.auth.currentUser?.id;
+
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return FutureBuilder(
+          future: supabase
+              .from('story_views')
+              .select(
+                  'user_id, viewed_at, profiles:user_id(username, avatar_url, school_name)')
+              .eq('story_id', storyId)
+              .neq(
+                  'user_id', currentUserId ?? '') // Hide yourself from the list
+              .order('viewed_at', ascending: false),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const SizedBox(
+                height: 300,
+                child: Center(
+                    child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
+              );
+            }
+
+            final viewers = (snapshot.data as List<dynamic>?) ?? [];
+
+            return Container(
+              padding: const EdgeInsets.all(16),
+              height: MediaQuery.of(context).size.height * 0.55,
+              child: Column(
+                children: [
+                  Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(2))),
+                  const SizedBox(height: 16),
+                  Text('${viewers.length} Viewers',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 16),
+                  Expanded(
+                    child: viewers.isEmpty
+                        ? const Center(
+                            child: Text("No views yet",
+                                style: TextStyle(color: Colors.white54)))
+                        : ListView.builder(
+                            itemCount: viewers.length,
+                            itemBuilder: (context, index) {
+                              final viewer = viewers[index];
+                              final profile = viewer['profiles'] ?? {};
+                              return ListTile(
+                                leading: CircleAvatar(
+                                  backgroundColor: Colors.grey[800],
+                                  backgroundImage: profile['avatar_url'] != null
+                                      ? NetworkImage(profile['avatar_url'])
+                                      : null,
+                                  child: profile['avatar_url'] == null
+                                      ? Text(
+                                          (profile['username'] ?? 'U')
+                                              .toString()[0]
+                                              .toUpperCase(),
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.bold))
+                                      : null,
+                                ),
+                                title: Text(profile['username'] ?? 'User',
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.bold)),
+                                subtitle: Text(
+                                    profile['school_name'] ?? 'Allowance',
+                                    style: const TextStyle(
+                                        color: Colors.white54, fontSize: 12)),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    _resumeStory(); // Resume playing when panel is closed
   }
 
   // === REPLACE _videoProgressListener WITH THIS (fixes "doesn't advance to next story") ===
@@ -1070,29 +1194,36 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                   ),
                 ),
                 const SizedBox(width: 12),
+
+                // --- If it's NOT your story, show the Reshare button ---
                 if (!isOwnStory)
                   GestureDetector(
                     onTap: _reshareStory,
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: const Icon(Icons.repeat,
-                          color: Colors.white, size: 28),
+                    child: const Padding(
+                      padding: EdgeInsets.only(bottom: 10),
+                      child: Icon(Icons.repeat, color: Colors.white, size: 28),
                     ),
                   ),
+
+                // --- If it IS your story, show the Viewers Eye button ---
                 if (isOwnStory)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.remove_red_eye,
-                            color: Colors.white, size: 24),
-                        const SizedBox(width: 4),
-                        Text('$_viewCount',
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 14)),
-                      ],
+                  GestureDetector(
+                    onTap: _showViewersList,
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.remove_red_eye,
+                              color: Colors.white, size: 24),
+                          const SizedBox(width: 4),
+                          Text('$_viewCount',
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 14)),
+                        ],
+                      ),
                     ),
                   ),
+
                 const SizedBox(width: 16),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),

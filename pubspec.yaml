@@ -2,7 +2,7 @@ name: allowance
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.2+4
+version: 1.0.3+5
 
 environment:
   sdk: ">=3.5.3 <4.0.0"
@@ -67,6 +67,8 @@ flutter:
     - assets/images/order.png
     - assets/images/allowance_logo.png
     - assets/images/app_icon.png
+    - assets/images/explore.png  # <--- ADD THIS
+    - assets/images/chats.png
 
   fonts:
     - family: SanFrancisco

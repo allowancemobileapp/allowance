@@ -1,12 +1,12 @@
 // lib/screens/home/available_options_screen.dart
 import 'dart:async';
-import 'dart:math';
+import 'dart:convert';
+import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/services/api_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 class AvailableOptionsScreen extends StatefulWidget {
   final UserPreferences userPreferences;
@@ -24,7 +24,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
   final Color themeColor = const Color(0xFF4CAF50);
   late Future<List<dynamic>> _optionsFuture;
   late Future<List<dynamic>> _foodGroupsFuture;
-  late Future<List<dynamic>> _deliveryPersonnelFuture;
   List<dynamic> _groups = [];
   String _selectedGroup = 'All';
   List<dynamic> _allOptions = [];
@@ -92,8 +91,6 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
     _foodGroupsFuture = ApiService.fetchFoodGroups();
     _optionsFuture =
         ApiService.fetchOptions(widget.userPreferences.schoolId ?? '');
-    _deliveryPersonnelFuture = ApiService.fetchDeliveryPersonnel(
-        widget.userPreferences.schoolId.toString());
     _foodGroupsFuture.then((foodGroups) {
       final groupsList = <Map<String, dynamic>>[
         {"id": "all", "name": "All"}
@@ -132,48 +129,42 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
     }
   }
 
+  // --- UPDATED: STRICT BUDGET ENFORCEMENT ---
   List<dynamic> _filteredOptions(List<dynamic> options) {
-    final budget = widget.userPreferences.budget?.toDouble() ?? double.infinity;
+    final budgetStr = widget.userPreferences.budget?.toString() ?? "0";
+    final budget = double.tryParse(budgetStr) ?? 0.0;
+    final hasValidBudget = budget > 0;
+
     return options.where((option) {
       final groupId = option["group_id"]?.toString() ?? "";
       final vendorName = option["vendors"]?["name"]?.toString() ?? "";
       if (!widget.selectedRestaurants.contains(vendorName)) return false;
-      var selGroup = _groups.firstWhere(
-        (g) => g["name"] == _selectedGroup,
-        orElse: () => {"id": "all"},
-      )["id"];
-      selGroup = selGroup.toString();
+
+      var selGroup = _groups
+          .firstWhere(
+            (g) => g["name"] == _selectedGroup,
+            orElse: () => {"id": "all"},
+          )["id"]
+          .toString();
+
       final items = (option["items"] as List<dynamic>? ?? []);
       if (items.any((i) => _selectedFoodItems.contains(i["name"]))) {
         return false;
       }
-      final total = items.fold<double>(
-        0,
-        (sum, i) => sum + getAdjustedPrice(i),
-      );
-      return (selGroup == "all" || groupId == selGroup) && total <= budget;
+
+      final total =
+          items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
+
+      // THE FIX: Only show options that are LESS THAN OR EQUAL TO the budget
+      if (hasValidBudget && total > budget) return false;
+
+      return (selGroup == "all" || groupId == selGroup);
     }).toList();
   }
 
-  void _showFilterPopup() {
-    _foodSections.clear();
-    final categories = <String, Set<String>>{};
-    for (var option in _allOptions) {
-      final items = option['items'] as List<dynamic>? ?? [];
-      for (var item in items) {
-        final cat = item['category']?.toString() ?? "Uncategorized";
-        final name = item['name']?.toString() ?? "Unknown";
-        if (cat != "Uncategorized") {
-          categories.putIfAbsent(cat, () => <String>{}).add(name);
-        }
-      }
-    }
-    categories.forEach((cat, names) {
-      _foodSections.add({"name": cat, "items": names});
-    });
-    setState(() {});
-  }
-
+  // --- UPDATED: DELIVERY PICKER ---
+  // --- UPDATED: Formats order as JSON instead of text ---
+  // --- UPDATED: Pass Order as JSON ---
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
     final isPremium = widget.userPreferences.subscriptionTier == 'Membership';
 
@@ -182,8 +173,7 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
         context: context,
         backgroundColor: Colors.grey[900],
         shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
         builder: (ctx) => Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
@@ -191,55 +181,41 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
             children: [
               const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
               const SizedBox(height: 16),
-              const Text(
-                'Subscribe to Allowance Plus',
-                style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white),
-              ),
+              const Text('Subscribe to Allowance Plus',
+                  style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white)),
               const SizedBox(height: 12),
               const Text(
-                'to get access to our trusted and verified delivery agents',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.white70),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'This protects you from delivery scams in school.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white54, fontSize: 14),
-              ),
+                  'to get access to our trusted and verified delivery agents',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, color: Colors.white70)),
               const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: () {
-                    Navigator.pop(ctx); // close paywall
+                    Navigator.pop(ctx);
                     Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SubscriptionScreen(
-                          userPreferences: widget.userPreferences,
-                          themeColor: themeColor,
-                        ),
-                      ),
-                    );
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => SubscriptionScreen(
+                                userPreferences: widget.userPreferences,
+                                themeColor: themeColor)));
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: themeColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
+                      backgroundColor: themeColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16)),
                   child: const Text('Subscribe to Allowance Plus',
                       style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ),
               TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Maybe later',
-                    style: TextStyle(color: Colors.white70)),
-              ),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Maybe later',
+                      style: TextStyle(color: Colors.white70))),
             ],
           ),
         ),
@@ -247,84 +223,111 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
       return;
     }
 
-    // === PREMIUM USER → fixed scrollable delivery picker ===
-    final vendorName = selectedOption['vendors']['name'].toString();
+    final vendorName =
+        selectedOption['vendors']?['name']?.toString() ?? 'Vendor';
     final items = selectedOption['items'] as List<dynamic>;
-    final total = items
-        .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
-        .toStringAsFixed(0);
+    final total = items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
 
-    final message = StringBuffer();
-    message.writeln("Hello! I'd like to order from $vendorName:");
-    message.writeln("Items:");
-    for (var i in items) {
-      final name = i['name'];
-      final price = getAdjustedPrice(i).toStringAsFixed(0);
-      final qty = i['quantity'] ?? 1;
-      message.writeln("- $name (₦$price × $qty)");
-    }
-    message.writeln("Total: ₦$total");
+    // Formatted strictly as JSON map
+    final orderData = {
+      'vendor': vendorName,
+      'items': items
+          .map((i) => {
+                'name': i['name'],
+                'price': getAdjustedPrice(i).toStringAsFixed(0),
+                'qty': i['quantity'] ?? 1,
+              })
+          .toList(),
+      'total': total.toStringAsFixed(0)
+    };
 
+    _openDeliveryAgentGrid(orderData);
+  }
+
+  // --- UPDATED: Fixes overflow & removes "Contact" button ---
+  // --- UPDATED: Fixes overflow & removes "Contact" button ---
+  void _openDeliveryAgentGrid(Map<String, dynamic> orderData) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (_) => Container(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.65,
-        ),
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(
-                'Select your guy/gal',
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: themeColor),
-              ),
+              child: Text('Select a Runner 🏃‍♂️',
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: themeColor)),
             ),
             const Divider(height: 1, color: Colors.white24),
             Expanded(
               child: FutureBuilder<List<dynamic>>(
-                future: _deliveryPersonnelFuture,
+                future: supabase
+                    .from('profiles')
+                    .select('id, username, avatar_url, gender')
+                    .eq('is_delivery_agent', true)
+                    .eq('is_available_for_delivery', true)
+                    .eq('school_id', widget.userPreferences.schoolId ?? ''),
                 builder: (ctx, snap) {
-                  if (snap.connectionState == ConnectionState.waiting) {
+                  if (snap.connectionState == ConnectionState.waiting)
                     return const Center(child: CircularProgressIndicator());
-                  }
                   final list = snap.data ?? [];
-                  if (list.isEmpty) {
+
+                  if (list.isEmpty)
                     return const Center(
-                      child: Text('No delivery personnel available',
-                          style: TextStyle(color: Colors.white)),
-                    );
-                  }
-                  list.shuffle(Random());
-                  return ListView.builder(
-                    padding: const EdgeInsets.all(8),
+                        child: Text('No agents available right now 😴',
+                            style: TextStyle(color: Colors.white70)));
+
+                  list.shuffle();
+
+                  return GridView.builder(
+                    padding: const EdgeInsets.all(16),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 16,
+                      childAspectRatio: 0.85,
+                    ),
                     itemCount: list.length,
                     itemBuilder: (ctx, i) {
                       final person = list[i];
-                      return ListTile(
-                        title: Text(
-                          '${person['name']} (${person['gender']})',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                        trailing: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: themeColor,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8)),
-                          ),
-                          onPressed: () =>
-                              _openWhatsAppContact(person, message.toString()),
-                          child: const Text('Contact'),
+                      return GestureDetector(
+                        onTap: () => _sendOrderToAppChat(person, orderData),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CircleAvatar(
+                              radius: 36,
+                              backgroundColor: Colors.grey[800],
+                              backgroundImage: person['avatar_url'] != null
+                                  ? NetworkImage(person['avatar_url'])
+                                  : null,
+                              child: person['avatar_url'] == null
+                                  ? const Icon(Icons.delivery_dining,
+                                      color: Colors.white54, size: 30)
+                                  : null,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(person['username'] ?? 'Agent',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            if (person['gender'] != null)
+                              Text(person['gender'],
+                                  style: const TextStyle(
+                                      color: Colors.white54, fontSize: 11)),
+                          ],
                         ),
                       );
                     },
@@ -338,57 +341,140 @@ class _AvailableOptionsScreenState extends State<AvailableOptionsScreen> {
     );
   }
 
-  Future<void> _openWhatsAppContact(
-      Map<String, dynamic> person, String rawMessage) async {
+  // --- UPDATED: Does NOT auto-send. Simply passes the order JSON! ---
+  // --- UPDATED: Safe version for non-cart screens ---
+  Future<void> _sendOrderToAppChat(
+      Map<String, dynamic> person, Map<String, dynamic> orderData) async {
     try {
-      final stored =
-          (person['whatsapp_url'] ?? person['phone'] ?? person['mobile'] ?? '')
-              .toString();
-      String phoneOnly = stored.replaceAll(RegExp(r'[^0-9]'), '');
-      if (phoneOnly.isEmpty) {
-        final alt = (person['phone'] ?? person['mobile'] ?? '').toString();
-        phoneOnly = alt.replaceAll(RegExp(r'[^0-9]'), '');
-      }
-      final encodedMessage = Uri.encodeComponent(rawMessage);
-      // ✅ Directly use the native WhatsApp URI first (works best on Android/iOS)
-      final whatsappUri =
-          Uri.parse('whatsapp://send?phone=$phoneOnly&text=$encodedMessage');
-      // ✅ Try WhatsApp Business fallback (for users with both installed)
-      final whatsappBusinessUri = Uri.parse(
-          'whatsapp-business://send?phone=$phoneOnly&text=$encodedMessage');
-      // ✅ Web fallback (for browsers or desktop)
-      final waWebUri =
-          Uri.parse('https://wa.me/$phoneOnly?text=$encodedMessage');
-      if (await canLaunchUrl(whatsappUri)) {
-        await launchUrl(whatsappUri, mode: LaunchMode.externalApplication);
-        return;
-      } else if (await canLaunchUrl(whatsappBusinessUri)) {
-        await launchUrl(whatsappBusinessUri,
-            mode: LaunchMode.externalApplication);
-        return;
-      } else if (await canLaunchUrl(waWebUri)) {
-        await launchUrl(waWebUri, mode: LaunchMode.externalApplication);
-        return;
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Unable to open WhatsApp. Please make sure WhatsApp or WhatsApp Business is installed.',
-              ),
+      final myId = supabase.auth.currentUser!.id;
+      final agentId = person['id'];
+
+      showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => const Center(
+              child: CircularProgressIndicator(color: Color(0xFF4CAF50))));
+
+      final response = await supabase.rpc('get_or_create_personal_chat',
+          params: {'user_a': myId, 'user_b': agentId});
+      final chatId = response.toString();
+
+      final String orderJson = jsonEncode(orderData);
+
+      if (mounted) {
+        Navigator.pop(context); // Close loading dialog
+        Navigator.pop(context); // Close bottom sheet
+
+        // Passes the order into the chat screen as a pending order!
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => IndividualChatScreen(
+              chatId: chatId,
+              recipientProfile: {
+                'id': agentId,
+                'username': person['username'] ?? 'Delivery Agent',
+                'avatar_url': person['avatar_url'],
+                'school_name': widget.userPreferences.schoolName,
+                'is_group': false,
+                'pending_order': orderJson,
+              },
+              userPreferences: widget.userPreferences,
             ),
-          );
-        }
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
+        Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(
-                  'Oops! Something went wrong while trying to open WhatsApp: $e')),
-        );
+            const SnackBar(content: Text('Failed to route order.')));
       }
     }
+  }
+
+  void _showFilterPopup() {
+    _foodSections.clear();
+    final Map<String, Set<String>> categories = {};
+    for (var option in _allOptions) {
+      final items = option['items'] is List<dynamic>
+          ? option['items'] as List<dynamic>
+          : [];
+      for (var it in items) {
+        final cat = it['category']?.toString() ?? 'Uncategorized';
+        final name = it['name']?.toString() ?? 'Unknown';
+        if (cat != 'Uncategorized') {
+          categories.putIfAbsent(cat, () => <String>{}).add(name);
+        }
+      }
+    }
+    categories.forEach((cat, names) {
+      _foodSections.add({'name': cat, 'items': names.toList()});
+    });
+    setState(() {});
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.grey[900],
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, modalSetState) => SingleChildScrollView(
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Filter Options',
+                    style: TextStyle(
+                        color: themeColor,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                ..._foodSections.map((section) => ExpansionTile(
+                      collapsedIconColor: themeColor,
+                      title: Text(section['name'],
+                          style: const TextStyle(color: Colors.white)),
+                      children: (section['items'] as List<String>)
+                          .map((item) => CheckboxListTile(
+                                title: Text(item,
+                                    style:
+                                        const TextStyle(color: Colors.white)),
+                                activeColor: themeColor,
+                                checkColor: Colors.black,
+                                value: !_selectedFoodItems.contains(item),
+                                onChanged: (v) {
+                                  modalSetState(() {
+                                    if (v == false) {
+                                      _selectedFoodItems.add(item);
+                                    } else {
+                                      _selectedFoodItems.remove(item);
+                                    }
+                                  });
+                                  setState(
+                                      () {}); // Updates the main screen list
+                                },
+                              ))
+                          .toList(),
+                    )),
+                const SizedBox(height: 16),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: Text('Close',
+                        style: TextStyle(
+                            color: themeColor,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   @override

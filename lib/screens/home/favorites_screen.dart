@@ -1,8 +1,9 @@
 // lib/screens/home/favorites_screen.dart
-import 'dart:math';
+import 'dart:convert';
+
+import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/services/api_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -21,7 +22,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   final Color themeColor = const Color(0xFF4CAF50);
   late Future<List<dynamic>> _optionsFuture;
   late Future<List<dynamic>> _foodGroupsFuture;
-  late Future<List<dynamic>> _deliveryPersonnelFuture;
   List<dynamic> _groups = [];
   String _selectedGroup = 'All';
   // Favorite IDs
@@ -106,9 +106,6 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
     _optionsFuture =
         ApiService.fetchOptions(widget.userPreferences.schoolId ?? '');
     _foodGroupsFuture = ApiService.fetchFoodGroups();
-    _deliveryPersonnelFuture = ApiService.fetchDeliveryPersonnel(
-      widget.userPreferences.schoolId.toString(),
-    );
     _foodGroupsFuture.then((foodGroups) {
       final groupsSet = <Map<String, dynamic>>[
         {'id': 'all', 'name': 'All'}
@@ -130,6 +127,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
 
   // --- DELIVERY POPUP ---
   // --- DELIVERY POPUP (with real paywall) ---
+  // --- UPDATED: Pass Order as JSON ---
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
     final isPremium = widget.userPreferences.subscriptionTier == 'Membership';
 
@@ -138,8 +136,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
         context: context,
         backgroundColor: Colors.grey[900],
         shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
         builder: (ctx) => Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
@@ -147,55 +144,41 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
             children: [
               const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
               const SizedBox(height: 16),
-              const Text(
-                'Subscribe to Allowance Plus',
-                style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white),
-              ),
+              const Text('Subscribe to Allowance Plus',
+                  style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white)),
               const SizedBox(height: 12),
               const Text(
-                'to get access to our trusted and verified delivery agents',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.white70),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'This protects you from delivery scams in school.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white54, fontSize: 14),
-              ),
+                  'to get access to our trusted and verified delivery agents',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, color: Colors.white70)),
               const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: () {
-                    Navigator.pop(ctx); // close paywall
+                    Navigator.pop(ctx);
                     Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SubscriptionScreen(
-                          userPreferences: widget.userPreferences,
-                          themeColor: themeColor,
-                        ),
-                      ),
-                    );
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => SubscriptionScreen(
+                                userPreferences: widget.userPreferences,
+                                themeColor: themeColor)));
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: themeColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
+                      backgroundColor: themeColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16)),
                   child: const Text('Subscribe to Allowance Plus',
                       style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ),
               TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Maybe later',
-                    style: TextStyle(color: Colors.white70)),
-              ),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Maybe later',
+                      style: TextStyle(color: Colors.white70))),
             ],
           ),
         ),
@@ -203,101 +186,111 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
       return;
     }
 
-    // === PREMIUM USER → delivery picker ===
-    final vendorName = selectedOption['vendors']['name'].toString();
+    final vendorName =
+        selectedOption['vendors']?['name']?.toString() ?? 'Vendor';
     final items = selectedOption['items'] as List<dynamic>;
-    final total = items
-        .fold<double>(0, (sum, i) => sum + getAdjustedPrice(i))
-        .toStringAsFixed(0);
+    final total = items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
 
-    final message = StringBuffer();
-    message.writeln("Hello! I'd like to order from $vendorName:");
-    message.writeln("Items:");
-    for (var i in items) {
-      final name = i['name'];
-      final price = getAdjustedPrice(i).toStringAsFixed(0);
-      final qty = i['quantity'] ?? 1;
-      message.writeln("- $name (₦$price × $qty)");
-    }
-    message.writeln("Total: ₦$total");
+    // Formatted strictly as JSON map
+    final orderData = {
+      'vendor': vendorName,
+      'items': items
+          .map((i) => {
+                'name': i['name'],
+                'price': getAdjustedPrice(i).toStringAsFixed(0),
+                'qty': i['quantity'] ?? 1,
+              })
+          .toList(),
+      'total': total.toStringAsFixed(0)
+    };
 
+    _openDeliveryAgentGrid(orderData);
+  }
+
+  // --- UPDATED: Fixes overflow & removes "Contact" button ---
+  // --- UPDATED: Fixes overflow & removes "Contact" button ---
+  void _openDeliveryAgentGrid(Map<String, dynamic> orderData) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (_) => Container(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.65,
-        ),
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(
-                'Select your guy/gal',
-                style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: themeColor),
-              ),
+              child: Text('Select a Runner 🏃‍♂️',
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: themeColor)),
             ),
             const Divider(height: 1, color: Colors.white24),
             Expanded(
               child: FutureBuilder<List<dynamic>>(
-                future: _deliveryPersonnelFuture,
+                future: supabase
+                    .from('profiles')
+                    .select('id, username, avatar_url, gender')
+                    .eq('is_delivery_agent', true)
+                    .eq('is_available_for_delivery', true)
+                    .eq('school_id', widget.userPreferences.schoolId ?? ''),
                 builder: (ctx, snap) {
-                  if (snap.connectionState == ConnectionState.waiting) {
+                  if (snap.connectionState == ConnectionState.waiting)
                     return const Center(child: CircularProgressIndicator());
-                  }
                   final list = snap.data ?? [];
-                  if (list.isEmpty) {
+
+                  if (list.isEmpty)
                     return const Center(
-                      child: Text('No delivery personnel available',
-                          style: TextStyle(color: Colors.white)),
-                    );
-                  }
-                  list.shuffle(Random());
-                  return ListView.builder(
-                    padding: const EdgeInsets.all(8),
+                        child: Text('No agents available right now 😴',
+                            style: TextStyle(color: Colors.white70)));
+
+                  list.shuffle();
+
+                  return GridView.builder(
+                    padding: const EdgeInsets.all(16),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 16,
+                      childAspectRatio: 0.85,
+                    ),
                     itemCount: list.length,
                     itemBuilder: (ctx, i) {
                       final person = list[i];
-                      return ListTile(
-                        title: Text(
-                          '${person['name']} (${person['gender']})',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                        trailing: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: themeColor,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8)),
-                          ),
-                          onPressed: () async {
-                            final phone = person['whatsapp_url']
-                                .toString()
-                                .replaceAll("https://wa.me/", "")
-                                .trim();
-                            final encodedMsg =
-                                Uri.encodeComponent(message.toString());
-                            final url = "https://wa.me/$phone?text=$encodedMsg";
-                            final uri = Uri.parse(url);
-                            if (await canLaunchUrl(uri)) {
-                              await launchUrl(uri,
-                                  mode: LaunchMode.platformDefault);
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                    content: Text('Unable to open WhatsApp.')),
-                              );
-                            }
-                          },
-                          child: const Text('Contact'),
+                      return GestureDetector(
+                        onTap: () => _sendOrderToAppChat(person, orderData),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CircleAvatar(
+                              radius: 36,
+                              backgroundColor: Colors.grey[800],
+                              backgroundImage: person['avatar_url'] != null
+                                  ? NetworkImage(person['avatar_url'])
+                                  : null,
+                              child: person['avatar_url'] == null
+                                  ? const Icon(Icons.delivery_dining,
+                                      color: Colors.white54, size: 30)
+                                  : null,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(person['username'] ?? 'Agent',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            if (person['gender'] != null)
+                              Text(person['gender'],
+                                  style: const TextStyle(
+                                      color: Colors.white54, fontSize: 11)),
+                          ],
                         ),
                       );
                     },
@@ -309,6 +302,58 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
         ),
       ),
     );
+  }
+
+  // --- UPDATED: Does NOT auto-send. Simply passes the order JSON! ---
+  // --- UPDATED: Safe version for non-cart screens ---
+  Future<void> _sendOrderToAppChat(
+      Map<String, dynamic> person, Map<String, dynamic> orderData) async {
+    try {
+      final myId = supabase.auth.currentUser!.id;
+      final agentId = person['id'];
+
+      showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => const Center(
+              child: CircularProgressIndicator(color: Color(0xFF4CAF50))));
+
+      final response = await supabase.rpc('get_or_create_personal_chat',
+          params: {'user_a': myId, 'user_b': agentId});
+      final chatId = response.toString();
+
+      final String orderJson = jsonEncode(orderData);
+
+      if (mounted) {
+        Navigator.pop(context); // Close loading dialog
+        Navigator.pop(context); // Close bottom sheet
+
+        // Passes the order into the chat screen as a pending order!
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => IndividualChatScreen(
+              chatId: chatId,
+              recipientProfile: {
+                'id': agentId,
+                'username': person['username'] ?? 'Delivery Agent',
+                'avatar_url': person['avatar_url'],
+                'school_name': widget.userPreferences.schoolName,
+                'is_group': false,
+                'pending_order': orderJson,
+              },
+              userPreferences: widget.userPreferences,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to route order.')));
+      }
+    }
   }
 
   // --- FILTER POPUP ---

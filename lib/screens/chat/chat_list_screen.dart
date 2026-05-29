@@ -266,9 +266,13 @@ class _ChatListScreenState extends State<ChatListScreen> {
         appBar: AppBar(
           backgroundColor: Colors.black,
           elevation: 0,
-          title: const Text('Messages',
-              style:
-                  TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          centerTitle: true,
+          iconTheme: const IconThemeData(color: Colors.white),
+          title: Image.asset(
+            'assets/images/chats.png', // <--- Your custom Chats PNG
+            height: 130,
+            fit: BoxFit.contain,
+          ),
         ),
         body: const Center(
             child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
@@ -318,9 +322,13 @@ class _ChatListScreenState extends State<ChatListScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         elevation: 0,
-        title: const Text('Messages',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        centerTitle: false,
+        centerTitle: true,
+        iconTheme: const IconThemeData(color: Colors.white),
+        title: Image.asset(
+          'assets/images/chats.png', // <--- Your custom Chats PNG
+          height: 100,
+          fit: BoxFit.contain,
+        ),
       ),
       body: SafeArea(
         child: Column(
@@ -352,7 +360,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   onValueChanged: (int? value) {
                     if (value != null) {
                       setState(() => _selectedTabIndex = value);
-                      // <--- ANIMATE PAGE VIEW ON TAP
                       _pageController.animateToPage(value,
                           duration: const Duration(milliseconds: 300),
                           curve: Curves.easeInOut);
@@ -365,7 +372,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
               child: PageView(
                 controller: _pageController,
                 onPageChanged: (index) {
-                  // <--- UPDATE TAB WHEN SWIPING
                   setState(() => _selectedTabIndex = index);
                 },
                 children: [
@@ -386,16 +392,24 @@ class _ChatListScreenState extends State<ChatListScreen> {
     );
   }
 
-  // --- NEW: Helper method to build lists for each page ---
   Widget _buildChatListForTab(int tabIndex) {
+    final searchText =
+        _searchController.text.toLowerCase(); // <--- Get search query
+
     final filteredChats = _chats.where((chat) {
       final isGroup = chat['is_group'] == true;
       final chatIdStr = chat['id'].toString();
-      final chatName = (chat['name'] ?? '').toString().toLowerCase();
-      final searchText = _searchController.text.toLowerCase();
 
-      if (searchText.isNotEmpty && !chatName.contains(searchText)) return false;
-      if (tabIndex == 2) return isGroup;
+      if (tabIndex == 2) {
+        if (!isGroup) return false;
+        // Group search filter
+        final chatName =
+            (chat['group_name'] ?? chat['name'] ?? '').toString().toLowerCase();
+        if (searchText.isNotEmpty && !chatName.contains(searchText))
+          return false;
+        return true;
+      }
+
       if (isGroup) return false;
 
       final otherParticipant = _allParticipants.firstWhere(
@@ -448,6 +462,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   myId: _myId!,
                   themeColor: themeColor,
                   userPreferences: widget.userPreferences,
+                  searchQuery:
+                      searchText, // <--- FIX: Passing search query to child tile
                 );
               },
             ),
@@ -485,6 +501,7 @@ class _ChatTile extends StatefulWidget {
   final String myId;
   final Color themeColor;
   final UserPreferences userPreferences;
+  final String searchQuery;
 
   const _ChatTile({
     super.key,
@@ -492,6 +509,7 @@ class _ChatTile extends StatefulWidget {
     required this.myId,
     required this.themeColor,
     required this.userPreferences,
+    this.searchQuery = '',
   });
 
   @override
@@ -529,7 +547,9 @@ class _ChatTileState extends State<_ChatTile> {
         if (mounted) {
           setState(() {
             _metaData = {
-              'title': widget.chat['group_name'] ?? "Group Chat",
+              'title': widget.chat['group_name'] ??
+                  widget.chat['name'] ??
+                  "Group Chat",
               'avatar_url': widget.chat['group_avatar'],
               'is_plus': false,
               'has_story': false,
@@ -547,52 +567,55 @@ class _ChatTileState extends State<_ChatTile> {
           .neq('user_id', widget.myId)
           .maybeSingle();
 
-      if (participantData == null) {
+      if (participantData == null) return;
+      _targetUserId = participantData['user_id'] ?? '';
+
+      // --- NEW: LOAD CACHED PROFILE DATA INSTANTLY ---
+      final prefs = await SharedPreferences.getInstance();
+      final cachedProfile = prefs.getString('profile_cache_$_targetUserId');
+      if (cachedProfile != null) {
         if (mounted) {
           setState(() {
-            _metaData = {
-              'title': "Unknown User",
-              'avatar_url': null,
-              'is_plus': false,
-              'has_story': false
-            };
+            _metaData = jsonDecode(cachedProfile);
             _isLoadingMeta = false;
           });
         }
-        return;
       }
 
-      _targetUserId = participantData['user_id'] ?? '';
-
+      // FETCH FRESH DATA FROM NETWORK
       final profileData = await supabase
           .from('profiles')
           .select('username, avatar_url, school_name, subscription_tier')
           .eq('id', _targetUserId)
           .maybeSingle();
 
-      final DateTime yesterday =
-          DateTime.now().subtract(const Duration(hours: 24));
       final storyCheck = await supabase
           .from('stories')
           .select('id')
           .eq('user_id', _targetUserId)
-          .gte('created_at', yesterday.toIso8601String())
+          .gt('expires_at', DateTime.now().toUtc().toIso8601String())
           .limit(1);
+
+      final newMeta = {
+        'title': profileData?['username'] ?? "User",
+        'avatar_url': profileData?['avatar_url'],
+        'school_name': profileData?['school_name'],
+        'is_plus': profileData?['subscription_tier'] == 'Membership',
+        'has_story': storyCheck.isNotEmpty,
+      };
+
+      // SAVE TO CACHE & UPDATE UI
+      await prefs.setString(
+          'profile_cache_$_targetUserId', jsonEncode(newMeta));
 
       if (mounted) {
         setState(() {
-          _metaData = {
-            'title': profileData?['username'] ?? "User",
-            'avatar_url': profileData?['avatar_url'],
-            'school_name': profileData?['school_name'],
-            'is_plus': profileData?['subscription_tier'] == 'Membership',
-            'has_story': storyCheck.isNotEmpty,
-          };
+          _metaData = newMeta;
           _isLoadingMeta = false;
         });
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && _metaData == null) {
         setState(() {
           _metaData = {
             'title': "Chat",
@@ -611,7 +634,7 @@ class _ChatTileState extends State<_ChatTile> {
     final response = await supabase
         .from('stories')
         .select(
-            'id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)')
+            'id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)') // <-- Added user_id here
         .eq('user_id', _targetUserId)
         .gt('expires_at', DateTime.now().toUtc().toIso8601String())
         .order('created_at', ascending: true);
@@ -667,6 +690,13 @@ class _ChatTileState extends State<_ChatTile> {
     }
 
     final title = _metaData?['title'] ?? "Chat";
+
+    // <--- FIX: This dynamically hides the chat if the search query doesn't match the username!
+    if (widget.searchQuery.isNotEmpty &&
+        !title.toLowerCase().contains(widget.searchQuery)) {
+      return const SizedBox.shrink();
+    }
+
     final avatarUrl = _metaData?['avatar_url'];
     final chatId = widget.chat['id'];
     final hasStory = _metaData?['has_story'] == true;
@@ -751,8 +781,8 @@ class _ChatTileState extends State<_ChatTile> {
                   decoration: hasStory
                       ? BoxDecoration(
                           shape: BoxShape.circle,
-                          border:
-                              Border.all(color: widget.themeColor, width: 2),
+                          border: Border.all(
+                              color: widget.themeColor, width: 2), // Story Ring
                         )
                       : null,
                   child: CircleAvatar(

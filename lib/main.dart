@@ -1,6 +1,7 @@
 // lib/main.dart
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'package:allowance/screens/introduction/reset_password_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -88,14 +89,23 @@ class _AllowanceAppState extends State<AllowanceApp> {
   }
 
   void _handleDeepLink(Uri uri) {
-    // If link is allowanceapp.org/gist/123
+    // 1. Handle regular gist link routing
     if (uri.pathSegments.contains('gist')) {
       final gistId = uri.pathSegments.last;
-
-      // Delay slightly to ensure Navigator is mounted during a cold start
       Future.delayed(const Duration(milliseconds: 500), () {
         navigatorKey.currentState
             ?.pushNamed('/gist', arguments: {'id': gistId});
+      });
+      return;
+    }
+
+    // 2. Handle Reset Password deep-link routing
+    if (uri.host == 'reset-password' ||
+        uri.pathSegments.contains('reset-password')) {
+      Future.delayed(const Duration(milliseconds: 500), () {
+        navigatorKey.currentState?.push(
+          MaterialPageRoute(builder: (_) => const ResetPasswordScreen()),
+        );
       });
     }
   }
@@ -112,6 +122,16 @@ class _AllowanceAppState extends State<AllowanceApp> {
       _authSub = Supabase.instance.client.auth.onAuthStateChange
           .listen((authState) async {
         final session = authState.session;
+        final event = authState.event; // <-- ADDED: Track event type
+
+        // --- NEW: Intercept Password Recovery and Route to ResetPasswordScreen ---
+        if (event == AuthChangeEvent.passwordRecovery) {
+          navigatorKey.currentState?.push(
+            MaterialPageRoute(builder: (_) => const ResetPasswordScreen()),
+          );
+          return;
+        }
+
         // ignore: unnecessary_null_comparison
         if (session != null && session.user != null) {
           await _userPreferences.loadPreferences();

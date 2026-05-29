@@ -1,17 +1,21 @@
 // lib/screens/chat/individual_chat_screen.dart
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:allowance/models/user_preferences.dart';
+import 'package:allowance/screens/chat/chat_room_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/shared/services/fcm_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
@@ -37,37 +41,229 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   final supabase = Supabase.instance.client;
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final FocusNode _focusNode = FocusNode(); // <--- KEEPS KEYBOARD STABLE
 
   bool _isTyping = false;
   Timer? _typingTimer;
   bool _remoteUserIsTyping = false;
   bool _isFollowing = false;
   Map<String, dynamic>? _replyMessage;
-  final bool _showScrollToBottom = false;
+  bool _showScrollToBottom = false; // <-- REMOVED "final"
+
   // For file/media logic
   final Map<String, Color> _userColors = {};
-  final Map<String, GlobalKey> _messageKeys = {};
   String? _highlightedMessageId;
+  Map<String, dynamic>? _pendingOrder;
+  List<Map<String, dynamic>> _messages = [];
+  StreamSubscription? _msgSub;
 
-  // FIX: Declare the stream here
-  late final Stream<List<Map<String, dynamic>>> _messageStream;
+  // (Deleted the unused _messageStream entirely)
 
   @override
   void initState() {
     super.initState();
-    activeChatId = widget.chatId; // <--- TELLS THE APP WE ARE IN THIS CHAT
+    activeChatId = widget.chatId;
+
+    // --- NEW: Catch Pending Orders ---
+    // --- FIX: Catch Pending Orders cleanly on Web ---
+    final po = widget.recipientProfile['pending_order'];
+    if (po != null) {
+      try {
+        // On web, it might already be parsed into a map by Flutter!
+        _pendingOrder = po is String ? jsonDecode(po) : po;
+      } catch (e) {
+        debugPrint('Error parsing order: $e');
+      }
+    }
+
     _setupMessageStream();
     _setupTypingListener();
     _checkFollowStatus();
     _markMessagesAsRead();
   }
 
-  void _setupMessageStream() {
-    _messageStream = supabase
+  // --- NEW: Order Preview Attachment ---
+  Widget _buildOrderPreview() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF4CAF50).withOpacity(0.15),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+        border: Border.all(color: const Color(0xFF4CAF50), width: 1),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.fastfood, color: Color(0xFF4CAF50), size: 30),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Order Attached',
+                    style: TextStyle(
+                        color: Color(0xFF4CAF50),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14)),
+                Text('From ${_pendingOrder!['vendor']}',
+                    style:
+                        const TextStyle(color: Colors.white70, fontSize: 12)),
+              ],
+            ),
+          ),
+          GestureDetector(
+            onTap: () => setState(() => _pendingOrder = null),
+            child: const Icon(Icons.close, color: Colors.white54),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- NEW: Stunnning Green Order Card in Chat ---
+  // --- UPDATED: Stunnning Green Order Card with Timestamps ---
+  Widget _buildOrderCard(
+      String jsonStr, String timeStr, bool isMe, bool isRead) {
+    try {
+      // --- FIX: Safely decode strings vs maps for Web ---
+      final data = jsonStr is String ? jsonDecode(jsonStr) : jsonStr;
+      final vendor = data['vendor'] ?? 'Vendor';
+      final items = data['items'] as List<dynamic>? ?? [];
+      final total = data['total'] ?? '0';
+
+      return Container(
+        width: 260,
+        decoration: BoxDecoration(
+          color: Colors.grey[850],
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+              color: const Color(0xFF4CAF50).withOpacity(0.4), width: 1.5),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: const BoxDecoration(
+                color: Color(0xFF4CAF50),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.receipt_long, color: Colors.black, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      vendor,
+                      style: const TextStyle(
+                          color: Colors.black,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ...items.map((item) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${item['qty']}x ',
+                                style: const TextStyle(
+                                    color: Color(0xFF4CAF50),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14)),
+                            Expanded(
+                                child: Text('${item['name']}',
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 14))),
+                            Text('₦${item['price']}',
+                                style: const TextStyle(
+                                    color: Colors.white70, fontSize: 14)),
+                          ],
+                        ),
+                      )),
+                  const Divider(color: Colors.white24, height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('TOTAL',
+                          style: TextStyle(
+                              color: Colors.white54,
+                              fontWeight: FontWeight.bold)),
+                      Text('₦$total',
+                          style: const TextStyle(
+                              color: Color(0xFF4CAF50),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  // --- NEW: TIME AND READ RECEIPT FOR ORDER CARD ---
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      Text(
+                        timeStr,
+                        style: const TextStyle(
+                            color: Colors.white60, fontSize: 10),
+                      ),
+                      if (isMe) ...[
+                        const SizedBox(width: 4),
+                        Icon(
+                          isRead ? Icons.done_all : Icons.done,
+                          size: 14,
+                          color: isRead ? Colors.blue : Colors.white60,
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      return const Padding(
+          padding: EdgeInsets.all(8.0),
+          child:
+              Text('Invalid Order Data', style: TextStyle(color: Colors.red)));
+    }
+  }
+
+  Future<void> _setupMessageStream() async {
+    // 1. Instantly load messages from local cache!
+    final prefs = await SharedPreferences.getInstance();
+    final cachedMsgs = prefs.getString('msgs_${widget.chatId}');
+    if (cachedMsgs != null && mounted) {
+      setState(() {
+        _messages = List<Map<String, dynamic>>.from(jsonDecode(cachedMsgs));
+      });
+    }
+
+    // 2. Listen to Supabase silently in the background
+    _msgSub = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
         .eq('chat_id', widget.chatId)
-        .order('created_at', ascending: false);
+        .order('created_at', ascending: false)
+        .listen((data) {
+          if (mounted) {
+            setState(() => _messages = data);
+          }
+          // Update cache with fresh data
+          prefs.setString('msgs_${widget.chatId}', jsonEncode(data));
+        });
   }
 
   Future<void> _markMessagesAsRead() async {
@@ -190,13 +386,16 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       {String? mediaUrl, String? type, String? thumbUrl, int? size}) async {
     final text = _messageController.text.trim();
     final myId = supabase.auth.currentUser?.id;
-    if (myId == null || (text.isEmpty && mediaUrl == null)) return;
+
+    if (myId == null ||
+        (text.isEmpty && mediaUrl == null && _pendingOrder == null)) return;
 
     final replyId = _replyMessage?['id'];
     String replySummary = 'Original message';
     if (_replyMessage != null) {
       if (_replyMessage!['content']?.toString().isNotEmpty == true &&
-          !_replyMessage!['content'].toString().contains('📸')) {
+          !_replyMessage!['content'].toString().contains('📸') &&
+          !_replyMessage!['content'].toString().contains('🎥')) {
         replySummary = _replyMessage!['content'];
       } else {
         replySummary =
@@ -205,56 +404,131 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     }
 
     final currentReply = _replyMessage;
+    final currentOrder = _pendingOrder;
+
     _messageController.clear();
-    setState(() => _replyMessage = null);
+    _focusNode.requestFocus();
+    setState(() {
+      _replyMessage = null;
+      _pendingOrder = null;
+    });
+
+    // --- OPTIMISTIC UI: INSTANT SPEED OVERRIDE ---
+    if (currentOrder != null) {
+      setState(() {
+        _messages.insert(0, {
+          'id': DateTime.now().millisecondsSinceEpoch,
+          'chat_id': widget.chatId,
+          'sender_id': myId,
+          'content': jsonEncode(currentOrder),
+          'media_type': 'order',
+          'is_read': false,
+          'created_at': DateTime.now().toUtc().toIso8601String(),
+        });
+      });
+    }
+
+    if (text.isNotEmpty || mediaUrl != null) {
+      setState(() {
+        _messages.insert(0, {
+          'id': DateTime.now().millisecondsSinceEpoch,
+          'chat_id': widget.chatId,
+          'sender_id': myId,
+          'content': text.isNotEmpty
+              ? text
+              : (type == 'image'
+                  ? '📸 Photo'
+                  : (type == 'video' ? '🎥 Video' : '')),
+          'is_read': false,
+          'media_url': mediaUrl,
+          'media_type': type ?? 'text',
+          'thumbnail_url': thumbUrl,
+          'file_size_bytes': size,
+          'created_at': DateTime.now().toUtc().toIso8601String(),
+          if (replyId != null) 'reply_to_id': replyId,
+          if (replyId != null) 'reply_content': replySummary,
+        });
+      });
+    }
+    // ---------------------------------------------
 
     try {
-      final payload = {
-        'chat_id': widget.chatId,
-        'sender_id': myId,
-        'content': text.isNotEmpty
-            ? text
-            : (type == 'image'
-                ? '📸 Photo'
-                : (type == 'video' ? '🎥 Video' : '')),
-        'is_read': false,
-        'reply_to_id': replyId,
-        'reply_content': replyId != null ? replySummary : null,
-        'media_url': mediaUrl,
-        'media_type': type,
-        'thumbnail_url': thumbUrl,
-        'file_size_bytes': size,
-      };
+      if (currentOrder != null) {
+        await supabase.from('messages').insert({
+          'chat_id': widget.chatId,
+          'sender_id': myId,
+          'content': jsonEncode(currentOrder),
+          'media_type': 'order',
+          'is_read': false,
+        });
+      }
 
-      await supabase.from('messages').insert(payload);
-      await supabase
-          .from('chats')
-          .update({'updated_at': DateTime.now().toIso8601String()}).eq(
-              'id', widget.chatId);
+      if (text.isNotEmpty || mediaUrl != null) {
+        final Map<String, dynamic> payload = {
+          'chat_id': widget.chatId,
+          'sender_id': myId,
+          'content': text.isNotEmpty
+              ? text
+              : (type == 'image'
+                  ? '📸 Photo'
+                  : (type == 'video' ? '🎥 Video' : '')),
+          'is_read': false,
+          'media_url': mediaUrl,
+          'media_type': type ?? 'text',
+          'thumbnail_url': thumbUrl,
+          'file_size_bytes': size,
+        };
 
-      // Update chat's last activity
+        if (replyId != null) {
+          payload['reply_to_id'] = replyId;
+          payload['reply_content'] = replySummary;
+        }
+
+        await supabase.from('messages').insert(payload);
+      }
+
       await supabase.from('chats').update({
         'updated_at': DateTime.now().toUtc().toIso8601String(),
-        'last_message':
-            text.isNotEmpty ? text : (type == 'image' ? 'Photo' : 'Video'),
       }).eq('id', widget.chatId);
     } catch (e) {
       debugPrint('Send error: $e');
-      setState(() => _replyMessage = currentReply);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Failed to send: $e'), backgroundColor: Colors.red));
+        setState(() {
+          _replyMessage = currentReply;
+          _pendingOrder = currentOrder;
+        });
+      }
     }
   }
 
+  // --- ADD THIS MISSING SCROLL LISTENER ---
+  void _scrollListener() {
+    if (!_scrollController.hasClients) return; // <-- Prevents layout crashes
+    if (_scrollController.offset >= 300 && !_showScrollToBottom) {
+      setState(() => _showScrollToBottom = true);
+    } else if (_scrollController.offset < 300 && _showScrollToBottom) {
+      setState(() => _showScrollToBottom = false);
+    }
+  }
+
+  // --- REPLACE YOUR DISPOSE METHOD WITH THIS (Fixed errors) ---
   @override
   void dispose() {
     if (activeChatId == widget.chatId) {
-      activeChatId = null; // <--- CLEARS IT WHEN WE LEAVE
+      activeChatId = null;
     }
+    _scrollController.removeListener(_scrollListener);
+    _msgSub?.cancel();
     _typingTimer?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
+  // --- REPLACE YOUR BUILD METHOD WITH THIS (Uses cached _messages) ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -264,60 +538,64 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         child: Column(
           children: [
             Expanded(
-              // <--- THE STACK IS NOW SAFELY INSIDE THE EXPANDED WIDGET
               child: Stack(
                 children: [
-                  StreamBuilder<List<Map<String, dynamic>>>(
-                    stream: _messageStream,
-                    builder: (context, snapshot) {
-                      if (!snapshot.hasData) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-                      final messages = snapshot.data!;
-                      return ListView.builder(
-                        controller: _scrollController,
-                        reverse: true,
-                        padding: const EdgeInsets.all(12),
-                        itemCount: messages.length,
-                        itemBuilder: (context, index) {
-                          final msg = messages[index];
-                          final date =
-                              DateTime.parse(msg['created_at']).toLocal();
-                          bool showDateHeader = false;
-                          if (index == messages.length - 1) {
-                            showDateHeader = true;
-                          } else {
-                            final prevDate = DateTime.parse(
-                                    messages[index + 1]['created_at'])
-                                .toLocal();
-                            if (date.day != prevDate.day ||
-                                date.year != prevDate.year) {
+                  _messages.isEmpty
+                      ? const Center(
+                          child: Text(
+                            "Send a message to start chatting!",
+                            style: TextStyle(color: Colors.white54),
+                          ),
+                        )
+                      : ListView.builder(
+                          controller: _scrollController,
+                          reverse: true,
+                          cacheExtent: 2000,
+                          addRepaintBoundaries:
+                              true, // Cache render layer compilations on GPU
+                          addAutomaticKeepAlives: true, // Retain state memory
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
+                          padding: const EdgeInsets.all(12),
+                          itemCount: _messages.length,
+                          itemBuilder: (context, index) {
+                            final msg = _messages[index];
+                            final date =
+                                DateTime.parse(msg['created_at']).toLocal();
+                            bool showDateHeader = false;
+
+                            if (index == _messages.length - 1) {
                               showDateHeader = true;
+                            } else {
+                              final prevDate = DateTime.parse(
+                                      _messages[index + 1]['created_at'])
+                                  .toLocal();
+                              if (date.day != prevDate.day ||
+                                  date.year != prevDate.year) {
+                                showDateHeader = true;
+                              }
                             }
-                          }
-                          return Column(
-                            children: [
-                              if (showDateHeader)
-                                Padding(
-                                  padding:
-                                      const EdgeInsets.symmetric(vertical: 16),
-                                  child: Center(
-                                    child: Text(_getDateLabel(date),
-                                        style: const TextStyle(
-                                            color: Colors.white54,
-                                            fontSize: 12)),
+                            return Column(
+                              children: [
+                                if (showDateHeader)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    child: Center(
+                                      child: Text(_getDateLabel(date),
+                                          style: const TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 12)),
+                                    ),
                                   ),
-                                ),
-                              _buildBubble(messages, index),
-                            ],
-                          );
-                        },
-                      );
-                    },
-                  ),
+                                _buildBubble(_messages, index),
+                              ],
+                            );
+                          },
+                        ),
                   if (_showScrollToBottom)
                     Positioned(
-                      bottom: 16, // Adjusted bottom padding
+                      bottom: 16,
                       right: 16,
                       child: FloatingActionButton.small(
                         backgroundColor: const Color(0xFF202C33),
@@ -331,7 +609,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                 ],
               ),
             ),
-            // Input Bar is now securely anchored at the bottom
             _buildInputBar(),
           ],
         ),
@@ -414,11 +691,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         color: Colors.black,
         border: Border(top: BorderSide(color: Colors.grey[900]!)),
       ),
-      // <--- REMOVED INNER SAFEAREA (Prevented it from anchoring properly)
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (_replyMessage != null) _buildReplyPreview(),
+          if (_pendingOrder != null) _buildOrderPreview(),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
@@ -427,12 +704,41 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                 onPressed: _showPlusOptions,
               ),
               Expanded(
+                // OUTSIDE THE BOX FIX: Removed the buggy Focus(onKeyEvent:) wrapper!
+                // Let Flutter's native keyboard handler do its job.
                 child: TextField(
                   controller: _messageController,
-                  onChanged: _handleTyping,
+                  focusNode: _focusNode,
                   style: const TextStyle(color: Colors.white),
                   maxLines: 5,
                   minLines: 1,
+                  textInputAction: TextInputAction
+                      .send, // <-- Native Send button on keyboard
+                  keyboardType: TextInputType.multiline,
+                  onSubmitted: (_) =>
+                      _sendMessage(), // <-- Fires message on Enter
+                  onChanged: (val) {
+                    // Start typing logic without forcing the WHOLE chat list to rebuild
+                    if (!_isTyping && val.isNotEmpty) {
+                      _isTyping = true;
+                      supabase
+                          .from('chat_participants')
+                          .update({'is_typing': true}).match({
+                        'chat_id': widget.chatId,
+                        'user_id': supabase.auth.currentUser!.id,
+                      });
+                    }
+                    _typingTimer?.cancel();
+                    _typingTimer = Timer(const Duration(seconds: 2), () {
+                      _isTyping = false;
+                      supabase
+                          .from('chat_participants')
+                          .update({'is_typing': false}).match({
+                        'chat_id': widget.chatId,
+                        'user_id': supabase.auth.currentUser!.id,
+                      });
+                    });
+                  },
                   decoration: InputDecoration(
                     hintText: 'Message...',
                     hintStyle: const TextStyle(color: Colors.white54),
@@ -447,10 +753,20 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                   ),
                 ),
               ),
-              IconButton(
-                icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
-                onPressed: _sendMessage,
-              ),
+              // OUTSIDE THE BOX FIX: Only rebuild the SEND button when text changes, NOT the chat history!
+              ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: _messageController,
+                  builder: (context, value, child) {
+                    return IconButton(
+                      icon: Icon(Icons.send,
+                          color: value.text.trim().isNotEmpty
+                              ? const Color(0xFF4CAF50)
+                              : Colors.grey),
+                      onPressed: value.text.trim().isNotEmpty
+                          ? () => _sendMessage()
+                          : null,
+                    );
+                  }),
             ],
           ),
         ],
@@ -464,6 +780,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     return AppBar(
       backgroundColor: Colors.grey[900],
       titleSpacing: 0,
+      iconTheme: const IconThemeData(
+          color: Colors.white), // <--- FIX: White back button
       title: GestureDetector(
         onTap: () {
           if (!isGroup) {
@@ -535,68 +853,197 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
+  // --- NEW: MESSAGE OPTIONS (EDIT / DELETE) ---
+  void _showMessageOptions(Map<String, dynamic> message, bool isMe) {
+    final createdAt = DateTime.parse(message['created_at']).toLocal();
+    final canEdit = DateTime.now().difference(createdAt).inMinutes <= 5;
+    final isText = message['media_url'] == null &&
+        (message['media_type'] == 'text' || message['media_type'] == null);
+    final hasContent = message['content'] != null &&
+        message['content'].toString().trim().isNotEmpty;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // --- NEW: COPY TEXT BUTTON (AVAILABLE TO EVERYONE) ---
+          if (hasContent)
+            ListTile(
+              leading: const Icon(Icons.copy, color: Colors.white),
+              title: const Text('Copy Text',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(ctx);
+                Clipboard.setData(ClipboardData(text: message['content']));
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Copied to clipboard')));
+              },
+            ),
+
+          if (isMe && canEdit && isText)
+            ListTile(
+              leading: const Icon(Icons.edit, color: Colors.white),
+              title: const Text('Edit Message',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showEditDialog(message);
+              },
+            ),
+          if (isMe)
+            ListTile(
+              leading: const Icon(Icons.delete, color: Colors.redAccent),
+              title: const Text('Delete Message',
+                  style: TextStyle(color: Colors.redAccent)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _deleteMessage(message['id']);
+              },
+            ),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+
+  void _showEditDialog(Map<String, dynamic> message) {
+    final editController = TextEditingController(text: message['content']);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title:
+            const Text('Edit Message', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: editController,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'Enter new message',
+            hintStyle: TextStyle(color: Colors.white54),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child:
+                const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () async {
+              final newText = editController.text.trim();
+              if (newText.isNotEmpty && newText != message['content']) {
+                await supabase
+                    .from('messages')
+                    .update({'content': newText}).eq('id', message['id']);
+              }
+              if (mounted) Navigator.pop(ctx);
+            },
+            child: const Text('Save',
+                style: TextStyle(
+                    color: Color(0xFF4CAF50), fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _deleteMessage(dynamic messageId) async {
+    try {
+      await supabase.from('messages').delete().eq('id', messageId);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to delete message')));
+      }
+    }
+  }
+
   Widget _buildBubble(List<Map<String, dynamic>> messages, int index) {
     final message = messages[index];
     final messageId = message['id'].toString();
-    // Register a key for this specific message for scrolling
-    _messageKeys.putIfAbsent(messageId, () => GlobalKey());
 
     final isMe = message['sender_id'] == supabase.auth.currentUser!.id;
-    final content = message['content'] ?? '';
+    final content = (message['content'] ?? '').toString();
     final timeStr = _formatTime(message['created_at']);
     final isRead = message['is_read'] == true;
-    final hasMedia = message['media_url'] != null;
 
-    // Check if this specific message should be highlighted
+    final hasMedia = message['media_url'] != null;
+    final mediaType = message['media_type']?.toString() ?? 'text';
+    final isFile = mediaType == 'file';
+    final isOrder = mediaType == 'order';
+
     final bool isHighlighted = _highlightedMessageId == messageId;
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 600), // Smooth fade transition
-      color: isHighlighted
-          ? const Color(0xFF4CAF50).withOpacity(0.3)
-          : Colors.transparent,
-      child: Dismissible(
-        key: Key('dismiss_$messageId'),
-        direction: DismissDirection.startToEnd,
-        confirmDismiss: (_) {
-          HapticFeedback.lightImpact();
-          setState(() => _replyMessage = message);
-          return Future.value(false);
-        },
-        background: Container(
-          alignment: Alignment.centerLeft,
-          padding: const EdgeInsets.only(left: 20),
-          child: const Icon(Icons.reply, color: Color(0xFF4CAF50)),
+    // OUTSIDE THE BOX: Read physical dimensions directly from the platform view.
+    // This bypasses the InheritedWidget subscription, stopping keyboard resizes from rebuilding the bubbles.
+    final view = View.of(context);
+    final hardwareWidth = view.physicalSize.width / view.devicePixelRatio;
+
+    return RepaintBoundary(
+      // Caches painted pixels on the GPU
+      child: Container(
+        // Changed from AnimatedContainer to standard Container to stop layout engine thrashing
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        decoration: BoxDecoration(
+          color: isHighlighted
+              ? const Color(0xFF4CAF50).withOpacity(0.3)
+              : Colors.transparent,
         ),
-        child: Align(
-          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-          child: Container(
-            key: _messageKeys[messageId], // Attach the scroll key here!
-            margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-            constraints: BoxConstraints(
-                maxWidth: MediaQuery.of(context).size.width * 0.75),
-            decoration: BoxDecoration(
-              color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
-              borderRadius: BorderRadius.circular(16).copyWith(
-                bottomRight: isMe ? Radius.zero : const Radius.circular(16),
-                bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
-              ),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (message['reply_to_id'] != null ||
-                      (message['reply_content']?.startsWith('Story_') ?? false))
-                    _buildReplyInsideBubble(message),
-                  if (hasMedia)
-                    _buildMediaSection(message, isMe, isRead, timeStr),
-                  if (content.toString().isNotEmpty &&
-                      content != '📸 Photo' &&
-                      content != '🎥 Video')
-                    _buildTextAndTimestamp(content, timeStr, isMe, isRead),
-                ],
+        child: Dismissible(
+          key: Key('dismiss_$messageId'),
+          direction: DismissDirection.startToEnd,
+          confirmDismiss: (_) {
+            HapticFeedback.lightImpact();
+            setState(() => _replyMessage = message);
+            return Future.value(false);
+          },
+          background: Container(
+            alignment: Alignment.centerLeft,
+            padding: const EdgeInsets.only(left: 20),
+            child: const Icon(Icons.reply, color: Color(0xFF4CAF50)),
+          ),
+          child: Align(
+            alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+            child: GestureDetector(
+              onLongPress: () => _showMessageOptions(message, isMe),
+              child: Container(
+                key: ValueKey(messageId),
+                margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                constraints: BoxConstraints(
+                    maxWidth: hardwareWidth * 0.75), // Safe non-reactive width
+                decoration: BoxDecoration(
+                  color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
+                  borderRadius: BorderRadius.circular(16).copyWith(
+                    bottomRight: isMe ? Radius.zero : const Radius.circular(16),
+                    bottomLeft: isMe ? const Radius.circular(16) : Radius.zero,
+                  ),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (isOrder)
+                        _buildOrderCard(content, timeStr, isMe, isRead),
+                      if (message['reply_to_id'] != null ||
+                          (message['reply_content']?.startsWith('Story_') ??
+                              false))
+                        _buildReplyInsideBubble(message),
+                      if (hasMedia)
+                        _buildMediaSection(message, isMe, isRead, timeStr),
+                      if (!isOrder &&
+                          !isFile &&
+                          content.isNotEmpty &&
+                          content != '📸 Photo' &&
+                          content != '🎥 Video')
+                        _buildTextAndTimestamp(content, timeStr, isMe, isRead),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -690,10 +1137,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     final String replyContent = message['reply_content'] ?? '';
 
     if (replyContent.startsWith('Story_')) {
-      // 1. It's a Story! Extract the ID
       final storyId = replyContent.split('_')[1];
 
-      // Fetch the single story from Supabase before opening
       final response = await supabase
           .from('stories')
           .select('*, profiles:user_id(username, avatar_url, school_name)')
@@ -702,54 +1147,46 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
       if (response != null && mounted) {
         Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => StoryViewerScreen(
-              stories: [response],
-              initialIndex: 0,
-              userPreferences: widget.userPreferences,
-              storyId: storyId,
-            ),
-          ),
-        );
+            context,
+            MaterialPageRoute(
+                builder: (_) => StoryViewerScreen(
+                    stories: [response],
+                    initialIndex: 0,
+                    userPreferences: widget.userPreferences,
+                    storyId: storyId)));
       } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Story is no longer available.'),
             backgroundColor: Colors.black87,
-            duration: Duration(seconds: 2),
-          ),
-        );
+            duration: Duration(seconds: 2)));
       }
     } else if (message['reply_to_id'] != null) {
-      // 2. It's a Chat Message! Find its key and scroll to it.
       final targetId = message['reply_to_id'].toString();
-      final key = _messageKeys[targetId];
 
-      // Trigger the WhatsApp-style visual highlight
+      // WhatsApp-style visual highlight
       setState(() => _highlightedMessageId = targetId);
-
-      // Remove highlight after 1.5 seconds
       Future.delayed(const Duration(milliseconds: 1500), () {
         if (mounted) setState(() => _highlightedMessageId = null);
       });
 
-      if (key != null && key.currentContext != null) {
-        Scrollable.ensureVisible(
-          key.currentContext!,
-          duration: const Duration(milliseconds: 300),
+      // --- FIX: ULTRA-FAST SCROLL CALCULATION (NO GLOBAL KEYS) ---
+      final targetIndex =
+          _messages.indexWhere((m) => m['id'].toString() == targetId);
+
+      if (targetIndex != -1) {
+        // We use the index to estimate the position and scroll down smoothly.
+        final estimatedOffset = targetIndex * 80.0;
+
+        _scrollController.animateTo(
+          estimatedOffset,
+          duration: const Duration(milliseconds: 400),
           curve: Curves.easeInOut,
-          alignment: 0.5, // 0.5 places the message right in the middle
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-                'Message is too far back. Scroll up to load older messages.'),
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Message is too far back to scroll to.'),
             backgroundColor: Colors.black87,
-            duration: Duration(seconds: 2),
-          ),
-        );
+            duration: Duration(seconds: 2)));
       }
     }
   }
@@ -759,61 +1196,102 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     final isVideo = message['media_type'] == 'video';
     final isFile = message['media_type'] == 'file';
 
-    // NEW: Handle Files
+    final String? mediaUrlStr = message['media_url']?.toString();
+    final List<String> mediaUrls = mediaUrlStr != null && mediaUrlStr.isNotEmpty
+        ? mediaUrlStr.split(',')
+        : [];
+
+    // --- Handle Files (Tap to open in external app/browser) ---
     if (isFile) {
-      return Container(
-        margin: const EdgeInsets.all(4),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-            color: Colors.black26, borderRadius: BorderRadius.circular(8)),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.insert_drive_file, color: Colors.white, size: 30),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                message['content'] ?? 'Document',
-                style: const TextStyle(
-                    color: Colors.white, fontWeight: FontWeight.bold),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+      return GestureDetector(
+        onTap: () async {
+          if (mediaUrls.isNotEmpty) {
+            final uri = Uri.parse(mediaUrls.first);
+            if (await canLaunchUrl(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            } else {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Could not open file')));
+              }
+            }
+          }
+        },
+        child: Container(
+          margin: const EdgeInsets.all(4),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+              color: Colors.black26, borderRadius: BorderRadius.circular(8)),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.insert_drive_file,
+                  color: Colors.blueAccent, size: 30),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  message['content'] ?? 'Document',
+                  style: const TextStyle(
+                    color: Colors.blueAccent,
+                    fontWeight: FontWeight.bold,
+                    decoration: TextDecoration.underline,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       );
     }
 
-    // FIX: Handles multiple images sent at once without crashing!
+    // --- Handle Images/Videos (Tap to Expand to Fullscreen!) ---
     final rawUrl =
         (message['thumbnail_url'] ?? message['media_url']).toString();
     final firstUrl = rawUrl.split(',').first;
 
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        CachedNetworkImage(
-          imageUrl: firstUrl,
-          fit: BoxFit.cover,
-          width: double.infinity,
-          height: 200,
-          placeholder: (context, url) =>
-              Container(color: Colors.white10, height: 200),
-          errorWidget: (context, url, error) => Container(
-              color: Colors.white10,
-              height: 200,
-              child: const Icon(Icons.broken_image, color: Colors.white54)),
-        ),
-        if (isVideo)
-          const CircleAvatar(
-            backgroundColor: Colors.black54,
-            child: Icon(Icons.play_arrow, color: Colors.white),
+    return GestureDetector(
+      onTap: () {
+        if (mediaUrls.isNotEmpty) {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => FullScreenMediaPlayer(
+                mediaUrls: mediaUrls,
+                mediaType: message['media_type'] ?? 'image',
+                initialIndex: 0,
+              ),
+            ),
+          );
+        }
+      },
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CachedNetworkImage(
+            imageUrl: firstUrl,
+            fit: BoxFit.cover,
+            width: double.infinity,
+            height: 200,
+            placeholder: (context, url) =>
+                Container(color: Colors.white10, height: 200),
+            errorWidget: (context, url, error) => Container(
+                color: Colors.white10,
+                height: 200,
+                child: const Icon(Icons.broken_image, color: Colors.white54)),
           ),
-      ],
+          if (isVideo)
+            const CircleAvatar(
+              backgroundColor: Colors.black54,
+              child: Icon(Icons.play_arrow, color: Colors.white),
+            ),
+        ],
+      ),
     );
   }
 
+  // --- UPDATED: Text colors dynamically change based on isMe ---
   Widget _buildTextAndTimestamp(
       String content, String timeStr, bool isMe, bool isRead) {
     return Padding(
@@ -823,11 +1301,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         crossAxisAlignment: WrapCrossAlignment.end,
         spacing: 8,
         children: [
-          Linkify(
+          CachedLinkify(
+            // <-- SWAPPED FOR HIGH-SPEED RENDERER
             onOpen: (link) async {
               final String urlString = link.url;
 
-              // 1. INTERCEPT ALLOWANCE GIST LINKS USING NEW DOMAIN!
               if (urlString.contains('allowanceapp.org/gist/')) {
                 final gistId = urlString.split('/').last;
                 Navigator.pushNamed(context, '/gist',
@@ -835,17 +1313,21 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                 return;
               }
 
-              // 2. Open normal links in browser
               final Uri url = Uri.parse(urlString);
               if (await canLaunchUrl(url)) {
                 await launchUrl(url, mode: LaunchMode.externalApplication);
               }
             },
             text: content,
-            style: const TextStyle(color: Colors.white, fontSize: 16),
-            linkStyle: const TextStyle(
-              color: Color(0xFF53BDEB),
+            style: TextStyle(
+              color: isMe ? Colors.black : Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+            ),
+            linkStyle: TextStyle(
+              color: isMe ? Colors.black87 : const Color(0xFF53BDEB),
               decoration: TextDecoration.underline,
+              fontWeight: FontWeight.w500,
             ),
           ),
           Row(
@@ -853,14 +1335,18 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
             children: [
               Text(
                 timeStr,
-                style: const TextStyle(color: Colors.white60, fontSize: 10),
+                style: TextStyle(
+                  color: isMe ? Colors.black54 : Colors.white60,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
               if (isMe) ...[
                 const SizedBox(width: 4),
                 Icon(
                   isRead ? Icons.done_all : Icons.done,
                   size: 14,
-                  color: isRead ? Colors.blue : Colors.white60,
+                  color: isRead ? Colors.blue : Colors.black54,
                 ),
               ],
             ],
@@ -926,24 +1412,32 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   // --- NEW: FILE UPLOADER (Memory Optimized) ---
   Future<void> _pickAndUploadFile() async {
     try {
-      final result = await FilePicker.platform.pickFiles();
+      final result = await FilePicker.platform
+          .pickFiles(withData: kIsWeb); // <--- Web Needs withData
       if (result == null || result.files.isEmpty) return;
 
       final file = result.files.first;
-      final filePath = file.path;
-      if (filePath == null) return;
 
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('Uploading file...')));
 
-      final diskFile = File(filePath); // <-- FIX: Load from disk
       final ext = file.extension ?? 'file';
       final fileName =
           '${DateTime.now().millisecondsSinceEpoch}_${file.name.hashCode}.$ext';
       final path = 'chat_media/${widget.chatId}/$fileName';
 
-      // FIX: .upload() streams the file directly, preventing RAM crashes!
-      await supabase.storage.from('chat_media').upload(path, diskFile);
+      // --- FIX: WEB vs MOBILE FILE UPLOAD ---
+      if (kIsWeb) {
+        final bytes = file.bytes;
+        if (bytes == null) return;
+        await supabase.storage.from('chat_media').uploadBinary(path, bytes);
+      } else {
+        final filePath = file.path;
+        if (filePath == null) return;
+        final diskFile = File(filePath);
+        await supabase.storage.from('chat_media').upload(path, diskFile);
+      }
+
       final publicUrl = supabase.storage.from('chat_media').getPublicUrl(path);
 
       final myId = supabase.auth.currentUser?.id;
@@ -952,7 +1446,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       await supabase.from('messages').insert({
         'chat_id': widget.chatId,
         'sender_id': myId,
-        'content': file.name, // Uses the file name as the message text!
+        'content': file.name,
         'media_url': publicUrl,
         'media_type': 'file',
         'file_size_bytes': file.size,
@@ -985,7 +1479,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
       if (pickedFiles.isEmpty) return;
 
-      // --- STEP 1: YOUR DIALOG LOGIC ---
       final captionController = TextEditingController();
       final shouldSend = await showDialog<bool>(
         context: context,
@@ -1013,9 +1506,13 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                       height: 260,
                       width: double.infinity,
                       color: Colors.black,
+                      // --- FIX: WEB SAFE IMAGE PREVIEW ---
                       child: type == 'image'
-                          ? Image.file(File(pickedFiles.first.path),
-                              fit: BoxFit.contain)
+                          ? (kIsWeb
+                              ? Image.network(pickedFiles.first.path,
+                                  fit: BoxFit.contain)
+                              : Image.file(File(pickedFiles.first.path),
+                                  fit: BoxFit.contain))
                           : const Center(
                               child: Icon(Icons.play_circle,
                                   size: 80, color: Colors.white70)),
@@ -1070,27 +1567,26 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
       if (shouldSend != true) return;
 
-      // --- STEP 2: METADATA & UPLOAD LOGIC ---
       List<String> uploadedUrls = [];
       String? thumbnailUrl;
       int totalSizeBytes = 0;
 
       for (var file in pickedFiles) {
-        final diskFile = File(file.path); // <-- FIX: Load from disk!
-        totalSizeBytes += await diskFile.length();
+        // --- FIX: WEB SAFE UPLOAD (BYTES INSTEAD OF FILE) ---
+        final bytes = await file.readAsBytes();
+        totalSizeBytes += bytes.length;
 
         final ext = file.name.split('.').last.toLowerCase();
         final fileName =
             '${DateTime.now().millisecondsSinceEpoch}_${file.name.hashCode}.$ext';
         final path = 'chat_media/${widget.chatId}/$fileName';
 
-        // FIX: Stream the upload directly from disk to avoid RAM crashes
-        await supabase.storage.from('chat_media').upload(path, diskFile);
+        await supabase.storage.from('chat_media').uploadBinary(path, bytes);
         uploadedUrls
             .add(supabase.storage.from('chat_media').getPublicUrl(path));
 
-        // Generate Video Thumbnail if it's a video
-        if (type == 'video' && thumbnailUrl == null) {
+        // Generate Video Thumbnail if it's a video (Mobile Only, Web fallback to null)
+        if (type == 'video' && thumbnailUrl == null && !kIsWeb) {
           final String? thumbPath = await VideoThumbnail.thumbnailFile(
             video: file.path,
             thumbnailPath: (await getTemporaryDirectory()).path,
@@ -1157,5 +1653,44 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         ],
       ),
     );
+  }
+}
+
+class CachedLinkify extends StatefulWidget {
+  final String text;
+  final TextStyle? style;
+  final TextStyle? linkStyle;
+  final Function(LinkableElement) onOpen;
+
+  const CachedLinkify({
+    super.key,
+    required this.text,
+    required this.onOpen,
+    this.style,
+    this.linkStyle,
+  });
+
+  @override
+  State<CachedLinkify> createState() => _CachedLinkifyState();
+}
+
+class _CachedLinkifyState extends State<CachedLinkify> {
+  late final Widget _cachedWidget;
+
+  @override
+  void initState() {
+    super.initState();
+    // Cache the parsed Linkify widget so layout passes skip regex calculation entirely
+    _cachedWidget = Linkify(
+      onOpen: widget.onOpen,
+      text: widget.text,
+      style: widget.style,
+      linkStyle: widget.linkStyle,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _cachedWidget;
   }
 }

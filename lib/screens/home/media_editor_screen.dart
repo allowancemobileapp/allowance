@@ -120,23 +120,20 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
     final fileToUpload = _currentFile;
     final isVideo = widget.isVideo;
 
-    // 1. Close the screen immediately so user isn't stuck waiting
     Navigator.pop(context);
 
-    // 2. Show loading snackbar
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Uploading memory to your profile... 🚀'),
+        content:
+            Text('Uploading moment to your profile... 🚀'), // Updated string
         duration: Duration(seconds: 2),
       ),
     );
 
-    // 3. Process the upload silently in the background
     try {
       final extension = isVideo ? '.mp4' : '.jpg';
       final fileName = '${DateTime.now().millisecondsSinceEpoch}$extension';
 
-      // Use readAsBytes() – it works flawlessly on BOTH Web and Mobile!
       final bytes = await fileToUpload.readAsBytes();
 
       await supabase.storage.from('memories-bucket').uploadBinary(
@@ -148,7 +145,8 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
       final publicUrl =
           supabase.storage.from('memories-bucket').getPublicUrl(fileName);
 
-      await supabase.from('memories').insert({
+      await supabase.from('moments').insert({
+        // Changed insertion target to moments
         'user_id': userId,
         'media_url': publicUrl,
         'caption': caption,
@@ -156,20 +154,18 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
         'created_at': DateTime.now().toUtc().toIso8601String(),
       });
 
-      // 4. Show success message
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('✅ Memory posted successfully!'),
+          content: Text('✅ Moment posted successfully!'), // Updated string
           backgroundColor: Colors.green,
         ),
       );
     } catch (e) {
       debugPrint('Background Upload error: $e');
-      // 5. Show friendly error message
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-              '❌ Could not post memory. Please check your internet connection and try again.'),
+              '❌ Could not post moment. Please check your internet connection and try again.'), // Updated string
           backgroundColor: Colors.redAccent,
           duration: Duration(seconds: 4),
         ),

@@ -45,12 +45,13 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
 
   Map<String, dynamic>? _profile;
   int _followerCount = 0;
-  int _totalMemoriesCount = 0;
   bool _isFollowing = false;
-  List<dynamic> _memories = [];
   bool _isLoading = true;
   int _followingCount = 0; // Added this
   bool? _hasActiveStories;
+  bool _isSubscribedToAlerts = false; // <-- NEW
+  int _totalMomentsCount = 0; // Renamed from _totalMemoriesCount
+  List<dynamic> _moments = []; // Renamed from _memories
 
   @override
   void initState() {
@@ -81,7 +82,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
             .eq('following_id', widget.targetUserId)
             .maybeSingle(),
         supabase
-            .from('memories')
+            .from('moments')
             .select('*')
             .eq('user_id', widget.targetUserId)
             .count(CountOption.exact),
@@ -90,30 +91,36 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
             .select('*')
             .eq('follower_id', widget.targetUserId)
             .count(CountOption.exact),
-        // NEW: Check for active stories
         supabase
             .from('stories')
             .select('id')
             .eq('user_id', widget.targetUserId)
             .gt('expires_at', DateTime.now().toUtc().toIso8601String())
             .limit(1),
+        supabase
+            .from('post_alerts')
+            .select('target_user_id')
+            .eq('subscriber_id', currentUserId)
+            .eq('target_user_id', widget.targetUserId)
+            .maybeSingle(),
       ]);
 
       final profileResp = results[0] as Map<String, dynamic>?;
       final followersResp = results[1] as PostgrestResponse;
-      final followingStatusResp = results[2];
-      final memoriesResp = results[3] as PostgrestResponse;
+      final followingStatusResp = results[2]; // <-- FIX: Removed typo
+      final momentsResp = results[3] as PostgrestResponse;
       final followingCountResp = results[4] as PostgrestResponse;
-      final storiesResp = results[5] as List<dynamic>; // NEW
+      final storiesResp = results[5] as List<dynamic>;
+      final alertsResp = results[6];
 
       final isPrivate = profileResp?['is_private'] == true;
       final isFollowingStatus = followingStatusResp != null;
       final isMe = currentUserId == widget.targetUserId;
 
-      List<dynamic> fetchedMemories = [];
+      List<dynamic> fetchedMoments = [];
       if (profileResp != null && (!isPrivate || isFollowingStatus || isMe)) {
-        fetchedMemories = await supabase
-            .from('memories')
+        fetchedMoments = await supabase
+            .from('moments')
             .select()
             .eq('user_id', widget.targetUserId)
             .order('created_at', ascending: false)
@@ -124,12 +131,12 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
         setState(() {
           _profile = profileResp;
           _followerCount = followersResp.count;
-          _totalMemoriesCount = memoriesResp.count;
+          _totalMomentsCount = momentsResp.count;
           _followingCount = followingCountResp.count;
           _isFollowing = isFollowingStatus;
-          _memories = fetchedMemories;
-          // If the list is not empty, there are active stories
+          _moments = fetchedMoments;
           _hasActiveStories = storiesResp.isNotEmpty;
+          _isSubscribedToAlerts = alertsResp != null;
           _isLoading = false;
         });
       }
@@ -137,6 +144,82 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
       debugPrint("Profile load error: $e");
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  // --- NEW: TOGGLE POST ALERTS ---
+  Future<void> _togglePostAlerts() async {
+    final currentUserId = supabase.auth.currentUser?.id;
+    if (currentUserId == null) return;
+
+    final wasSubscribed = _isSubscribedToAlerts;
+    setState(() => _isSubscribedToAlerts = !wasSubscribed);
+
+    try {
+      if (!wasSubscribed) {
+        await supabase.from('post_alerts').insert({
+          'subscriber_id': currentUserId,
+          'target_user_id': widget.targetUserId,
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content: Text(
+                    'You will now be notified when @${_profile?['username']} posts!'),
+                backgroundColor: const Color(0xFF4CAF50)),
+          );
+        }
+      } else {
+        await supabase.from('post_alerts').delete().match({
+          'subscriber_id': currentUserId,
+          'target_user_id': widget.targetUserId,
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content: Text(
+                    'Post notifications turned off for @${_profile?['username']}.')),
+          );
+        }
+      }
+    } catch (e) {
+      setState(
+          () => _isSubscribedToAlerts = wasSubscribed); // Rollback on error
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to update notifications')));
+    }
+  }
+
+  // --- NEW: SHOW PROFILE MENU ---
+  void _showProfileMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: Icon(
+                _isSubscribedToAlerts
+                    ? Icons.notifications_active
+                    : Icons.notifications_none,
+                color: Colors.white),
+            title: Text(
+                _isSubscribedToAlerts
+                    ? 'Turn Off Post Notifications'
+                    : 'Turn On Post Notifications',
+                style: const TextStyle(color: Colors.white)),
+            onTap: () {
+              Navigator.pop(ctx);
+              _togglePostAlerts();
+            },
+          ),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
   }
 
   void _showUserList(String title, bool showFollowers) {
@@ -314,16 +397,17 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
           const SizedBox(height: 24),
           const Divider(color: Colors.white10),
           const SizedBox(height: 12),
-          Text('Memories ($_totalMemoriesCount)',
+          // FIX: Updated reference name
+          Text('Moments ($_totalMomentsCount)',
               style: const TextStyle(
                   color: Colors.white,
                   fontSize: 18,
                   fontWeight: FontWeight.bold)),
           const SizedBox(height: 16),
 
-          // Fix: Use the canSeeContent logic here
           if (canSeeContent)
-            _buildMemoriesGrid(_memories)
+            // FIX: Updated reference name
+            _buildMemoriesGrid(_moments)
           else
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 40),
@@ -333,7 +417,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
                   SizedBox(height: 12),
                   Text("This account is private",
                       style: TextStyle(color: Colors.white70)),
-                  Text("Follow to see their memories",
+                  Text("Follow to see their moments",
                       style: TextStyle(color: Colors.white38, fontSize: 12)),
                 ],
               ),
@@ -398,7 +482,10 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     try {
       final List<dynamic> activeStories = await supabase
           .from('stories')
-          .select()
+          .select('''
+            *,
+            profiles:user_id(username, avatar_url, school_name)
+          ''') // Join the profiles table to supply username and school metadata to StoryViewerScreen
           .eq('user_id', widget.targetUserId)
           .gt('expires_at', DateTime.now().toUtc().toIso8601String())
           .order('created_at', ascending: true);
@@ -410,8 +497,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
             builder: (context) => StoryViewerScreen(
               stories: List<Map<String, dynamic>>.from(activeStories),
               initialIndex: 0,
-              userPreferences: widget
-                  .userPreferences, // FIX: Pass the required argument here
+              userPreferences: widget.userPreferences,
             ),
           ),
         );
@@ -422,36 +508,58 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   }
 
   Widget _buildProfileInfo(bool isPrivate) {
-    // Check if this specific profile is a Plus member
     final bool isPlusMember =
         SubscriptionService.isPlus(_profile!['subscription_tier']);
+    final isMe = supabase.auth.currentUser?.id == widget.targetUserId;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           children: [
-            Text('@${_profile!['username']}',
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold)),
+            Expanded(
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text('@${_profile!['username']}',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis),
+                  ),
 
-            // STAR BADGE FOR PLUS USERS
-            if (isPlusMember) ...[
-              const SizedBox(width: 6),
-              SubscriptionService.getPlusBadge(),
-            ],
+                  // STAR BADGE FOR PLUS USERS
+                  if (isPlusMember) ...[
+                    const SizedBox(width: 6),
+                    SubscriptionService.getPlusBadge(),
+                  ],
 
-            if (isPrivate) ...[
-              const SizedBox(width: 6),
-              const Icon(Icons.lock, color: Colors.white54, size: 16)
-            ],
+                  if (isPrivate) ...[
+                    const SizedBox(width: 6),
+                    const Icon(Icons.lock, color: Colors.white54, size: 16)
+                  ],
+                ],
+              ),
+            ),
+
+            // --- NEW: 3-DOT MENU FOR NOTIFICATION ALERTS ---
+            if (!isMe)
+              IconButton(
+                icon: const Icon(Icons.more_horiz, color: Colors.white),
+                onPressed: _showProfileMenu,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
           ],
         ),
         if (_profile!['school_name'] != null)
-          Text(_profile!['school_name'],
-              style: const TextStyle(color: Colors.white54, fontSize: 14)),
+          Padding(
+            padding: const EdgeInsets.only(top: 4.0),
+            child: Text(_profile!['school_name'],
+                style: const TextStyle(color: Colors.white54, fontSize: 14)),
+          ),
         if (_profile!['bio'] != null && _profile!['bio'].toString().isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 12),
@@ -540,20 +648,20 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
 
   // Update your grid builder method
   // Replace your current _buildMemoriesGrid method with this updated one:
-  Widget _buildMemoriesGrid(List<dynamic> memories) {
-    if (memories.isEmpty) {
+  Widget _buildMemoriesGrid(List<dynamic> moments) {
+    // Renamed parameter
+    if (moments.isEmpty) {
       return const Center(
         child: Padding(
           padding: EdgeInsets.only(top: 20),
-          child:
-              Text("No memories yet", style: TextStyle(color: Colors.white38)),
+          child: Text("No moments yet",
+              style: TextStyle(color: Colors.white38)), // Updated string
         ),
       );
     }
 
-    // Convert the dynamic list to the exact map type expected by MemoryGridItem
-    final List<Map<String, dynamic>> typedMemories =
-        List<Map<String, dynamic>>.from(memories);
+    final List<Map<String, dynamic>> typedMoments =
+        List<Map<String, dynamic>>.from(moments);
 
     return GridView.builder(
       shrinkWrap: true,
@@ -564,12 +672,11 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
         mainAxisSpacing: 2,
         childAspectRatio: 0.56,
       ),
-      itemCount: typedMemories.length,
+      itemCount: typedMoments.length,
       itemBuilder: (context, index) {
-        // Reusing MemoryGridItem from your profile_screen.dart
-        // It already has the VideoPlayer logic for thumbnails built-in!
-        return MemoryGridItem(
-          memories: typedMemories,
+        return MomentGridItem(
+          // Using the MomentGridItem from step 2
+          moments: typedMoments,
           index: index,
         );
       },
@@ -595,13 +702,14 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   }
 }
 
-class VerticalMemoryFeed extends StatelessWidget {
-  final List<dynamic> memories;
+class VerticalMomentFeed extends StatelessWidget {
+  // Renamed from VerticalMemoryFeed
+  final List<dynamic> moments;
   final int initialIndex;
 
-  const VerticalMemoryFeed({
+  const VerticalMomentFeed({
     super.key,
-    required this.memories,
+    required this.moments,
     required this.initialIndex,
   });
 
@@ -614,11 +722,11 @@ class VerticalMemoryFeed extends StatelessWidget {
       backgroundColor: Colors.black,
       body: PageView.builder(
         controller: pageController,
-        scrollDirection: Axis.vertical, // This makes it slide like TikTok
-        itemCount: memories.length,
+        scrollDirection: Axis.vertical,
+        itemCount: moments.length,
         itemBuilder: (context, index) {
-          // This returns your existing screen for each "slide"
-          return EnlargedMemoryScreen(memory: memories[index]);
+          // FIX: Call EnlargedMomentScreen instead of EnlargedMemoryScreen
+          return EnlargedMomentScreen(moment: moments[index]);
         },
       ),
     );

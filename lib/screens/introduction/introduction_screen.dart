@@ -1,5 +1,8 @@
 // lib/screens/introduction/introduction_screen.dart
+import 'package:allowance/screens/settings/terms_screen.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/home_screen.dart';
@@ -26,12 +29,21 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   bool _loading = false;
   bool _isSignUp = false;
   bool _obscurePassword = true;
+  bool _acceptedTerms = false; // <-- ADD THIS
 
   // ---------------------------------------------------------------------------
   // RESTORED: YOUR COMPLETE ORIGINAL LOGIC
   // ---------------------------------------------------------------------------
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+
+    // <-- NEW: Enforce Terms of Service Checkbox -->
+    if (_isSignUp && !_acceptedTerms) {
+      _showError(
+          "You must agree to the Terms of Service to create an account.");
+      return;
+    }
+
     setState(() => _loading = true);
 
     final supabase = Supabase.instance.client;
@@ -64,7 +76,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         if (signUpRes.user == null) throw AuthException('Sign up failed');
 
         // 3) INITIAL PROFILE UPSERT
-        // Using upsert ensures we create the profile and link it to the Auth ID immediately
         await supabase.from('profiles').upsert({
           'id': signUpRes.user!.id,
           'email': emailVal,
@@ -105,7 +116,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         }
       }
     } on AuthException catch (e) {
-      // Friendly mapping for common Auth errors
       String message = e.message;
       if (message.contains('Invalid login credentials')) {
         message = 'Incorrect email or password.';
@@ -114,7 +124,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
       }
       _showError(message);
     } on PostgrestException catch (e) {
-      // Specific check for Postgres unique constraint violation (Code 23505)
       if (e.code == '23505' || e.message.contains('profiles_username_unique')) {
         _showError(
             'That username is already taken. Please try a different one.');
@@ -122,7 +131,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         _showError('Database error: Unable to save your profile.');
       }
     } catch (e) {
-      // Final fallback for unexpected issues (Network, etc.)
       _showError(
           'Something went wrong. Please check your connection and try again.');
     } finally {
@@ -140,6 +148,110 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         behavior: SnackBarBehavior.floating,
       ),
     );
+  }
+
+  Future<void> _signInWithGoogle() async {
+    setState(() => _loading = true);
+    final supabase = Supabase.instance.client;
+
+    try {
+      // 1. Web Flow (Redirect inside browser)
+      if (kIsWeb) {
+        await supabase.auth.signInWithOAuth(
+          OAuthProvider.google,
+          // FORCE ACCOUNT SELECTION ON WEB
+          queryParams: {'prompt': 'select_account'},
+        );
+        return;
+      }
+
+      // 2. Native Mobile Flow (Elegant inside-app popup)
+      const webClientId =
+          '463313212619-b0fl0uekmftif09otfpnj27cqm9cgrp7.apps.googleusercontent.com';
+
+      final GoogleSignIn googleSignIn = GoogleSignIn(
+        serverClientId: webClientId,
+      );
+
+      // FORCE ACCOUNT SELECTION ON MOBILE
+      // We sign out of the local native session first so the picker always pops up!
+      await googleSignIn.signOut();
+
+      final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
+      if (googleUser == null) {
+        setState(() => _loading = false);
+        return;
+      }
+
+      final GoogleSignInAuthentication googleAuth =
+          await googleUser.authentication;
+      final accessToken = googleAuth.accessToken;
+      final idToken = googleAuth.idToken;
+
+      if (idToken == null) {
+        throw 'Missing Google ID Token.';
+      }
+
+      // Authenticate with Supabase using native credentials
+      await supabase.auth.signInWithIdToken(
+        provider: OAuthProvider.google,
+        idToken: idToken,
+        accessToken: accessToken,
+      );
+
+      // Load user preferences after successful authentication
+      await widget.userPreferences.loadPreferences();
+      widget.onFinishIntro();
+
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => HomeScreen(userPreferences: widget.userPreferences),
+          ),
+        );
+      }
+    } catch (e) {
+      _showError('Google Sign-In failed: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _forgotPassword() async {
+    final email = _emailCtl.text.trim();
+    if (email.isEmpty || !email.contains('@')) {
+      _showError('Please enter your email address first.');
+      return;
+    }
+
+    setState(() => _loading = true);
+    final supabase = Supabase.instance.client;
+    try {
+      // DYNAMIC REDIRECT FIX: Automatically detects if you are on localhost or production Web,
+      // or falls back to your custom scheme on mobile.
+      final String redirectUrl = kIsWeb
+          ? Uri.base
+              .origin // Captures 'http://localhost:59781' or production domain automatically
+          : 'allowance://reset-password';
+
+      await supabase.auth.resetPasswordForEmail(
+        email,
+        redirectTo: redirectUrl,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Password reset link sent to your email!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      _showError('Error sending reset link: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   @override
@@ -219,11 +331,10 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
 
                   const SizedBox(height: 4),
 
-                  // 2. Allowance Logo - VISUALLY 5X BIGGER
+                  // 2. Allowance Logo
                   Center(
                     child: Transform.scale(
-                      scale:
-                          3.0, // <--- Adjust this (e.g., 2.0) if it's too big for the screen
+                      scale: 3.0,
                       child: Image.asset(
                         'assets/images/allowance_logo.png',
                         width: MediaQuery.of(context).size.width * 0.7,
@@ -268,6 +379,23 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                     validator: (v) =>
                         (v == null || v.length < 6) ? 'Min 6 characters' : null,
                   ),
+
+                  // --- ADDED: FORGOT PASSWORD TRIGGER TEXT (Appears only on Log In view) ---
+                  // --- FIXED: Centered Forgot Password Trigger ---
+                  if (!_isSignUp)
+                    Align(
+                      alignment: Alignment.center, // <-- CHANGED TO CENTER
+                      child: TextButton(
+                        onPressed: _loading ? null : _forgotPassword,
+                        child: const Text(
+                          'Forgot Password?',
+                          style: TextStyle(
+                              color: Color(0xFF4CAF50),
+                              fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ),
+
                   AnimatedSize(
                     duration: const Duration(milliseconds: 300),
                     child: _isSignUp
@@ -284,22 +412,98 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                           )
                         : const SizedBox.shrink(),
                   ),
-                  const SizedBox(height: 40),
+
+                  // <-- TERMS & CONDITIONS CHECKBOX -->
+                  if (_isSignUp)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 20.0),
+                      child: Row(
+                        children: [
+                          Checkbox(
+                            value: _acceptedTerms,
+                            activeColor: const Color(0xFF4CAF50),
+                            checkColor: Colors.white,
+                            side: const BorderSide(color: Colors.white54),
+                            onChanged: (val) {
+                              setState(() => _acceptedTerms = val ?? false);
+                            },
+                          ),
+                          Expanded(
+                            child: GestureDetector(
+                              onTap: () {
+                                Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                        builder: (_) => const TermsScreen()));
+                              },
+                              child: RichText(
+                                text: const TextSpan(
+                                  text: "I agree to the ",
+                                  style: TextStyle(
+                                      color: Colors.white70, fontSize: 13),
+                                  children: [
+                                    TextSpan(
+                                      text: "Terms of Service & Privacy Policy",
+                                      style: TextStyle(
+                                        color: Color(0xFF4CAF50),
+                                        fontWeight: FontWeight.bold,
+                                        decoration: TextDecoration.underline,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  const SizedBox(height: 30),
                   _loading
                       ? const Center(
                           child: CircularProgressIndicator(color: Colors.white))
-                      : ElevatedButton(
-                          onPressed: _submit,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.white,
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(vertical: 18),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(16)),
-                          ),
-                          child: Text(_isSignUp ? 'Sign Up' : 'Log In',
-                              style: const TextStyle(
-                                  fontSize: 18, fontWeight: FontWeight.bold)),
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            ElevatedButton(
+                              onPressed: _submit,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white,
+                                foregroundColor: Colors.black,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16)),
+                              ),
+                              child: Text(_isSignUp ? 'Sign Up' : 'Log In',
+                                  style: const TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold)),
+                            ),
+
+                            // --- ADDED: GOOGLE SIGN-IN BUTTON ---
+                            const SizedBox(height: 16),
+                            OutlinedButton.icon(
+                              onPressed: _loading ? null : _signInWithGoogle,
+                              style: OutlinedButton.styleFrom(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 18),
+                                side: const BorderSide(color: Colors.white24),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16)),
+                              ),
+                              icon: const Icon(Icons.g_mobiledata,
+                                  color: Colors.white, size: 30),
+                              label: const Text(
+                                'Continue with Google',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ],
                         ),
                   const SizedBox(height: 24),
                   TextButton(

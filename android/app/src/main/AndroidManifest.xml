@@ -63,17 +63,26 @@
             </intent-filter>
 
             <!-- ============================================================== -->
-            <!-- NEW: APP LINKS INTENT FILTER (Makes the OS open Allowance app) -->
+            <!-- APP LINKS INTENT FILTER (Handles allowanceapp.org/gist/XXX)    -->
             <!-- ============================================================== -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 
-                <!-- Handles: https://allowanceapp.org/gist/XXX -->
                 <data android:scheme="https" android:host="allowanceapp.org" android:pathPrefix="/gist" />
-                <!-- Handles: https://www.allowanceapp.org/gist/XXX -->
                 <data android:scheme="https" android:host="www.allowanceapp.org" android:pathPrefix="/gist" />
+            </intent-filter>
+
+            <!-- ============================================================== -->
+            <!-- CUSTOM SCHEME INTENT FILTER (Handles Password Reset & Google)  -->
+            <!-- ============================================================== -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <!-- Accepts URIs that begin with "allowance://" -->
+                <data android:scheme="allowance" />
             </intent-filter>
 
         </activity>

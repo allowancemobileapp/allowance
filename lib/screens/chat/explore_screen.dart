@@ -125,7 +125,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
       final response = await supabase
           .from('stories')
           .select(
-              'id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)')
+              'id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)') // <-- Added user_id here
           .eq('user_id', userId)
           .gt('expires_at', DateTime.now().toUtc().toIso8601String())
           .order('created_at', ascending: false);
@@ -154,14 +154,12 @@ class _ExploreScreenState extends State<ExploreScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         elevation: 0,
-        centerTitle: false,
-        title: const Text(
-          'Explore',
-          style: TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.bold,
-            fontSize: 24,
-          ),
+        centerTitle: true, // Centered just like HomeScreen
+        iconTheme: const IconThemeData(color: Colors.white),
+        title: Image.asset(
+          'assets/images/explore.png',
+          height: 100, // Adjusted to match your other headers
+          fit: BoxFit.contain,
         ),
       ),
       body: Column(

@@ -1,13 +1,13 @@
 // lib/screens/home/order_screen.dart
 // ignore_for_file: use_build_context_synchronously
 
-import 'dart:math';
+import 'dart:convert';
+
+import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
 
 class OrderScreen extends StatefulWidget {
   final UserPreferences userPreferences;
@@ -323,10 +323,11 @@ class _OrderScreenState extends State<OrderScreen> {
     ).then((_) => setState(() {}));
   }
 
-  void _showDeliveryPersonnel() async {
+  // --- UPDATED: DELIVERY PICKER ---
+  // --- UPDATED: Formats cart as JSON ---
+  void _showDeliveryPersonnel() {
     if (_cart.isEmpty) return;
 
-    // ==================== PREMIUM CHECK ====================
     final isPremium = widget.userPreferences.subscriptionTier == 'Membership';
 
     if (!isPremium) {
@@ -334,8 +335,7 @@ class _OrderScreenState extends State<OrderScreen> {
         context: context,
         backgroundColor: Colors.grey[900],
         shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
         builder: (ctx) => Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
@@ -343,57 +343,41 @@ class _OrderScreenState extends State<OrderScreen> {
             children: [
               const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
               const SizedBox(height: 16),
-              const Text(
-                'Subscribe to Allowance Plus',
-                style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white),
-              ),
+              const Text('Subscribe to Allowance Plus',
+                  style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white)),
               const SizedBox(height: 12),
               const Text(
-                'to get access to our trusted and verified delivery agents',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.white70),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'This protects you from delivery scams in school.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white54, fontSize: 14),
-              ),
+                  'to get access to our trusted and verified delivery agents',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, color: Colors.white70)),
               const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
                   onPressed: () {
-                    Navigator.pop(ctx); // close paywall
+                    Navigator.pop(ctx);
                     Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SubscriptionScreen(
-                          userPreferences: widget.userPreferences,
-                          themeColor: themeColor,
-                        ),
-                      ),
-                    );
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => SubscriptionScreen(
+                                userPreferences: widget.userPreferences,
+                                themeColor: themeColor)));
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: themeColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
-                  child: const Text(
-                    'Subscribe to Allowance Plus',
-                    style: TextStyle(fontWeight: FontWeight.bold),
-                  ),
+                      backgroundColor: themeColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16)),
+                  child: const Text('Subscribe to Allowance Plus',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ),
               TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Maybe later',
-                    style: TextStyle(color: Colors.white70)),
-              ),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Maybe later',
+                      style: TextStyle(color: Colors.white70))),
             ],
           ),
         ),
@@ -401,77 +385,113 @@ class _OrderScreenState extends State<OrderScreen> {
       return;
     }
 
-    // ==================== PREMIUM USER → Show Delivery Picker ====================
-    final schoolId = int.tryParse(widget.userPreferences.schoolId ?? '');
-    if (schoolId == null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('No school selected.')));
-      return;
-    }
+    final orderLines = _cart
+        .map((item) => {
+              'name': item['name'],
+              'price': item['price'].toString(),
+              'qty': item['quantity'].toString(),
+            })
+        .toList();
 
-    final personnelRaw = await supabase
-        .from('delivery_personnel')
-        .select()
-        .eq('school_id', schoolId);
+    orderLines.add({'name': 'Pack', 'price': '200', 'qty': '1'});
+    final totalWithPack = _cartTotal + 200;
 
-    final List<Map<String, dynamic>> personnel =
-        List<Map<String, dynamic>>.from(personnelRaw);
+    final orderData = {
+      'vendor': _selectedVendor?['name'] ?? 'Vendor',
+      'items': orderLines,
+      'total': totalWithPack.toStringAsFixed(0)
+    };
 
-    if (personnel.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No delivery personnel available.')));
-      return;
-    }
+    _openDeliveryAgentGrid(orderData);
+  }
 
-    personnel.shuffle(Random());
-
+  // --- UPDATED: Fixes overflow & removes "Contact" button ---
+  // --- UPDATED: Fixes overflow & removes "Contact" button ---
+  void _openDeliveryAgentGrid(Map<String, dynamic> orderData) {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.6,
-        maxChildSize: 0.9,
-        minChildSize: 0.4,
-        expand: false,
-        builder: (_, controller) => Column(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => Container(
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
+        child: Column(
           children: [
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(
-                'Select your guy/gal',
-                style: TextStyle(
-                  color: themeColor,
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
+              child: Text('Select a Runner 🏃‍♂️',
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: themeColor)),
             ),
+            const Divider(height: 1, color: Colors.white24),
             Expanded(
-              child: ListView.builder(
-                controller: controller,
-                itemCount: personnel.length,
-                itemBuilder: (_, i) {
-                  final person = personnel[i];
-                  return ListTile(
-                    title: Text(
-                      '${person['name']} (${person['gender']})',
-                      style: const TextStyle(color: Colors.white, fontSize: 18),
+              child: FutureBuilder<List<dynamic>>(
+                future: supabase
+                    .from('profiles')
+                    .select('id, username, avatar_url, gender')
+                    .eq('is_delivery_agent', true)
+                    .eq('is_available_for_delivery', true)
+                    .eq('school_id', widget.userPreferences.schoolId ?? ''),
+                builder: (ctx, snap) {
+                  if (snap.connectionState == ConnectionState.waiting)
+                    return const Center(child: CircularProgressIndicator());
+                  final list = snap.data ?? [];
+
+                  if (list.isEmpty)
+                    return const Center(
+                        child: Text('No agents available right now 😴',
+                            style: TextStyle(color: Colors.white70)));
+
+                  list.shuffle();
+
+                  return GridView.builder(
+                    padding: const EdgeInsets.all(16),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 16,
+                      childAspectRatio: 0.85,
                     ),
-                    trailing: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: themeColor,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
+                    itemCount: list.length,
+                    itemBuilder: (ctx, i) {
+                      final person = list[i];
+                      return GestureDetector(
+                        onTap: () => _sendOrderToAppChat(person, orderData),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CircleAvatar(
+                              radius: 36,
+                              backgroundColor: Colors.grey[800],
+                              backgroundImage: person['avatar_url'] != null
+                                  ? NetworkImage(person['avatar_url'])
+                                  : null,
+                              child: person['avatar_url'] == null
+                                  ? const Icon(Icons.delivery_dining,
+                                      color: Colors.white54, size: 30)
+                                  : null,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(person['username'] ?? 'Agent',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            if (person['gender'] != null)
+                              Text(person['gender'],
+                                  style: const TextStyle(
+                                      color: Colors.white54, fontSize: 11)),
+                          ],
                         ),
-                      ),
-                      onPressed: () => _sendOrderToWhatsApp(person),
-                      child: const Text('Contact',
-                          style: TextStyle(color: Colors.white)),
-                    ),
+                      );
+                    },
                   );
                 },
               ),
@@ -482,42 +502,75 @@ class _OrderScreenState extends State<OrderScreen> {
     );
   }
 
-  void _sendOrderToWhatsApp(Map<String, dynamic> person) async {
-    final vendorName = _selectedVendor?['name'] ?? 'Vendor';
+  // --- UPDATED: Does NOT auto-send, and clears cart safely! ---
+  // --- UPDATED: Removes 'last_message' to prevent database error ---
+  Future<void> _sendOrderToAppChat(
+      Map<String, dynamic> person, Map<String, dynamic> orderData) async {
+    try {
+      final myId = supabase.auth.currentUser!.id;
+      final agentId = person['id'];
 
-    final orderLines =
-        _cart.map((item) => '${item['name']} x ${item['quantity']}').toList();
+      showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => const Center(
+              child: CircularProgressIndicator(color: Color(0xFF4CAF50))));
 
-    orderLines.add('Pack x 1');
+      final response = await supabase.rpc('get_or_create_personal_chat',
+          params: {'user_a': myId, 'user_b': agentId});
+      final chatId = response.toString();
 
-    final orderDetails = orderLines.join('\n');
+      final String orderJson = jsonEncode(orderData);
 
-    final totalWithPack = _cartTotal + 200;
+      await supabase.from('messages').insert({
+        'chat_id': chatId,
+        'sender_id': myId,
+        'content': orderJson,
+        'media_type': 'order', // Ensure the initial message is an order type
+        'is_read': false,
+      });
 
-    final message =
-        'Hello! Custom Order from *$vendorName* on *Allowance*!:\n$orderDetails\n*Total*: ₦${totalWithPack.toStringAsFixed(0)}';
+      // FIX: Only update 'updated_at'. The 'last_message' column doesn't exist!
+      await supabase.from('chats').update({
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      }).eq('id', chatId);
 
-    String phone = (person['whatsapp_url'] ?? person['phone'] ?? '')
-        .toString()
-        .replaceAll(RegExp(r'[^0-9]'), '');
+      if (mounted) {
+        Navigator.pop(context); // Close loading dialog
+        Navigator.pop(context); // Close bottom sheet
 
-    if (phone.isEmpty) {
-      phone =
-          (person['phone'] ?? '').toString().replaceAll(RegExp(r'[^0-9]'), '');
-    }
+        // This is safe because _cart only exists in OrderScreen, not Options/Favorites
+        try {
+          setState(() {
+            _cart.clear();
+            _updateCartTotal();
+          });
+        } catch (_) {}
 
-    final encodedMessage = Uri.encodeComponent(message);
-    final uri = Uri.parse('https://wa.me/$phone?text=$encodedMessage');
-
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-      _cart.clear();
-      _updateCartTotal();
-      if (mounted) Navigator.pop(context);
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not open WhatsApp.')),
-      );
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => IndividualChatScreen(
+              chatId: chatId,
+              recipientProfile: {
+                'id': agentId,
+                'username': person['username'] ?? 'Delivery Agent',
+                'avatar_url': person['avatar_url'],
+                'school_name': widget.userPreferences.schoolName,
+                'is_group': false,
+                'pending_order': orderJson,
+              },
+              userPreferences: widget.userPreferences,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to route order.')));
+      }
     }
   }
 

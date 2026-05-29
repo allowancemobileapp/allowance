@@ -75,7 +75,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     _currentTier = widget.userPreferences.subscriptionTier ?? "Free";
     _pageController = PageController(viewportFraction: 0.77);
 
-    // ←←← SAFETY NET (friend's idea)
+    // ←←← SAFETY NET
     _recoverPendingSubscription();
   }
 
@@ -248,7 +248,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         }
       } else {
         // ❌ IF FAILED/TIMED OUT, KEEP THE REFERENCE!
-        // The "Safety Net" will catch it when they return to this screen later.
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
@@ -267,9 +266,8 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
   /// Polls Paystack's verify endpoint until we get success or timeout, then updates Supabase.
   Future<bool> _pollAndProcessVerification(String reference,
-      {int maxAttempts = 10, // ← UPDATED
+      {int maxAttempts = 10,
       Duration interval = const Duration(seconds: 3)}) async {
-    // ← UPDATED
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         final response = await http.get(
@@ -302,9 +300,6 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
             }
             return true;
           }
-        } else {
-          debugPrint(
-              'Paystack verify returned ${response.statusCode}: ${response.body}');
         }
       } catch (e) {
         debugPrint('Error while verifying transaction: $e');
@@ -313,6 +308,78 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
       await Future.delayed(interval);
     }
     return false;
+  }
+
+  // --- NEW: CANCEL SUBSCRIPTION DIALOG AND LOGIC ---
+  Future<void> _confirmCancelSubscription() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('Cancel Subscription?',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Are you sure you want to cancel your Allowance Plus membership? You will lose access to premium features.\n\nNote: To completely stop future card charges, please click the "Manage Subscription" link in your Paystack email receipt.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child:
+                const Text('Keep It', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Cancel Plan',
+                style: TextStyle(
+                    color: Colors.redAccent, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      _cancelSubscription();
+    }
+  }
+
+  Future<void> _cancelSubscription() async {
+    setState(() => _isProcessing = true);
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+
+    if (user != null) {
+      try {
+        await supabase.from('profiles').update({
+          'subscription_tier': 'Free',
+          'subscription_expires_at': null, // Clear expiration just in case
+          'updated_at': DateTime.now().toIso8601String(),
+        }).eq('id', user.id);
+
+        widget.userPreferences.subscriptionTier = 'Free';
+        await widget.userPreferences.savePreferences();
+
+        if (mounted) {
+          setState(() {
+            _currentTier = 'Free';
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('Subscription canceled successfully.'),
+                backgroundColor: Colors.green),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content: Text('Error canceling subscription: $e'),
+                backgroundColor: Colors.red),
+          );
+        }
+      }
+    }
+    if (mounted) setState(() => _isProcessing = false);
   }
 
   void _handleTier(String tier) {
@@ -350,8 +417,13 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     double imageHeight,
     Color buttonColor,
   ) {
-    final buttonText = isCurrent ? 'Current Plan' : cta;
-    final buttonEnabled = !isCurrent;
+    // --- UPDATED: Button Logic for Canceling ---
+    final isCancelButton = isCurrent && tier == membershipTier;
+    final buttonText = isCancelButton
+        ? 'Cancel Subscription'
+        : (isCurrent ? 'Current Plan' : cta);
+    final buttonEnabled = !isCurrent || isCancelButton;
+    final actualButtonColor = isCancelButton ? Colors.redAccent : buttonColor;
 
     return Center(
       child: SizedBox(
@@ -405,17 +477,26 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: buttonEnabled ? () => _handleTier(tier) : null,
+                    onPressed: buttonEnabled
+                        ? () {
+                            if (isCancelButton) {
+                              _confirmCancelSubscription();
+                            } else {
+                              _handleTier(tier);
+                            }
+                          }
+                        : null,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: buttonColor,
-                      disabledBackgroundColor: buttonColor.withOpacity(0.5),
+                      backgroundColor: actualButtonColor,
+                      disabledBackgroundColor:
+                          actualButtonColor.withOpacity(0.5),
                       disabledForegroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(8)),
                       padding: const EdgeInsets.symmetric(
                           horizontal: 24, vertical: 10),
                       elevation: 8,
-                      shadowColor: buttonColor.withOpacity(0.7),
+                      shadowColor: actualButtonColor.withOpacity(0.7),
                     ),
                     child: _isProcessing && tier == membershipTier
                         ? const CircularProgressIndicator(color: Colors.white)
