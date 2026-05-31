@@ -309,7 +309,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Color(0xFF121212),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -470,7 +470,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                               onPressed: _submit,
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: Colors.white,
-                                foregroundColor: Colors.black,
+                                foregroundColor: Color(0xFF121212),
                                 padding:
                                     const EdgeInsets.symmetric(vertical: 18),
                                 shape: RoundedRectangleBorder(

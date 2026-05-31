@@ -35,26 +35,28 @@ class _CustomLoadingScreenState extends State<CustomLoadingScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900],
+      backgroundColor: const Color(0xFF121212), // Matched to new theme
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Just the breathing circular logo (no spinner, no white border)
             AnimatedBuilder(
               animation: _scaleAnimation,
               builder: (_, child) => Transform.scale(
                 scale: _scaleAnimation.value,
                 child: child,
               ),
-              child: Container(
-                width: 120, // slightly bigger now that it's the only element
-                height: 120,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  image: const DecorationImage(
-                    image: AssetImage('assets/images/app_icon.png'),
-                    fit: BoxFit.cover,
+              child: ClipRRect(
+                // <-- GIVES THE LOGO ROUNDED CORNERS
+                borderRadius: BorderRadius.circular(30),
+                child: Container(
+                  width: 120,
+                  height: 120,
+                  decoration: const BoxDecoration(
+                    image: DecorationImage(
+                      image: AssetImage('assets/images/app_icon.png'),
+                      fit: BoxFit.cover,
+                    ),
                   ),
                 ),
               ),
@@ -70,7 +72,7 @@ class _CustomLoadingScreenState extends State<CustomLoadingScreen>
               ),
             ),
             const SizedBox(height: 8),
-            Text(
+            const Text(
               "The Uni Cheat Code...",
               style: TextStyle(fontSize: 16, color: Colors.white70),
             ),

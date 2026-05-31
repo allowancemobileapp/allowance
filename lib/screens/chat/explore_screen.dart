@@ -1,17 +1,27 @@
 // lib/screens/chat/explore_screen.dart
+import 'dart:convert';
+
 import 'package:allowance/screens/chat/chat_room_screen.dart';
+import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:video_player/video_player.dart';
+import 'package:video_thumbnail/video_thumbnail.dart';
 import 'dart:math';
+import 'dart:typed_data';
 import '../../models/user_preferences.dart';
 import '../../widgets/universal_profile_card.dart';
 import '../home/story_viewer_screen.dart';
 
 class ExploreScreen extends StatefulWidget {
   final UserPreferences userPreferences;
-  const ExploreScreen({super.key, required this.userPreferences});
+  final String?
+      initialQuery; // <-- NEW: Accepts a search query from the Universal Menu
+
+  const ExploreScreen(
+      {super.key, required this.userPreferences, this.initialQuery});
 
   @override
   State<ExploreScreen> createState() => _ExploreScreenState();
@@ -19,103 +29,418 @@ class ExploreScreen extends StatefulWidget {
 
 class _ExploreScreenState extends State<ExploreScreen> {
   final supabase = Supabase.instance.client;
+
   List<Map<String, dynamic>> _exploreItems = [];
+  final List<Map<String, dynamic>> _masonryBlueprints = [];
+
+  // Cache to prevent regenerating video thumbnails while scrolling
+  final Map<String, Uint8List> _videoThumbCache = {};
+
   bool _isLoading = true;
   String _searchQuery = "";
-  int _selectedSegment = 0; // 0 for People, 1 for Groups
+  int _selectedSegment = 0; // 0 for Discover, 1 for Groups
+
+  late TextEditingController _searchController;
 
   @override
   void initState() {
     super.initState();
+    _searchQuery = widget.initialQuery ?? "";
+    _searchController = TextEditingController(text: _searchQuery);
     _fetchExploreData();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _fetchExploreData() async {
     if (!mounted) return;
     setState(() => _isLoading = true);
 
-    try {
-      final currentUserId = supabase.auth.currentUser?.id;
-      if (currentUserId == null) {
-        if (mounted) setState(() => _isLoading = false);
-        return;
-      }
+    final currentUserId = supabase.auth.currentUser?.id;
+    List<Map<String, dynamic>> mixedResults = [];
+    final now = DateTime.now().toUtc().toIso8601String();
+    final schoolId = widget.userPreferences.schoolId;
 
-      List<Map<String, dynamic>> results = [];
-      final now = DateTime.now().toUtc().toIso8601String();
+    if (_selectedSegment == 0) {
+      // ==========================================
+      // DISCOVER FEED
+      // ==========================================
+      if (_searchQuery.trim().isNotEmpty) {
+        // --- 1. SEARCH MODE: Specific User Focus ---
+        final query = _searchQuery.trim();
 
-      if (_selectedSegment == 0) {
-        // --- FETCH PEOPLE ---
-        var userQuery =
-            supabase.from('profiles').select().neq('id', currentUserId);
-
-        if (_searchQuery.isNotEmpty) {
-          userQuery = userQuery.ilike('username', '%$_searchQuery%');
+        // Fetch matching profiles
+        var userQuery = supabase
+            .from('profiles')
+            .select('id, username, avatar_url, school_name, subscription_tier')
+            .ilike('username', '%$query%');
+        if (currentUserId != null) {
+          userQuery = userQuery.neq('id', currentUserId);
         }
+        final userRes = await userQuery.limit(50);
 
-        final List<dynamic> userResponse = await userQuery;
+        List<Map<String, dynamic>> profiles =
+            List<Map<String, dynamic>>.from(userRes);
+        final userIds = profiles.map((u) => u['id'].toString()).toList();
 
-        final List<dynamic> activeStories = await supabase
+        // Active story check
+        final activeStoriesRes = await supabase
             .from('stories')
             .select('user_id')
             .gt('expires_at', now);
+        final Set<String> usersWithStories =
+            activeStoriesRes.map((s) => s['user_id'].toString()).toSet();
 
-        final Set<String> userIdsWithStories =
-            activeStories.map((s) => s['user_id'].toString()).toSet();
+        profiles = profiles
+            .map((e) => {
+                  ...e,
+                  'explore_type': 'profile',
+                  'has_active_story':
+                      usersWithStories.contains(e['id'].toString())
+                })
+            .toList();
 
-        results = userResponse.map((u) {
-          return {
-            ...Map<String, dynamic>.from(u),
-            'is_group': false,
-            'has_active_story': userIdsWithStories.contains(u['id'].toString()),
-          };
-        }).toList();
+        mixedResults.addAll(profiles);
+
+        // Fetch Moments & Gists tied strictly to these found users!
+        if (userIds.isNotEmpty) {
+          final momentsRes = await supabase
+              .from('moments')
+              .select('*, profiles:user_id(username, avatar_url, school_name)')
+              .inFilter('user_id', userIds)
+              .order('created_at', ascending: false)
+              .limit(50);
+          mixedResults.addAll((momentsRes as List).map((e) =>
+              {...Map<String, dynamic>.from(e), 'explore_type': 'moment'}));
+
+          final gistsRes = await supabase
+              .from('gists')
+              .select('*, profiles:user_id(username, avatar_url)')
+              .eq('status', 'active')
+              .inFilter('user_id', userIds)
+              .limit(50);
+          mixedResults.addAll((gistsRes as List).map((e) =>
+              {...Map<String, dynamic>.from(e), 'explore_type': 'gist'}));
+        } else {
+          // Fallback: If no user found by name, search captions and titles instead
+          final momentsRes = await supabase
+              .from('moments')
+              .select('*, profiles:user_id(username, avatar_url, school_name)')
+              .ilike('caption', '%$query%')
+              .order('created_at', ascending: false)
+              .limit(20);
+          mixedResults.addAll((momentsRes as List).map((e) =>
+              {...Map<String, dynamic>.from(e), 'explore_type': 'moment'}));
+
+          final gistsRes = await supabase
+              .from('gists')
+              .select('*, profiles:user_id(username, avatar_url)')
+              .eq('status', 'active')
+              .ilike('title', '%$query%')
+              .limit(20);
+          mixedResults.addAll((gistsRes as List).map((e) =>
+              {...Map<String, dynamic>.from(e), 'explore_type': 'gist'}));
+        }
       } else {
-        // --- FETCH GROUPS (QUERYING CHATS TABLE) ---
-        var groupQuery = supabase.from('chats').select().eq('is_group', true);
+        // --- 2. DEFAULT DISCOVER MODE (Random & Fresh) ---
+        // Fetch up to 1000 users, shuffle them all locally, and take 40!
+        var userQuery = supabase
+            .from('profiles')
+            .select('id, username, avatar_url, school_name, subscription_tier');
+        if (currentUserId != null) {
+          userQuery = userQuery.neq('id', currentUserId);
+        }
+        final res = await userQuery.limit(1000);
 
-        if (_searchQuery.isNotEmpty) {
-          groupQuery = groupQuery.ilike('group_name', '%$_searchQuery%');
+        var allProfiles = List<Map<String, dynamic>>.from(res);
+        allProfiles.shuffle(Random()); // <-- TRUE RANDOMIZATION HERE
+        var profiles = allProfiles.take(40).toList();
+
+        final activeStoriesRes = await supabase
+            .from('stories')
+            .select('user_id')
+            .gt('expires_at', now);
+        final Set<String> usersWithStories =
+            activeStoriesRes.map((s) => s['user_id'].toString()).toSet();
+
+        profiles = profiles
+            .map((e) => {
+                  ...e,
+                  'explore_type': 'profile',
+                  'has_active_story':
+                      usersWithStories.contains(e['id'].toString())
+                })
+            .toList();
+
+        // Enforce Plus members staying towards the top
+        profiles.sort((a, b) {
+          final aTier = a['subscription_tier'] ?? 'Free';
+          final bTier = b['subscription_tier'] ?? 'Free';
+          if (aTier == 'Membership' && bTier != 'Membership') return -1;
+          if (bTier == 'Membership' && aTier != 'Membership') return 1;
+          return 0;
+        });
+
+        // Mix in Orders
+        List<Map<String, dynamic>> orders = [];
+        var orderQuery = supabase
+            .from('options')
+            .select('*, vendors!inner(name, school_id)');
+        if (schoolId != null && schoolId.isNotEmpty) {
+          orderQuery = orderQuery.eq('vendors.school_id', schoolId);
+        }
+        final orderRes = await orderQuery.limit(100);
+        orders = (orderRes as List)
+            .map((e) =>
+                {...Map<String, dynamic>.from(e), 'explore_type': 'order'})
+            .toList();
+
+        int maxAllowedOrders = profiles.length ~/ 5;
+        if (orders.length > maxAllowedOrders) {
+          orders = orders.sublist(0, maxAllowedOrders);
         }
 
-        final List<dynamic> groupResponse = await groupQuery;
+        mixedResults.addAll(profiles);
+        mixedResults.addAll(orders);
 
-        // DEBUG PRINT: Check your console to see if your created groups appear here
-        debugPrint("Fetched ${groupResponse.length} groups from Supabase");
-        for (var g in groupResponse) {
-          debugPrint(
-              "Found Group: ${g['group_name']} | Public: ${g['is_public']}");
-        }
+        // Mix in Gists, Moments, Tickets
+        final gistRes = await supabase
+            .from('gists')
+            .select('*, profiles:user_id(username, avatar_url)')
+            .eq('status', 'active')
+            .limit(50);
+        mixedResults.addAll((gistRes as List).map(
+            (e) => {...Map<String, dynamic>.from(e), 'explore_type': 'gist'}));
 
-        results = groupResponse.map((g) {
-          return {
-            ...Map<String, dynamic>.from(g),
-            'is_group': true,
-          };
-        }).toList();
+        final momentRes = await supabase
+            .from('moments')
+            .select('*, profiles:user_id(username, avatar_url, school_name)')
+            .order('created_at', ascending: false)
+            .limit(50);
+        mixedResults.addAll((momentRes as List).map((e) =>
+            {...Map<String, dynamic>.from(e), 'explore_type': 'moment'}));
 
-        // Relaxed filter: Includes groups that are public OR have no public status set
-        // If you still don't see your groups, comment out the lines below to see everything
-        results = results
+        final ticketRes = await supabase
+            .from('tickets')
+            .select('*')
+            .eq('status', 'active')
+            .gt('date', now.split('T')[0])
+            .limit(30);
+        mixedResults.addAll((ticketRes as List).map((e) =>
+            {...Map<String, dynamic>.from(e), 'explore_type': 'ticket'}));
+
+        mixedResults.shuffle(Random());
+      }
+
+      if (mounted) {
+        setState(() {
+          _exploreItems = mixedResults;
+          _generateMasonryBlueprints(); // Only generated for the Discover feed!
+          _isLoading = false;
+        });
+      }
+    } else {
+      // ==========================================
+      // GROUPS FEED
+      // ==========================================
+      var groupQuery = supabase.from('chats').select().eq('is_group', true);
+      if (_searchQuery.trim().isNotEmpty) {
+        groupQuery = groupQuery.ilike('group_name', '%${_searchQuery.trim()}%');
+      }
+
+      try {
+        final res = await groupQuery;
+        var groupList = (res as List)
+            .map((g) =>
+                {...Map<String, dynamic>.from(g), 'explore_type': 'group'})
+            .toList();
+        groupList = groupList
             .where((g) => g['is_public'] == true || g['is_public'] == null)
             .toList();
-      }
 
-      results.shuffle(Random());
+        if (mounted) {
+          setState(() {
+            _exploreItems = groupList;
+            // No masonry blueprint needed here!
+            _isLoading = false;
+          });
+        }
+      } catch (e) {
+        debugPrint("Explore Groups Error: $e");
+        if (mounted) setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  double getAdjustedPrice(dynamic item) {
+    final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+    switch (item['portion']) {
+      case 'Half':
+        return price / 2;
+      case 'Three-Quarter':
+        return price * 0.75;
+      default:
+        return price;
+    }
+  }
+
+  void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
+    final vendorName =
+        selectedOption['vendors']?['name']?.toString() ?? 'Vendor';
+    final items = selectedOption['items'] as List<dynamic>;
+    final total = items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
+
+    final orderData = {
+      'vendor': vendorName,
+      'items': items
+          .map((i) => {
+                'name': i['name'],
+                'price': getAdjustedPrice(i).toStringAsFixed(0),
+                'qty': i['quantity'] ?? 1,
+              })
+          .toList(),
+      'total': total.toStringAsFixed(0)
+    };
+
+    _openDeliveryAgentGrid(orderData); // No premium check needed!
+  }
+
+  void _openDeliveryAgentGrid(Map<String, dynamic> orderData) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => Container(
+        constraints:
+            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
+        child: Column(
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Select a Runner 🏃‍♂️',
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF4CAF50))),
+            ),
+            const Divider(height: 1, color: Colors.white24),
+            Expanded(
+              child: FutureBuilder<List<dynamic>>(
+                future: supabase
+                    .from('profiles')
+                    .select('id, username, avatar_url, gender')
+                    .eq('is_delivery_agent', true)
+                    .eq('is_available_for_delivery', true)
+                    .eq('school_id', widget.userPreferences.schoolId ?? ''),
+                builder: (ctx, snap) {
+                  if (snap.connectionState == ConnectionState.waiting)
+                    return const Center(
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF4CAF50)));
+                  final list = snap.data ?? [];
+                  if (list.isEmpty)
+                    return const Center(
+                        child: Text('No agents available right now 😴',
+                            style: TextStyle(color: Colors.white70)));
+
+                  list.shuffle();
+                  return GridView.builder(
+                    padding: const EdgeInsets.all(16),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 16,
+                      childAspectRatio: 0.85,
+                    ),
+                    itemCount: list.length,
+                    itemBuilder: (ctx, i) {
+                      final person = list[i];
+                      return GestureDetector(
+                        onTap: () => _sendOrderToAppChat(person, orderData),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CircleAvatar(
+                              radius: 36,
+                              backgroundColor: Colors.grey[800],
+                              backgroundImage: person['avatar_url'] != null
+                                  ? NetworkImage(person['avatar_url'])
+                                  : null,
+                              child: person['avatar_url'] == null
+                                  ? const Icon(Icons.delivery_dining,
+                                      color: Colors.white54, size: 30)
+                                  : null,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(person['username'] ?? 'Agent',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                          ],
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendOrderToAppChat(
+      Map<String, dynamic> person, Map<String, dynamic> orderData) async {
+    try {
+      final myId = supabase.auth.currentUser!.id;
+      final agentId = person['id'];
+
+      showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => const Center(
+              child: CircularProgressIndicator(color: Color(0xFF4CAF50))));
+
+      final response = await supabase.rpc('get_or_create_personal_chat',
+          params: {'user_a': myId, 'user_b': agentId});
+      final chatId = response.toString();
+      final String orderJson = jsonEncode(orderData);
 
       if (mounted) {
-        setState(() {
-          _exploreItems = results;
-          _isLoading = false;
-        });
+        Navigator.pop(context); // Close loading
+        Navigator.pop(context); // Close bottom sheet
+        Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (_) => IndividualChatScreen(
+                      chatId: chatId,
+                      recipientProfile: {
+                        'id': agentId,
+                        'username': person['username'] ?? 'Delivery Agent',
+                        'avatar_url': person['avatar_url'],
+                        'school_name': widget.userPreferences.schoolName,
+                        'is_group': false,
+                        'pending_order': orderJson,
+                      },
+                      userPreferences: widget.userPreferences,
+                    )));
       }
     } catch (e) {
-      debugPrint("Explore Fetch Error: $e");
       if (mounted) {
-        setState(() {
-          _exploreItems = [];
-          _isLoading = false;
-        });
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to route order.')));
       }
     }
   }
@@ -125,7 +450,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
       final response = await supabase
           .from('stories')
           .select(
-              'id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)') // <-- Added user_id here
+              'id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)')
           .eq('user_id', userId)
           .gt('expires_at', DateTime.now().toUtc().toIso8601String())
           .order('created_at', ascending: false);
@@ -150,57 +475,59 @@ class _ExploreScreenState extends State<ExploreScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF121212), // <-- OFFICIAL BG COLOR
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: const Color(0xFF121212), // <-- OFFICIAL BG COLOR
         elevation: 0,
-        centerTitle: true, // Centered just like HomeScreen
+        scrolledUnderElevation: 0, // <-- FIX: STOPS COLOR CHANGE ON SCROLL
+        surfaceTintColor:
+            Colors.transparent, // <-- FIX: STOPS COLOR CHANGE ON SCROLL
+        centerTitle: true,
         iconTheme: const IconThemeData(color: Colors.white),
         title: Image.asset(
           'assets/images/explore.png',
-          height: 100, // Adjusted to match your other headers
+          height: 100,
           fit: BoxFit.contain,
         ),
       ),
       body: Column(
         children: [
-          // SEARCH BAR
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8),
             child: TextField(
+              controller: _searchController,
               style: const TextStyle(color: Colors.white),
-              onChanged: (value) {
-                setState(() => _searchQuery = value);
+              textInputAction: TextInputAction.search, // Keyboard search button
+              onSubmitted: (value) {
+                // <-- FIX: Only search when they press Enter!
+                setState(() => _searchQuery = value.trim());
                 _fetchExploreData();
               },
               decoration: InputDecoration(
                 hintText: _selectedSegment == 0
-                    ? 'Search people...'
+                    ? 'Search explore...'
                     : 'Search groups...',
                 hintStyle: const TextStyle(color: Colors.white54),
                 prefixIcon: const Icon(Icons.search, color: Colors.white54),
                 filled: true,
-                fillColor: Colors.grey[900],
+                fillColor: const Color(0xFF1E1E1E), // Correct Card Color
                 contentPadding: EdgeInsets.zero,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none),
               ),
             ),
           ),
-
-          // SEGMENTED CONTROL
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: SizedBox(
               width: double.infinity,
               child: CupertinoSlidingSegmentedControl<int>(
-                backgroundColor: Colors.grey[900]!.withOpacity(0.5),
-                thumbColor: Colors.grey[800]!,
+                backgroundColor: const Color(0xFF1E1E1E).withOpacity(0.5),
+                thumbColor: const Color(0xFF2A2A2A),
                 groupValue: _selectedSegment,
                 children: {
-                  0: _buildSegmentText("People", 0),
+                  0: _buildSegmentText("Discover", 0),
                   1: _buildSegmentText("Groups", 1),
                 },
                 onValueChanged: (value) {
@@ -215,56 +542,19 @@ class _ExploreScreenState extends State<ExploreScreen> {
               ),
             ),
           ),
-
           const SizedBox(height: 8),
-
           Expanded(
             child: _isLoading
                 ? const Center(
-                    child: CircularProgressIndicator(
-                      color: Color(0xFF4CAF50),
-                    ),
-                  )
+                    child: CircularProgressIndicator(color: Color(0xFF4CAF50)))
                 : _exploreItems.isEmpty
                     ? _buildEmptyState()
                     : RefreshIndicator(
                         onRefresh: _fetchExploreData,
                         color: const Color(0xFF4CAF50),
-                        child: GridView.builder(
-                          padding: const EdgeInsets.all(12),
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 10,
-                            mainAxisSpacing: 10,
-                            childAspectRatio: 0.75,
-                          ),
-                          itemCount: _exploreItems.length,
-                          itemBuilder: (context, index) {
-                            final item = _exploreItems[index];
-                            final cardChild = item['is_group'] == true
-                                ? _buildGroupCard(item)
-                                : _buildUserCard(item);
-
-                            return TweenAnimationBuilder<double>(
-                              duration: Duration(
-                                milliseconds: 300 + (index % 6 * 50),
-                              ),
-                              curve: Curves.easeOut,
-                              tween: Tween<double>(begin: 0, end: 1),
-                              builder: (context, value, child) {
-                                return Opacity(
-                                  opacity: value,
-                                  child: Transform.translate(
-                                    offset: Offset(0, 20 * (1 - value)),
-                                    child: child,
-                                  ),
-                                );
-                              },
-                              child: cardChild,
-                            );
-                          },
-                        ),
+                        child: _selectedSegment == 0
+                            ? _buildCustomMasonryGrid()
+                            : _buildStandardGrid(),
                       ),
           ),
         ],
@@ -287,11 +577,465 @@ class _ExploreScreenState extends State<ExploreScreen> {
     );
   }
 
-  Widget _buildUserCard(Map<String, dynamic> user) {
-    final hasStory = user['has_active_story'] == true;
-    final isPlus = user['subscription_tier'] == 'Membership';
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.explore_outlined, size: 60, color: Colors.grey[800]),
+          const SizedBox(height: 16),
+          Text(
+            _selectedSegment == 0 ? "Nothing found" : "No groups found",
+            style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 16,
+                fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 8),
+          const Text("Try searching for something else",
+              style: TextStyle(color: Colors.white38, fontSize: 13)),
+          const SizedBox(height: 16),
+          TextButton.icon(
+            onPressed: _fetchExploreData,
+            icon: const Icon(Icons.refresh, size: 18),
+            label: const Text("Refresh"),
+            style:
+                TextButton.styleFrom(foregroundColor: const Color(0xFF4CAF50)),
+          )
+        ],
+      ),
+    );
+  }
+
+  // --- SLIVER SCROLL ARCHITECTURE FOR BUTTERY SMOOTH LAYOUT ---
+
+  // --- OUTSIDE THE BOX: Calculate the heavy math ONCE in the background ---
+  void _generateMasonryBlueprints() {
+    _masonryBlueprints.clear();
+
+    final largeItems = _exploreItems
+        .where(
+            (e) => e['explore_type'] == 'moment' || e['explore_type'] == 'gist')
+        .toList();
+    final smallItems = _exploreItems
+        .where(
+            (e) => e['explore_type'] != 'moment' && e['explore_type'] != 'gist')
+        .toList();
+
+    int sIdx = 0;
+    int lIdx = 0;
+
+    while (sIdx < smallItems.length || lIdx < largeItems.length) {
+      int smallLeft = smallItems.length - sIdx;
+      int largeLeft = largeItems.length - lIdx;
+
+      if (largeLeft > 0 && smallLeft >= 2) {
+        bool largeOnLeft = (lIdx % 2 == 0);
+        if (largeOnLeft) {
+          _masonryBlueprints.add({
+            'type': 'L_SS',
+            'large': largeItems[lIdx++],
+            'small1': smallItems[sIdx++],
+            'small2': smallItems[sIdx++],
+          });
+        } else {
+          _masonryBlueprints.add({
+            'type': 'SS_L',
+            'small1': smallItems[sIdx++],
+            'small2': smallItems[sIdx++],
+            'large': largeItems[lIdx++],
+          });
+        }
+      } else if (smallLeft >= 3) {
+        _masonryBlueprints.add({
+          'type': 'S_S_S',
+          'small1': smallItems[sIdx++],
+          'small2': smallItems[sIdx++],
+          'small3': smallItems[sIdx++],
+        });
+      } else if (largeLeft > 0) {
+        _masonryBlueprints.add({
+          'type': 'L_ONLY',
+          'large': largeItems[lIdx++],
+        });
+      } else if (smallLeft > 0) {
+        _masonryBlueprints.add({
+          'type': 'REMAINDER',
+          'items': [
+            smallItems[sIdx++],
+            if (smallLeft == 2) smallItems[sIdx++],
+          ]
+        });
+      }
+    }
+  }
+
+  // --- OUTSIDE THE BOX: Render instantly from blueprints without math ---
+  Widget _buildCustomMasonryGrid() {
+    // 1. Instantly group the data (Takes < 1ms)
+    final largeItems = _exploreItems
+        .where(
+            (e) => e['explore_type'] == 'moment' || e['explore_type'] == 'gist')
+        .toList();
+    final smallItems = _exploreItems
+        .where(
+            (e) => e['explore_type'] != 'moment' && e['explore_type'] != 'gist')
+        .toList();
+
+    List<Map<String, dynamic>> layouts = [];
+    int sIdx = 0;
+    int lIdx = 0;
+
+    while (sIdx < smallItems.length || lIdx < largeItems.length) {
+      int smallLeft = smallItems.length - sIdx;
+      int largeLeft = largeItems.length - lIdx;
+
+      if (largeLeft > 0 && smallLeft >= 2) {
+        bool largeOnLeft = (lIdx % 2 == 0);
+        if (largeOnLeft) {
+          layouts.add({
+            'type': 'L_SS',
+            'large': largeItems[lIdx++],
+            'small1': smallItems[sIdx++],
+            'small2': smallItems[sIdx++],
+          });
+        } else {
+          layouts.add({
+            'type': 'SS_L',
+            'small1': smallItems[sIdx++],
+            'small2': smallItems[sIdx++],
+            'large': largeItems[lIdx++],
+          });
+        }
+      } else if (smallLeft >= 3) {
+        layouts.add({
+          'type': 'S_S_S',
+          'small1': smallItems[sIdx++],
+          'small2': smallItems[sIdx++],
+          'small3': smallItems[sIdx++],
+        });
+      } else if (largeLeft > 0) {
+        layouts.add({
+          'type': 'L_ONLY',
+          'large': largeItems[lIdx++],
+        });
+      } else if (smallLeft > 0) {
+        layouts.add({
+          'type': 'REMAINDER',
+          'items': [
+            smallItems[sIdx++],
+            if (smallLeft >= 2) smallItems[sIdx++],
+          ]
+        });
+      }
+    }
+
+    // 2. Read exact device width directly to ignore keyboard/appbar resizes
+    final double screenWidth = MediaQuery.sizeOf(context).width;
+    const double spacing = 10.0;
+    final double w = (screenWidth - 32 - (spacing * 2)) / 3;
+    final double h = w * 1.33;
+
+    // 3. Lazy-load the layouts!
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      physics: const AlwaysScrollableScrollPhysics(),
+      cacheExtent: 2500, // <-- FAST SCROLLING: Keeps off-screen images loaded!
+      itemCount: layouts.length,
+      itemBuilder: (context, index) {
+        final row = layouts[index];
+        final type = row['type'];
+
+        if (type == 'L_SS') {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: spacing),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              _buildSizedCard(
+                  [row['large']], 0, w * 2 + spacing, h * 2 + spacing),
+              const SizedBox(width: spacing),
+              Column(children: [
+                _buildSizedCard([row['small1']], 0, w, h),
+                const SizedBox(height: spacing),
+                _buildSizedCard([row['small2']], 0, w, h),
+              ]),
+            ]),
+          );
+        } else if (type == 'SS_L') {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: spacing),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Column(children: [
+                _buildSizedCard([row['small1']], 0, w, h),
+                const SizedBox(height: spacing),
+                _buildSizedCard([row['small2']], 0, w, h),
+              ]),
+              const SizedBox(width: spacing),
+              _buildSizedCard(
+                  [row['large']], 0, w * 2 + spacing, h * 2 + spacing),
+            ]),
+          );
+        } else if (type == 'S_S_S') {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: spacing),
+            child: Row(children: [
+              _buildSizedCard([row['small1']], 0, w, h),
+              const SizedBox(width: spacing),
+              _buildSizedCard([row['small2']], 0, w, h),
+              const SizedBox(width: spacing),
+              _buildSizedCard([row['small3']], 0, w, h),
+            ]),
+          );
+        } else if (type == 'L_ONLY') {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: spacing),
+            child: Align(
+                alignment: Alignment.centerLeft,
+                child: _buildSizedCard(
+                    [row['large']], 0, w * 2 + spacing, h * 2 + spacing)),
+          );
+        } else if (type == 'REMAINDER') {
+          final items = row['items'] as List;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: spacing),
+            child: Row(children: [
+              _buildSizedCard(items, 0, w, h),
+              if (items.length == 2) ...[
+                const SizedBox(width: spacing),
+                _buildSizedCard(items, 1, w, h),
+              ]
+            ]),
+          );
+        }
+        return const SizedBox.shrink();
+      },
+    );
+  }
+
+  Widget _buildStandardGrid() {
+    return GridView.builder(
+      padding: const EdgeInsets.all(12),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+        childAspectRatio: 0.75,
+      ),
+      itemCount: _exploreItems.length,
+      itemBuilder: (context, index) => _buildGroupCard(_exploreItems[index]),
+    );
+  }
+
+  Widget _buildSizedCard(List items, int index, double width, double height) {
+    if (index >= items.length) return SizedBox(width: width, height: height);
+    return SizedBox(
+      width: width,
+      height: height,
+      child: RepaintBoundary(child: _buildDiscoverCard(items[index])),
+    );
+  }
+
+  Widget _buildDiscoverCard(Map<String, dynamic> item) {
+    final type = item['explore_type'];
+    if (type == 'profile') return _buildUserCard(item);
+
+    Color stripColor = Colors.transparent;
+    Widget content = const SizedBox();
+    VoidCallback? onTap;
+
+    if (type == 'gist') {
+      stripColor = const Color(0xFF4CAF50); // Green
+      final imageUrl = item['image_url'] ?? '';
+      final title = item['title'] ?? 'Gist';
+      final isVideo = item['media_type'] == 'video';
+      content =
+          _buildMediaThumb(imageUrl, title, Icons.article, isVideo: isVideo);
+      onTap = () => Navigator.pushNamed(context, '/gist',
+          arguments: {'id': item['id'].toString()});
+    } else if (type == 'moment') {
+      stripColor = Colors.amber; // Yellow
+      final imageUrl = item['media_url'] ?? '';
+      final String rawCaption = (item['caption'] ?? '').toString().trim();
+      final title = rawCaption.isNotEmpty ? rawCaption : 'Moment';
+      final isVideo = item['media_type'] == 'video';
+      content = _buildMediaThumb(imageUrl, title, Icons.photo_library,
+          isVideo: isVideo);
+      onTap = () {
+        final allMoments =
+            _exploreItems.where((e) => e['explore_type'] == 'moment').toList();
+        final initialIndex = allMoments.indexOf(item);
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ExploreVerticalMomentFeed(
+              moments: allMoments,
+              initialIndex: initialIndex == -1 ? 0 : initialIndex,
+              userPreferences: widget.userPreferences,
+            ),
+          ),
+        );
+      };
+    } else if (type == 'ticket') {
+      stripColor = Colors.purpleAccent; // Purple
+      final imageUrl = item['photo_url'] ?? '';
+      final title = item['name'] ?? 'Ticket';
+      content = _buildMediaThumb(imageUrl, title, Icons.confirmation_number);
+      onTap = () => Navigator.pushNamed(context, '/ticket',
+          arguments: {'id': item['id'].toString()});
+    } else if (type == 'order') {
+      stripColor = Colors.transparent; // Transparent
+      content = _buildOrderThumb(item);
+      onTap = () => _showDeliveryPicker(item);
+    }
 
     return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.grey[900],
+          borderRadius: BorderRadius.circular(16),
+        ),
+        clipBehavior: Clip.hardEdge,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: content),
+            if (stripColor != Colors.transparent)
+              Container(height: 4, color: stripColor),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --- VIDEO THUMBNAIL CACHE & BUILDER ---
+  Widget _buildMediaThumb(String url, String text, IconData fallbackIcon,
+      {bool isVideo = false}) {
+    Widget imageWidget;
+
+    if (isVideo && url.isNotEmpty) {
+      if (_videoThumbCache.containsKey(url)) {
+        imageWidget = Image.memory(_videoThumbCache[url]!, fit: BoxFit.cover);
+      } else {
+        imageWidget = FutureBuilder<Uint8List?>(
+          future: VideoThumbnail.thumbnailData(
+            video: url,
+            imageFormat: ImageFormat.JPEG,
+            maxWidth: 350,
+            quality: 50,
+          ),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return Container(color: Colors.grey[850]);
+            }
+            if (snapshot.hasData && snapshot.data != null) {
+              _videoThumbCache[url] = snapshot.data!;
+              return Image.memory(snapshot.data!, fit: BoxFit.cover);
+            }
+            return Icon(Icons.videocam, color: Colors.white24, size: 40);
+          },
+        );
+      }
+    } else if (url.isNotEmpty) {
+      imageWidget = CachedNetworkImage(
+        imageUrl: url,
+        fit: BoxFit.cover,
+        memCacheWidth: 350,
+        placeholder: (ctx, url) => Container(color: Colors.grey[850]),
+        errorWidget: (ctx, url, err) =>
+            Icon(fallbackIcon, color: Colors.white24, size: 40),
+      );
+    } else {
+      imageWidget = Icon(fallbackIcon, color: Colors.white24, size: 40);
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        imageWidget,
+        Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.bottomCenter,
+              end: Alignment.topCenter,
+              colors: [Colors.black87, Colors.transparent],
+            ),
+          ),
+        ),
+        if (isVideo)
+          const Center(
+              child: Icon(Icons.play_circle_filled,
+                  color: Colors.white70, size: 36)),
+        Positioned(
+          bottom: 12,
+          left: 12,
+          right: 12,
+          child: Text(
+            text,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildOrderThumb(Map<String, dynamic> item) {
+    final vendor = item['vendors']?['name'] ?? 'Vendor';
+    final comboDesc = item['combo_description'] ?? 'Combo Option';
+    final items = item['items'] as List<dynamic>? ?? [];
+    final total = items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
+
+    return Container(
+      padding: const EdgeInsets.all(8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+              color: const Color(0xFF4CAF50),
+              borderRadius: BorderRadius.circular(6)),
+          child: Row(
+            children: [
+              const Icon(Icons.receipt_long, color: Colors.black, size: 12),
+              const SizedBox(width: 4),
+              Expanded(
+                  child: Text(vendor,
+                      style: const TextStyle(
+                          color: Colors.black,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis)),
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        Expanded(
+          child: Text(comboDesc,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis),
+        ),
+        const Divider(color: Colors.white24, height: 8),
+        Text('₦${total.toStringAsFixed(0)}',
+            style: const TextStyle(
+                color: Color(0xFF4CAF50),
+                fontWeight: FontWeight.bold,
+                fontSize: 14)),
+      ]),
+    );
+  }
+
+  Widget _buildUserCard(Map<String, dynamic> user) {
+    final isPlus = user['subscription_tier'] == 'Membership';
+    final hasStory = user['has_active_story'] == true;
+
+    return GestureDetector(
+      // Tapping the card background opens their profile
       onTap: () => UniversalProfileCard.show(
           context, user['id'], widget.userPreferences),
       child: Container(
@@ -306,7 +1050,11 @@ class _ExploreScreenState extends State<ExploreScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             GestureDetector(
-              onTap: hasStory ? () => _openStory(user['id']) : null,
+              // TAPPING THE AVATAR OPENS THEIR STORY!
+              onTap: hasStory
+                  ? () => _openStory(user['id'])
+                  : () => UniversalProfileCard.show(
+                      context, user['id'], widget.userPreferences),
               child: Container(
                 padding: EdgeInsets.all(hasStory ? 2.5 : 0),
                 decoration: BoxDecoration(
@@ -336,476 +1084,99 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Flexible(
-                    child: Text(
-                      '${user['username']}',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 12),
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    child: Text('${user['username']}',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12),
+                        overflow: TextOverflow.ellipsis),
                   ),
                   if (isPlus)
                     const Padding(
-                      padding: EdgeInsets.only(left: 2.0),
-                      child: Icon(Icons.star, color: Colors.amber, size: 10),
-                    ),
+                        padding: EdgeInsets.only(left: 2.0),
+                        child: Icon(Icons.star, color: Colors.amber, size: 10)),
                 ],
               ),
             ),
-            Text(
-              user['school_name'] ?? 'Allowance',
-              style: const TextStyle(color: Colors.white54, fontSize: 10),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+            Text(user['school_name'] ?? 'Allowance',
+                style: const TextStyle(color: Colors.white54, fontSize: 10),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
           ],
         ),
       ),
     );
   }
 
-  Future<Map<String, dynamic>> _fetchGroupPreviewData(
-      Map<String, dynamic> group) async {
-    final currentUserId = supabase.auth.currentUser?.id;
-    final groupIdRaw = group['id'];
-    final groupIdText = groupIdRaw.toString();
-
-    final creatorId = (group['created_by'] ??
-            group['creator_id'] ??
-            group['owner_id'] ??
-            group['user_id'] ??
-            group['admin_id'])
-        ?.toString();
-
-    Map<String, dynamic>? creatorProfile;
-
-    if (creatorId != null && creatorId.isNotEmpty) {
-      creatorProfile = await supabase
-          .from('profiles')
-          .select('id, username, avatar_url, school_name')
-          .eq('id', creatorId)
-          .maybeSingle();
-    }
-
-    final List<Map<String, dynamic>> members = [];
-
-    try {
-      final participantRows = await supabase
-          .from('chat_participants')
-          .select('user_id')
-          .eq('chat_id', groupIdRaw);
-
-      final participantIds = <String>{
-        for (final row in participantRows) row['user_id'].toString(),
-      };
-
-      if (participantIds.isNotEmpty) {
-        final profileRows = await supabase
-            .from('profiles')
-            .select('id, username, avatar_url, school_name')
-            .inFilter('id', participantIds.toList());
-
-        for (final profile in profileRows) {
-          members.add({
-            'user_id': profile['id'],
-            'profiles': Map<String, dynamic>.from(profile),
-          });
-        }
-      }
-    } catch (e) {
-      debugPrint('Member fetch error: $e');
-    }
-
-    // Fallback: if no participant rows exist, still show the creator or current user
-    if (members.isEmpty) {
-      if (creatorProfile != null) {
-        members.add({
-          'user_id': creatorProfile['id'],
-          'profiles': creatorProfile,
-        });
-      } else if (currentUserId != null) {
-        final myProfile = await supabase
-            .from('profiles')
-            .select('id, username, avatar_url, school_name')
-            .eq('id', currentUserId)
-            .maybeSingle();
-
-        if (myProfile != null) {
-          members.add({
-            'user_id': myProfile['id'],
-            'profiles': Map<String, dynamic>.from(myProfile),
-          });
-        }
-      }
-    }
-
-    final isMember = members.any(
-      (m) => m['user_id'].toString() == currentUserId.toString(),
-    );
-
-    return {
-      'members': members,
-      'creator_profile': creatorProfile,
-      'is_member': isMember,
-      'creator_id': creatorId,
-      'group_id_text': groupIdText,
-    };
-  }
-
   Future<void> _joinAndOpenGroup(Map<String, dynamic> group) async {
     final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please log in first.')),
-      );
-      return;
-    }
-
-    final chatIdRaw = group['id'];
-    final chatId = chatIdRaw.toString();
-
+    if (currentUserId == null) return;
     try {
       final existingMember = await supabase
           .from('chat_participants')
           .select('chat_id, user_id')
-          .eq('chat_id', chatIdRaw)
+          .eq('chat_id', group['id'])
           .eq('user_id', currentUserId)
           .maybeSingle();
-
-      if (existingMember == null) {
-        await supabase.from('chat_participants').insert({
-          'chat_id': chatIdRaw,
-          'user_id': currentUserId,
-        });
-      }
-
+      if (existingMember == null)
+        await supabase
+            .from('chat_participants')
+            .insert({'chat_id': group['id'], 'user_id': currentUserId});
       if (!mounted) return;
-
-      Navigator.pop(context); // close preview
-
+      Navigator.pop(context);
       Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => ChatRoomScreen(
-            chatId: chatId,
-            chatTitle: group['group_name'] ?? 'Group Chat',
-            isGroup: true,
-            isAdmin: false,
-            userPreferences: widget.userPreferences, // ← THIS WAS MISSING
-          ),
-        ),
-      );
+          context,
+          MaterialPageRoute(
+              builder: (_) => ChatRoomScreen(
+                  chatId: group['id'].toString(),
+                  chatTitle: group['group_name'] ?? 'Group Chat',
+                  isGroup: true,
+                  isAdmin: false,
+                  userPreferences: widget.userPreferences)));
     } catch (e) {
       debugPrint("Join/Open group error: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not join group: $e')),
-        );
-      }
     }
   }
 
   Future<void> _showGroupPreview(Map<String, dynamic> group) async {
-    await showModalBottomSheet(
+    // Basic dialog to match original functionality
+    final groupName = group['group_name'] ?? 'Unknown Group';
+    final isPublic = group['is_public'] == true;
+    showModalBottomSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) {
-        return DraggableScrollableSheet(
-          initialChildSize: 0.82,
-          minChildSize: 0.58,
-          maxChildSize: 0.96,
-          builder: (_, controller) {
-            return FutureBuilder<Map<String, dynamic>>(
-              future: _fetchGroupPreviewData(group),
-              builder: (context, snapshot) {
-                final groupName = group['group_name'] ?? 'Unknown Group';
-                final groupAvatar = group['group_avatar'];
-                final groupDescription =
-                    group['group_description'] ?? 'No description provided.';
-                final isPublic = group['is_public'] == true;
-
-                final members = List<Map<String, dynamic>>.from(
-                    snapshot.data?['members'] ?? []);
-                final creatorProfile =
-                    snapshot.data?['creator_profile'] as Map<String, dynamic>?;
-                final isMember = snapshot.data?['is_member'] == true;
-
-                return Container(
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF111111),
-                    borderRadius:
-                        BorderRadius.vertical(top: Radius.circular(24)),
-                  ),
-                  child: ListView(
-                    controller: controller,
-                    padding: const EdgeInsets.all(20),
-                    children: [
-                      Center(
-                        child: Container(
-                          width: 44,
-                          height: 5,
-                          decoration: BoxDecoration(
-                            color: Colors.white24,
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(18),
-                            child: Container(
-                              width: 84,
-                              height: 84,
-                              color: Colors.grey[900],
-                              child: groupAvatar != null
-                                  ? CachedNetworkImage(
-                                      imageUrl: groupAvatar,
-                                      fit: BoxFit.cover,
-                                      placeholder: (context, url) =>
-                                          Container(color: Colors.grey[850]),
-                                      errorWidget: (context, url, error) =>
-                                          const Icon(Icons.groups,
-                                              color: Colors.white54, size: 34),
-                                    )
-                                  : const Icon(Icons.groups,
-                                      color: Colors.white54, size: 34),
-                            ),
-                          ),
-                          const SizedBox(width: 14),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  groupName,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  isPublic ? 'Public Group' : 'Private Group',
-                                  style: TextStyle(
-                                    color: isPublic
-                                        ? Colors.greenAccent
-                                        : Colors.orangeAccent,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  groupDescription,
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    height: 1.35,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 20),
-                      if (creatorProfile != null) ...[
-                        const Text(
-                          'Creator',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        _buildPersonRow(
-                          avatarUrl: creatorProfile['avatar_url'],
-                          username: creatorProfile['username'] ?? 'Creator',
-                          schoolName: creatorProfile['school_name'],
-                        ),
-                        const SizedBox(height: 18),
-                      ],
-                      const Text(
-                        'Members',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      if (snapshot.connectionState == ConnectionState.waiting)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 20),
-                          child: Center(
-                            child: CircularProgressIndicator(
-                              color: Color(0xFF4CAF50),
-                            ),
-                          ),
-                        )
-                      else if (members.isEmpty)
-                        const Text(
-                          'No members found.',
-                          style: TextStyle(color: Colors.white54),
-                        )
-                      else
-                        GridView.builder(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: members.length,
-                          gridDelegate:
-                              const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 10,
-                            mainAxisSpacing: 10,
-                            childAspectRatio: 0.72,
-                          ),
-                          itemBuilder: (context, index) {
-                            final member = members[index];
-                            final profile =
-                                member['profiles'] as Map<String, dynamic>?;
-
-                            return Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                CircleAvatar(
-                                  radius: 24,
-                                  backgroundColor: Colors.grey[800],
-                                  backgroundImage:
-                                      profile?['avatar_url'] != null
-                                          ? CachedNetworkImageProvider(
-                                              profile!['avatar_url'])
-                                          : null,
-                                  child: profile?['avatar_url'] == null
-                                      ? Text(
-                                          (profile?['username'] ?? 'U')
-                                              .toString()[0]
-                                              .toUpperCase(),
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        )
-                                      : null,
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  profile?['username'] ?? 'User',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                                if (profile?['school_name'] != null)
-                                  Text(
-                                    profile!['school_name'],
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      color: Colors.white54,
-                                      fontSize: 9,
-                                    ),
-                                  ),
-                              ],
-                            );
-                          },
-                        ),
-                      const SizedBox(height: 22),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: snapshot.connectionState ==
-                                  ConnectionState.waiting
-                              ? null
-                              : () => _joinAndOpenGroup(group),
-                          icon: Icon(
-                            isMember
-                                ? Icons.chat_bubble_outline
-                                : Icons.group_add,
-                          ),
-                          label: Text(isMember ? 'Open Group' : 'Join Group'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF4CAF50),
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildPersonRow({
-    required String? avatarUrl,
-    required String username,
-    String? schoolName,
-  }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.grey[900],
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
-        children: [
-          CircleAvatar(
-            radius: 22,
-            backgroundColor: Colors.grey[800],
-            backgroundImage: avatarUrl != null
-                ? CachedNetworkImageProvider(avatarUrl)
-                : null,
-            child: avatarUrl == null
-                ? Text(
-                    username.isNotEmpty ? username[0].toUpperCase() : 'U',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  )
-                : null,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  username,
-                  style: const TextStyle(
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(groupName,
+                style: const TextStyle(
                     color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                  ),
-                ),
-                if (schoolName != null)
-                  Text(
-                    schoolName,
-                    style: const TextStyle(color: Colors.white54, fontSize: 11),
-                  ),
-              ],
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Text(isPublic ? 'Public Group' : 'Private Group',
+                style: TextStyle(
+                    color:
+                        isPublic ? Colors.greenAccent : Colors.orangeAccent)),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () => _joinAndOpenGroup(group),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4CAF50),
+                    padding: const EdgeInsets.symmetric(vertical: 16)),
+                child: const Text('Join Group',
+                    style: TextStyle(
+                        color: Colors.black, fontWeight: FontWeight.bold)),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -826,73 +1197,293 @@ class _ExploreScreenState extends State<ExploreScreen> {
               width: 52,
               height: 52,
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                color: Colors.blueGrey[800],
-              ),
+                  borderRadius: BorderRadius.circular(14),
+                  color: Colors.blueGrey[800]),
               clipBehavior: Clip.hardEdge,
               child: group['group_avatar'] != null
                   ? CachedNetworkImage(
-                      imageUrl: group['group_avatar'],
-                      fit: BoxFit.cover,
-                      placeholder: (context, url) =>
-                          Container(color: Colors.grey[800]),
-                      errorWidget: (context, url, error) =>
-                          const Icon(Icons.groups, color: Colors.white54),
-                    )
+                      imageUrl: group['group_avatar'], fit: BoxFit.cover)
                   : const Icon(Icons.groups, color: Colors.white, size: 26),
             ),
             const SizedBox(height: 8),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8.0),
-              child: Text(
-                group['group_name'] ?? 'Unknown Group',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 12,
-                ),
-                maxLines: 1,
-                textAlign: TextAlign.center,
-                overflow: TextOverflow.ellipsis,
-              ),
+              child: Text(group['group_name'] ?? 'Unknown Group',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12),
+                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis),
             ),
-            const Text(
-              'Group',
-              style: TextStyle(color: Colors.blueAccent, fontSize: 10),
-            ),
+            const Text('Group',
+                style: TextStyle(color: Colors.blueAccent, fontSize: 10)),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.explore_outlined, size: 60, color: Colors.grey[800]),
-          const SizedBox(height: 16),
-          Text(
-            _selectedSegment == 0 ? "No people found" : "No groups found",
-            style: const TextStyle(
-                color: Colors.white70,
-                fontSize: 16,
-                fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 8),
-          const Text("Try searching for something else",
-              style: TextStyle(color: Colors.white38, fontSize: 13)),
-          const SizedBox(height: 16),
-          TextButton.icon(
-            onPressed: _fetchExploreData,
-            icon: const Icon(Icons.refresh, size: 18),
-            label: const Text("Refresh"),
-            style:
-                TextButton.styleFrom(foregroundColor: const Color(0xFF4CAF50)),
-          )
-        ],
+// =========================================================================
+// TIKTOK-STYLE MOMENT VIEWER FOR EXPLORE SCREEN
+// =========================================================================
+class ExploreVerticalMomentFeed extends StatelessWidget {
+  final List<dynamic> moments;
+  final int initialIndex;
+  final UserPreferences userPreferences;
+
+  const ExploreVerticalMomentFeed({
+    super.key,
+    required this.moments,
+    required this.initialIndex,
+    required this.userPreferences,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final PageController pageController =
+        PageController(initialPage: initialIndex);
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: PageView.builder(
+        controller: pageController,
+        scrollDirection: Axis.vertical,
+        itemCount: moments.length,
+        itemBuilder: (context, index) {
+          return ExploreMomentViewerItem(
+              moment: moments[index], userPreferences: userPreferences);
+        },
       ),
+    );
+  }
+}
+
+class ExploreMomentViewerItem extends StatefulWidget {
+  final Map<String, dynamic> moment;
+  final UserPreferences userPreferences;
+  const ExploreMomentViewerItem(
+      {super.key, required this.moment, required this.userPreferences});
+
+  @override
+  State<ExploreMomentViewerItem> createState() =>
+      _ExploreMomentViewerItemState();
+}
+
+class _ExploreMomentViewerItemState extends State<ExploreMomentViewerItem> {
+  VideoPlayerController? _videoController;
+  bool _isLiked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.moment['media_type'] == 'video') {
+      _videoController = VideoPlayerController.networkUrl(
+          Uri.parse(widget.moment['media_url']))
+        ..initialize().then((_) {
+          if (mounted) setState(() {});
+          _videoController!.setLooping(true);
+          _videoController!.play();
+        });
+    }
+  }
+
+  @override
+  void dispose() {
+    _videoController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isVideo = widget.moment['media_type'] == 'video';
+    final profile = widget.moment['profiles'] ?? {};
+    final username = profile['username'] ?? 'User';
+    final avatarUrl = profile['avatar_url'];
+    final schoolName = profile['school_name'];
+    final caption = widget.moment['caption'] ?? '';
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Center(
+          child: isVideo
+              ? (_videoController != null &&
+                      _videoController!.value.isInitialized
+                  ? AspectRatio(
+                      aspectRatio: _videoController!.value.aspectRatio,
+                      child: VideoPlayer(_videoController!))
+                  : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
+              : CachedNetworkImage(
+                  imageUrl: widget.moment['media_url'],
+                  fit: BoxFit.contain,
+                  placeholder: (context, url) =>
+                      const CircularProgressIndicator(color: Color(0xFF4CAF50)),
+                ),
+        ),
+        SafeArea(
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: IconButton(
+              icon: const Icon(Icons.arrow_back_ios,
+                  color: Colors.white,
+                  shadows: [Shadow(color: Colors.black, blurRadius: 4)]),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+        ),
+        Positioned(
+          bottom: 20,
+          left: 16,
+          right: 80,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              GestureDetector(
+                onTap: () => UniversalProfileCard.show(
+                    context, widget.moment['user_id'], widget.userPreferences),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('@$username',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            shadows: [
+                              Shadow(color: Colors.black87, blurRadius: 4)
+                            ])),
+                    if (schoolName != null && schoolName.toString().isNotEmpty)
+                      Text(schoolName,
+                          style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                              shadows: [
+                                Shadow(color: Colors.black87, blurRadius: 4)
+                              ])),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (caption.isNotEmpty)
+                Text(caption,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        shadows: [
+                          Shadow(color: Colors.black87, blurRadius: 4)
+                        ])),
+            ],
+          ),
+        ),
+        Positioned(
+          bottom: 20,
+          right: 8,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              GestureDetector(
+                onTap: () => UniversalProfileCard.show(
+                    context, widget.moment['user_id'], widget.userPreferences),
+                child: SizedBox(
+                  height: 60,
+                  width: 50,
+                  child: Stack(
+                    children: [
+                      CircleAvatar(
+                        radius: 24,
+                        backgroundColor: Colors.grey[800],
+                        backgroundImage:
+                            avatarUrl != null ? NetworkImage(avatarUrl) : null,
+                        child: avatarUrl == null
+                            ? const Icon(Icons.person, color: Colors.white)
+                            : null,
+                      ),
+                      Positioned(
+                        bottom: 0,
+                        left: 15,
+                        child: Container(
+                          decoration: const BoxDecoration(
+                              color: Colors.red, shape: BoxShape.circle),
+                          child: const Icon(Icons.add,
+                              color: Colors.white, size: 16),
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              GestureDetector(
+                onTap: () => setState(() => _isLiked = !_isLiked),
+                child: Column(
+                  children: [
+                    Icon(_isLiked ? Icons.favorite : Icons.favorite_border,
+                        color: _isLiked ? Colors.red : Colors.white,
+                        size: 36,
+                        shadows: const [
+                          Shadow(color: Colors.black54, blurRadius: 8)
+                        ]),
+                    const SizedBox(height: 4),
+                    const Text('Like',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            shadows: [
+                              Shadow(color: Colors.black54, blurRadius: 4)
+                            ])),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              GestureDetector(
+                onTap: () => ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Comments coming soon!'))),
+                child: Column(
+                  children: const [
+                    Icon(CupertinoIcons.chat_bubble,
+                        color: Colors.white,
+                        size: 34,
+                        shadows: [
+                          Shadow(color: Colors.black54, blurRadius: 8)
+                        ]),
+                    SizedBox(height: 4),
+                    Text('0',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            shadows: [
+                              Shadow(color: Colors.black54, blurRadius: 4)
+                            ])),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+              GestureDetector(
+                onTap: () => ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Sharing coming soon!'))),
+                child: Column(
+                  children: const [
+                    Text('🚀',
+                        style: TextStyle(fontSize: 30, shadows: [
+                          Shadow(color: Colors.black54, blurRadius: 8)
+                        ])),
+                    SizedBox(height: 4),
+                    Text('Share',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            shadows: [
+                              Shadow(color: Colors.black54, blurRadius: 4)
+                            ])),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

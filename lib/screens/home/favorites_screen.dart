@@ -2,7 +2,6 @@
 import 'dart:convert';
 
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
-import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/services/api_service.dart';
@@ -129,69 +128,11 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   // --- DELIVERY POPUP (with real paywall) ---
   // --- UPDATED: Pass Order as JSON ---
   void _showDeliveryPicker(Map<String, dynamic> selectedOption) {
-    final isPremium = widget.userPreferences.subscriptionTier == 'Membership';
-
-    if (!isPremium) {
-      showModalBottomSheet(
-        context: context,
-        backgroundColor: Colors.grey[900],
-        shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-        builder: (ctx) => Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
-              const SizedBox(height: 16),
-              const Text('Subscribe to Allowance Plus',
-                  style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white)),
-              const SizedBox(height: 12),
-              const Text(
-                  'to get access to our trusted and verified delivery agents',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 16, color: Colors.white70)),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => SubscriptionScreen(
-                                userPreferences: widget.userPreferences,
-                                themeColor: themeColor)));
-                  },
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: themeColor,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16)),
-                  child: const Text('Subscribe to Allowance Plus',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
-                ),
-              ),
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Maybe later',
-                      style: TextStyle(color: Colors.white70))),
-            ],
-          ),
-        ),
-      );
-      return;
-    }
-
     final vendorName =
         selectedOption['vendors']?['name']?.toString() ?? 'Vendor';
     final items = selectedOption['items'] as List<dynamic>;
     final total = items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
 
-    // Formatted strictly as JSON map
     final orderData = {
       'vendor': vendorName,
       'items': items
@@ -212,7 +153,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   void _openDeliveryAgentGrid(Map<String, dynamic> orderData) {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
@@ -269,7 +210,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                           children: [
                             CircleAvatar(
                               radius: 36,
-                              backgroundColor: Colors.grey[800],
+                              backgroundColor: Color(0xFF1E1E1E),
                               backgroundImage: person['avatar_url'] != null
                                   ? NetworkImage(person['avatar_url'])
                                   : null,
@@ -379,7 +320,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       builder: (_) => StatefulBuilder(
         builder: (ctx, setState) => SingleChildScrollView(
           child: Container(
@@ -472,9 +413,9 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Color(0xFF121212),
         iconTheme: const IconThemeData(color: Colors.white),
         scrolledUnderElevation: 0,
         title: Center(
@@ -528,7 +469,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 16, vertical: 8),
                           decoration: BoxDecoration(
-                            color: sel ? themeColor : Colors.grey[800],
+                            color: sel ? themeColor : Color(0xFF1E1E1E),
                             borderRadius: BorderRadius.circular(20),
                           ),
                           alignment: Alignment.center,
@@ -567,7 +508,7 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                       builder: (context, off, child) =>
                           Transform.translate(offset: off, child: child),
                       child: Card(
-                        color: Colors.grey[800]!.withOpacity(0.7),
+                        color: Color(0xFF1E1E1E).withOpacity(0.7),
                         elevation: 4,
                         margin: const EdgeInsets.symmetric(vertical: 5),
                         shape: RoundedRectangleBorder(
@@ -637,7 +578,8 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                                     showModalBottomSheet(
                                                       context: context,
                                                       backgroundColor:
-                                                          Colors.grey[900],
+                                                          const Color(
+                                                              0xFF121212),
                                                       builder: (_) => Container(
                                                         padding:
                                                             const EdgeInsets

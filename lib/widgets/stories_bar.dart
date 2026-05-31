@@ -120,7 +120,7 @@ class StoriesBarState extends State<StoriesBar> {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return Container(
             height: 88,
-            color: Colors.grey[900],
+            color: Color(0xFF121212),
             alignment: Alignment.center,
             child: const CircularProgressIndicator(color: Color(0xFF4CAF50)),
           );
@@ -129,7 +129,7 @@ class StoriesBarState extends State<StoriesBar> {
         if (snapshot.hasError || !snapshot.hasData) {
           return Container(
             height: 88,
-            color: Colors.grey[900],
+            color: Color(0xFF121212),
             alignment: Alignment.center,
             child: const Text("Error loading stories",
                 style: TextStyle(color: Colors.white54, fontSize: 12)),
@@ -166,7 +166,7 @@ class StoriesBarState extends State<StoriesBar> {
 
         return Container(
           height: 100,
-          color: Colors.grey[900],
+          color: Color(0xFF121212),
           child: uniqueUsers.isEmpty
               ? const Center(
                   child: Text("No stories yet",
@@ -244,7 +244,7 @@ class StoriesBarState extends State<StoriesBar> {
                               ),
                               child: CircleAvatar(
                                 radius: 28,
-                                backgroundColor: Colors.grey[800],
+                                backgroundColor: Color(0xFF1E1E1E),
                                 backgroundImage:
                                     avatarUrl != null && avatarUrl.isNotEmpty
                                         ? NetworkImage(avatarUrl)

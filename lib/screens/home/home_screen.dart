@@ -1,7 +1,13 @@
 // lib/screens/home/home_screen.dart
 import 'dart:async';
+import 'dart:convert';
 import 'package:allowance/screens/chat/chat_list_screen.dart';
+import 'package:allowance/screens/chat/create_group_screen.dart';
+import 'package:allowance/screens/chat/explore_screen.dart';
+import 'package:allowance/screens/home/create_story_screen.dart';
+import 'package:allowance/screens/home/gist_submission_screen.dart';
 import 'package:allowance/screens/home/media_editor_screen.dart';
+import 'package:allowance/screens/home/ticket_submission_screen.dart';
 import 'package:allowance/shared/services/fcm_service.dart';
 import 'package:allowance/widgets/stories_bar.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
@@ -12,11 +18,11 @@ import 'package:icons_plus/icons_plus.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/available_options_screen.dart';
 import 'package:allowance/screens/home/favorites_screen.dart';
-import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/screens/home/ticket_screen.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:wechat_camera_picker/wechat_camera_picker.dart';
 import 'order_screen.dart';
@@ -28,6 +34,8 @@ import 'dart:developer' as developer;
 import 'package:gal/gal.dart';
 import 'package:video_player/video_player.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class HomeScreen extends StatefulWidget {
   final UserPreferences? userPreferences;
@@ -71,16 +79,18 @@ class _HomeScreenState extends State<HomeScreen> {
   late PageController _pageController;
   Timer? _slideshowTimer;
   List<Map<String, dynamic>> _fetchedGists = [];
+  final ValueNotifier<bool> _showBackToTopButton = ValueNotifier(false);
 
   // NEW: track loading vs loaded-with-zero-items
   bool _isGistsLoading = true;
   RealtimeChannel? _globalChatChannel;
+  bool _isProcessingSubscription = false;
 
   String _gistFilter = 'All';
   final Map<int, int> _gistLikeCounts = {};
   final Set<int> _likedGistIds = {};
   final ScrollController _scrollController = ScrollController(); // The listener
-  bool _showBackToTopButton = false; // The visibility state
+// The visibility state
 
   // Fallback images (replace with your own public URLs or storage links)
   // Fallback images (now fully compatible with your UI)
@@ -111,26 +121,34 @@ class _HomeScreenState extends State<HomeScreen> {
     },
   ];
 
+  // --- OUTSIDE THE BOX: Use ValueNotifier instead of setState to prevent global scroll lag! --
+
   @override
   void initState() {
     super.initState();
     _prefs = widget.userPreferences ?? UserPreferences();
+
     _scrollController.addListener(() {
-      setState(() {
-        _showBackToTopButton =
-            _scrollController.offset > 300; // Show after 300 pixels
-      });
+      // Updates ONLY the button, skipping the global build method entirely.
+      if (_scrollController.offset > 300 && !_showBackToTopButton.value) {
+        _showBackToTopButton.value = true;
+      } else if (_scrollController.offset <= 300 &&
+          _showBackToTopButton.value) {
+        _showBackToTopButton.value = false;
+      }
     });
+
     _budgetFocusNode.addListener(() => setState(() {}));
     _pageController = PageController(viewportFraction: 0.85);
     _budgetController.text = _prefs.budget?.toString() ?? "";
     _fetchGistsAndStartSlideshow();
-    _setupGlobalChatListener(); // <--- STARTS THE IN-APP NOTIFICATION LISTENER
+    _setupGlobalChatListener();
+    _recoverPendingSubscription();
   }
 
   @override
   void dispose() {
-    _globalChatChannel?.unsubscribe(); // <--- CLEANUP
+    _globalChatChannel?.unsubscribe();
     _disposeVideoControllers();
     _slideshowTimer?.cancel();
     _pageController.dispose();
@@ -139,6 +157,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _restaurantsController.dispose();
     _restaurantFocusNode.dispose();
     _scrollController.dispose();
+    _showBackToTopButton.dispose(); // <-- Dispose notifier
     super.dispose();
   }
 
@@ -1084,7 +1103,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final Color bgColor = _isDarkMode ? Colors.grey[900]! : Colors.grey[100]!;
+    final Color bgColor =
+        _isDarkMode ? const Color(0xFF121212) : Colors.grey[100]!;
+
     return Theme(
       data: _isDarkMode
           ? ThemeData.dark().copyWith(scaffoldBackgroundColor: bgColor)
@@ -1092,116 +1113,25 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Scaffold(
         appBar: _selectedIndex == 0 ? _buildAppBar() : null,
         bottomNavigationBar: _buildCustomFooter(bgColor),
-        floatingActionButton: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_selectedIndex == 3) ...[
-              FloatingActionButton(
-                heroTag: 'add_memory_btn',
-                mini: true,
-                backgroundColor: themeColor,
-                onPressed: () => _pickMemoryFlow(context),
-                child: const Icon(Icons.add, color: Colors.white, size: 24),
-              ),
-              const SizedBox(height: 12),
-            ],
-            FloatingActionButton(
-              heroTag: 'chat_btn',
-              backgroundColor: Colors.transparent,
-              elevation: 0,
-              child: Container(
-                width: 58,
-                height: 58,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF4CAF50),
-                  borderRadius: BorderRadius.circular(18),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.2),
-                      blurRadius: 10,
-                      offset: const Offset(0, 4),
-                    )
-                  ],
-                ),
-                child: StreamBuilder<List<Map<String, dynamic>>>(
-                  stream: supabase.auth.currentUser == null
-                      ? const Stream.empty()
-                      : supabase
-                          .from('messages')
-                          .stream(primaryKey: ['id']).eq('is_read', false),
-                  builder: (context, snapshot) {
-                    final myId = supabase.auth.currentUser?.id;
-                    final allUnread = snapshot.data ?? [];
 
-                    final unreadCount = allUnread
-                        .where((msg) => msg['sender_id'] != myId)
-                        .length;
-
-                    return Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                        const Center(
-                          child: Icon(
-                            Icons.chat_bubble_rounded,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                        ),
-                        if (unreadCount > 0)
-                          Positioned(
-                            top: 6,
-                            right: 6,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              constraints: const BoxConstraints(
-                                minWidth: 18,
-                                minHeight: 18,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.redAccent,
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: const Color(0xFF4CAF50),
-                                  width: 1.5,
-                                ),
-                              ),
-                              child: Center(
-                                child: Text(
-                                  unreadCount > 99
-                                      ? '99+'
-                                      : unreadCount.toString(),
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    );
-                  },
-                ),
-              ),
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ChatListScreen(userPreferences: _prefs),
-                  ),
-                );
-              },
-            ),
-          ],
+        // --- NEW: UNIVERSAL PLUS BUTTON ---
+        floatingActionButton: FloatingActionButton(
+          heroTag: 'universal_plus_btn',
+          backgroundColor: themeColor,
+          elevation: 4,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          onPressed: () => _showUniversalPlusMenu(context),
+          child: const Icon(Icons.add, color: Colors.white, size: 32),
         ),
+
         body: SafeArea(
           child: Stack(
             children: [
               IndexedStack(
                 index: _selectedIndex,
                 children: [
+                  // INDEX 0: HOME
                   RefreshIndicator(
                     color: themeColor,
                     onRefresh: _handleRefresh,
@@ -1225,9 +1155,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                         0.85,
                                     height: 44,
                                     decoration: BoxDecoration(
-                                      color: _isDarkMode
-                                          ? Colors.grey[800]
-                                          : Colors.grey[200],
+                                      color: const Color(0xFF1E1E1E),
                                       borderRadius: BorderRadius.circular(25),
                                     ),
                                     padding: const EdgeInsets.symmetric(
@@ -1254,7 +1182,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                                                           color: Colors
                                                                               .white)),
                                                                   backgroundColor:
-                                                                      _isDarkMode ? Colors.grey[700] : Colors.grey[300])))
+                                                                      const Color(0xFF2A2A2A))))
                                                           .toList()))
                                               : const Text("Select Vendor", style: TextStyle(fontSize: 15.4, color: Colors.white54))),
                                       !_vendorBarTapped
@@ -1270,9 +1198,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                       MediaQuery.of(context).size.width * 0.85,
                                   height: 44,
                                   decoration: BoxDecoration(
-                                    color: _isDarkMode
-                                        ? Colors.grey[800]
-                                        : Colors.grey[200],
+                                    color: const Color(0xFF1E1E1E),
                                     borderRadius: BorderRadius.circular(25),
                                   ),
                                   padding: const EdgeInsets.symmetric(
@@ -1316,16 +1242,13 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ]),
                                 ),
                                 const SizedBox(height: 12),
-                                // ==========================================
-                                // CHANGED to spaceBetween to align perfectly with the edges!
-                                // ==========================================
                                 SizedBox(
                                   width:
                                       MediaQuery.of(context).size.width * 0.85,
                                   height: 60,
                                   child: Row(
-                                    mainAxisAlignment: MainAxisAlignment
-                                        .spaceBetween, // <-- Fixes the spacing
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
                                     children: _colorfulTabs
                                         .map((tab) => _buildCircularTab(tab))
                                         .toList(),
@@ -1355,37 +1278,49 @@ class _HomeScreenState extends State<HomeScreen> {
                       ],
                     ),
                   ),
-                  FavoritesScreen(userPreferences: _prefs),
-                  SubscriptionScreen(
-                      userPreferences: _prefs, themeColor: themeColor),
+
+                  // INDEX 1: EXPLORE
+                  ExploreScreen(userPreferences: _prefs),
+
+                  // INDEX 2: CHATS
+                  ChatListScreen(userPreferences: _prefs),
+
+                  // INDEX 3: PROFILE
                   ProfileScreen(
                       userPreferences: _prefs,
                       onSave: () => setState(() => _selectedIndex = 0)),
                 ],
               ),
-              if (_showBackToTopButton)
+              // --- OUTSIDE THE BOX: Listens silently without rebuilding the whole screen ---
+              if (_selectedIndex == 0)
                 Positioned(
                   bottom: 20,
                   left: 0,
                   right: 0,
-                  child: Center(
-                    child: Opacity(
-                      opacity: 0.5,
-                      child: GestureDetector(
-                        onTap: () {
-                          _scrollController.animateTo(0,
-                              duration: const Duration(milliseconds: 600),
-                              curve: Curves.easeInOut);
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                              color: themeColor, shape: BoxShape.circle),
-                          child: const Icon(Icons.arrow_upward,
-                              color: Colors.white, size: 28),
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: _showBackToTopButton,
+                    builder: (context, show, child) {
+                      if (!show) return const SizedBox.shrink();
+                      return Center(
+                        child: Opacity(
+                          opacity: 0.5,
+                          child: GestureDetector(
+                            onTap: () {
+                              _scrollController.animateTo(0,
+                                  duration: const Duration(milliseconds: 600),
+                                  curve: Curves.easeInOut);
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                  color: themeColor, shape: BoxShape.circle),
+                              child: const Icon(Icons.arrow_upward,
+                                  color: Colors.white, size: 28),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
                   ),
                 ),
             ],
@@ -1397,11 +1332,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
-      // These two lines fix the color-changing issue:
+      // These two lines fix the color-changing issue on scroll:
       scrolledUnderElevation: 0,
       surfaceTintColor: Colors.transparent,
 
-      backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
+      // --- FIX: Updated to match the new Profile Screen global color! ---
+      backgroundColor: _isDarkMode ? const Color(0xFF121212) : Colors.grey[100],
       elevation: 0,
       centerTitle: true,
       leading: Builder(
@@ -1433,44 +1369,92 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildCustomFooter(Color screenBgColor) {
     final icons = [
       BoxIcons.bxs_home,
-      BoxIcons.bxs_credit_card,
+      Icons.explore_outlined,
+      CupertinoIcons.chat_bubble_2_fill,
       BoxIcons.bxs_user
     ];
-    // Indices that map to your IndexedStack order (keep these as you had them)
-    final idxs = [0, 2, 3];
     final acts = [
       () => setState(() => _selectedIndex = 0),
+      () => setState(() => _selectedIndex = 1),
       () => setState(() => _selectedIndex = 2),
       () => setState(() => _selectedIndex = 3)
     ];
 
     return Container(
       height: 56,
-      decoration: BoxDecoration(color: screenBgColor),
+      decoration: BoxDecoration(
+        color: const Color(0xFF121212),
+        border: Border(top: BorderSide(color: Colors.white.withOpacity(0.05))),
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: List.generate(icons.length, (i) {
-          final sel = _selectedIndex == idxs[i];
-          final isProfileTab = idxs[i] == 3;
+          final sel = _selectedIndex == i;
+          final isProfileTab = i == 3;
+          final isChatTab = i == 2;
 
-          // Use avatar if this is profile tab and avatar exists
           Widget iconWidget;
           if (isProfileTab &&
               _prefs.avatarUrl != null &&
               _prefs.avatarUrl!.isNotEmpty) {
-            iconWidget = CircleAvatar(
-              radius: 14,
-              backgroundColor: Colors.grey[800],
-              backgroundImage: NetworkImage(_prefs.avatarUrl!),
+            iconWidget = Container(
+              padding: EdgeInsets.all(sel ? 2 : 0),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: sel ? Border.all(color: themeColor, width: 2) : null,
+              ),
+              child: CircleAvatar(
+                radius: 13,
+                backgroundColor: const Color(0xFF1E1E1E),
+                backgroundImage: NetworkImage(_prefs.avatarUrl!),
+              ),
+            );
+          } else if (isChatTab) {
+            // --- CHAT BADGE MOVED TO TASKBAR ---
+            iconWidget = StreamBuilder<List<Map<String, dynamic>>>(
+              stream: supabase.auth.currentUser == null
+                  ? const Stream.empty()
+                  : supabase
+                      .from('messages')
+                      .stream(primaryKey: ['id']).eq('is_read', false),
+              builder: (context, snapshot) {
+                final myId = supabase.auth.currentUser?.id;
+                final allUnread = snapshot.data ?? [];
+                final unreadCount =
+                    allUnread.where((msg) => msg['sender_id'] != myId).length;
+
+                return Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Icon(icons[i],
+                        size: 26, color: sel ? themeColor : Colors.white54),
+                    if (unreadCount > 0)
+                      Positioned(
+                        top: -4,
+                        right: -6,
+                        child: Container(
+                          padding: const EdgeInsets.all(4),
+                          decoration: const BoxDecoration(
+                              color: Colors.redAccent, shape: BoxShape.circle),
+                          child: Text(
+                            unreadCount > 99 ? '99+' : unreadCount.toString(),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
             );
           } else {
             iconWidget = Icon(
               icons[i],
               size: 28,
-              color: sel
-                  ? themeColor
-                  : (_isDarkMode ? Colors.white70 : Colors.black54),
+              color: sel ? themeColor : Colors.white54,
             );
           }
 
@@ -1689,6 +1673,665 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
+
+  // --- 1. UNIVERSAL PLUS MENU ---
+  // --- 1. UNIVERSAL PLUS MENU (WRAP CONTENT) ---
+  // --- 1. UNIVERSAL PLUS MENU (ROW-BY-ROW) ---
+  void _showUniversalPlusMenu(BuildContext context) {
+    final isPlus = _prefs.subscriptionTier == 'Membership';
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.8, // Opens to 80% of screen height
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (_, scrollController) => Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 16),
+
+            // --- FUNCTIONAL SEARCH BAR ---
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: TextField(
+                style: const TextStyle(color: Colors.white),
+                textInputAction: TextInputAction
+                    .search, // Puts a "Search" button on keyboard
+                onSubmitted: (query) {
+                  if (query.trim().isNotEmpty) {
+                    Navigator.pop(ctx); // Close the bottom sheet
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => ExploreScreen(
+                          userPreferences: _prefs,
+                          initialQuery: query.trim(), // Passes the typed word
+                        ),
+                      ),
+                    );
+                  }
+                },
+                decoration: InputDecoration(
+                  hintText: 'Search people, gists, tickets...',
+                  hintStyle: const TextStyle(color: Colors.white54),
+                  prefixIcon: const Icon(Icons.search, color: Colors.white54),
+                  filled: true,
+                  fillColor: const Color(0xFF121212),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      borderSide: BorderSide.none),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // --- ROW-BY-ROW LAYOUT WITH DESCRIPTIONS ---
+            Expanded(
+              child: ListView(
+                controller: scrollController,
+                children: [
+                  _buildActionRowItem(
+                    icon: Icons.amp_stories,
+                    color: Colors.purpleAccent,
+                    title: 'Create Story',
+                    subtitle: 'Share updates that disappear after 24h',
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      // ENFORCE 1 ACTIVE STORY FOR FREE USERS
+                      if (!isPlus) {
+                        final myId = supabase.auth.currentUser?.id;
+                        final countResp = await supabase
+                            .from('stories')
+                            .select('*')
+                            .eq('user_id', myId!)
+                            .gt('expires_at',
+                                DateTime.now().toUtc().toIso8601String())
+                            .count(CountOption.exact);
+                        if ((countResp.count ?? 0) >= 1) {
+                          _showUniversalSubscriptionSheet(
+                              customMessage:
+                                  "Free users can only have 1 active story at a time. Upgrade to post unlimited 10-day stories!");
+                          return;
+                        }
+                      }
+                      Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) =>
+                                  CreateStoryScreen(userPreferences: _prefs)));
+                    },
+                  ),
+                  _buildActionRowItem(
+                    icon: Icons.photo_library,
+                    color: Colors.orangeAccent,
+                    title: 'Add Moment',
+                    subtitle: 'Post memories permanently to your profile',
+                    onTap: () async {
+                      Navigator.pop(ctx);
+                      // ENFORCE 3 MOMENTS MAX FOR FREE USERS
+                      if (!isPlus) {
+                        final myId = supabase.auth.currentUser?.id;
+                        final countResp = await supabase
+                            .from('moments')
+                            .select('*')
+                            .eq('user_id', myId!)
+                            .count(CountOption.exact);
+                        if ((countResp.count ?? 0) >= 3) {
+                          _showUniversalSubscriptionSheet(
+                              customMessage:
+                                  "Free users can only post a maximum of 3 moments. Upgrade to post unlimited memories!");
+                          return;
+                        }
+                      }
+                      _pickMemoryFlow(context);
+                    },
+                  ),
+                  _buildActionRowItem(
+                    icon: BoxIcons.bxs_megaphone,
+                    color: Colors.blueAccent,
+                    title: 'Gist Us',
+                    subtitle: 'Advertise your brand or campus news',
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                              builder: (_) => GistSubmissionScreen(
+                                  themeColor: themeColor,
+                                  schoolId: _prefs.schoolId)));
+                    },
+                  ),
+                  _buildActionRowItem(
+                    icon: BoxIcons.bxs_coupon,
+                    color: Colors.redAccent,
+                    title: 'Create Ticket',
+                    subtitle: 'Host an event and sell tickets',
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      if (!isPlus) {
+                        _showUniversalSubscriptionSheet(
+                            customMessage:
+                                "Ticketing is an exclusive feature for Allowance Plus members. Upgrade to host events!");
+                      } else {
+                        Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => TicketSubmissionScreen(
+                                    themeColor: themeColor,
+                                    schoolId:
+                                        int.tryParse(_prefs.schoolId ?? ''))));
+                      }
+                    },
+                  ),
+                  _buildActionRowItem(
+                    icon: Icons.group_add,
+                    color: Colors.tealAccent,
+                    title: 'Create Group',
+                    subtitle: 'Build a community on campus',
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      if (!isPlus) {
+                        _showUniversalSubscriptionSheet(
+                            customMessage:
+                                "Building campus groups is an exclusive feature for Allowance Plus members.");
+                      } else {
+                        Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => CreateGroupScreen(
+                                    userPreferences: _prefs)));
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+
+            const Divider(color: Colors.white10, height: 1),
+
+            // --- SUBSCRIPTION STATUS FOOTER ---
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: const BoxDecoration(
+                  color: Color(0xFF121212),
+                  borderRadius:
+                      BorderRadius.vertical(bottom: Radius.circular(24))),
+              child: Row(
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Current Plan',
+                          style:
+                              TextStyle(color: Colors.white54, fontSize: 12)),
+                      Text(isPlus ? 'Allowance Plus ✨' : 'Free Tier',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  const Spacer(),
+                  if (!isPlus)
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _showUniversalSubscriptionSheet();
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: themeColor,
+                        foregroundColor: Colors.black,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(20)),
+                      ),
+                      child: const Text('Upgrade',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                    )
+                  else
+                    Container(
+                      decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.08),
+                          shape: BoxShape.circle),
+                      child: IconButton(
+                        icon: const Icon(Icons.more_vert, color: Colors.white),
+                        tooltip: 'Manage Subscription',
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _confirmCancelSubscription(); // Opens the cancel dialog
+                        },
+                      ),
+                    )
+                ],
+              ),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --- 2. UNIVERSAL SUBSCRIPTION POPUP ---
+  void _showUniversalSubscriptionSheet({String? customMessage}) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => StatefulBuilder(
+          builder: (BuildContext context, StateSetter setModalState) {
+        return Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                  child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(2)))),
+              const SizedBox(height: 24),
+              const Text('Upgrade to Plus ✨',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+
+              // CANDY CRUSH STYLE COUNTDOWN / CUSTOM MESSAGES
+              if (customMessage != null)
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                      color: Colors.orangeAccent.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.orangeAccent)),
+                  child: Text(customMessage,
+                      style: const TextStyle(
+                          color: Colors.orangeAccent,
+                          fontWeight: FontWeight.bold)),
+                )
+              else
+                const Text(
+                    'Unlock the full university cheat code and remove all limits.',
+                    style: TextStyle(color: Colors.white70, fontSize: 14)),
+
+              const SizedBox(height: 16),
+
+              _buildPerkRow(Icons.block, 'Ad-free experience across the app'),
+              _buildPerkRow(Icons.photo_library,
+                  'Post unlimited Moments (Free max is 3)'),
+              _buildPerkRow(Icons.history,
+                  'Save & Backup Chats (Free chats delete in 24h)'),
+              _buildPerkRow(Icons.group_add, 'Create custom Campus Groups'),
+              _buildPerkRow(
+                  Icons.timer, 'Post Stories that last up to 10 days'),
+              _buildPerkRow(
+                  BoxIcons.bxs_coupon, 'Create & Sell Tickets for events'),
+
+              const SizedBox(height: 32),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: _isProcessingSubscription
+                      ? null
+                      : () => _subscribeToMembership(context, setModalState),
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: themeColor,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16))),
+                  child: _isProcessingSubscription
+                      ? const CircularProgressIndicator(color: Colors.black)
+                      : const Text('Subscribe - ₦700/mo',
+                          style: TextStyle(
+                              color: Colors.black,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold)),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+      }),
+    );
+  }
+
+  // Helper Widget for the Row-by-Row layout
+  Widget _buildActionRowItem(
+      {required IconData icon,
+      required Color color,
+      required String title,
+      required String subtitle,
+      required VoidCallback onTap}) {
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      leading: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.15),
+          shape: BoxShape.circle,
+        ),
+        child: Icon(icon, color: color, size: 24),
+      ),
+      title: Text(title,
+          style: const TextStyle(
+              color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+      subtitle: Text(subtitle,
+          style: const TextStyle(color: Colors.white54, fontSize: 13)),
+      trailing: const Icon(Icons.chevron_right, color: Colors.white24),
+      onTap: onTap,
+    );
+  }
+
+  // --- 2. CANCEL SUBSCRIPTION DIALOG ---
+  Future<void> _confirmCancelSubscription() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Cancel Subscription?',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'Are you sure you want to cancel your Allowance Plus membership? You will lose access to premium features.\n\nNote: To completely stop future card charges, please click the "Manage Subscription" link in your Paystack email receipt.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child:
+                const Text('Keep It', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Cancel Plan',
+                style: TextStyle(
+                    color: Colors.redAccent, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      final user = supabase.auth.currentUser;
+      if (user != null) {
+        try {
+          await supabase.from('profiles').update({
+            'subscription_tier': 'Free',
+            'subscription_expires_at': null,
+            'updated_at': DateTime.now().toIso8601String(),
+          }).eq('id', user.id);
+
+          _prefs.subscriptionTier = 'Free';
+          await _prefs.savePreferences();
+
+          if (mounted) {
+            setState(() {});
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                  content: Text('Subscription canceled successfully.'),
+                  backgroundColor: Colors.green),
+            );
+          }
+        } catch (e) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                  content: Text('Error canceling subscription: $e'),
+                  backgroundColor: Colors.red),
+            );
+          }
+        }
+      }
+    }
+  }
+
+  Widget _buildPerkRow(IconData icon, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16.0),
+      child: Row(
+        children: [
+          Icon(icon, color: themeColor, size: 22),
+          const SizedBox(width: 12),
+          Expanded(
+              child: Text(text,
+                  style: const TextStyle(color: Colors.white, fontSize: 14))),
+        ],
+      ),
+    );
+  }
+
+  // =========================================================================
+  // SUBSCRIPTION PAYMENT LOGIC
+  // =========================================================================
+
+  Future<void> _recoverPendingSubscription() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pendingRef = prefs.getString('pending_sub_reference');
+    if (pendingRef == null) return;
+
+    setState(() => _isProcessingSubscription = true);
+
+    final success =
+        await _pollAndProcessVerification(pendingRef, maxAttempts: 1);
+
+    if (success) {
+      await prefs.remove('pending_sub_reference');
+      if (mounted) {
+        setState(() {
+          _prefs.subscriptionTier = 'Membership';
+        });
+        await _prefs.savePreferences();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('✅ Subscription recovered!'),
+              backgroundColor: Colors.green),
+        );
+      }
+    }
+    if (mounted) setState(() => _isProcessingSubscription = false);
+  }
+
+  Future<void> _subscribeToMembership(
+      BuildContext context, StateSetter setModalState) async {
+    setModalState(() => _isProcessingSubscription = true);
+    final user = supabase.auth.currentUser;
+    if (user == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Please log in.')));
+      setModalState(() => _isProcessingSubscription = false);
+      return;
+    }
+
+    String? customerCode;
+    try {
+      final profile = await supabase
+          .from('profiles')
+          .select('paystack_customer_code')
+          .eq('id', user.id)
+          .maybeSingle();
+      customerCode = profile?['paystack_customer_code'] as String?;
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error fetching profile: $e')));
+      setModalState(() => _isProcessingSubscription = false);
+      return;
+    }
+
+    if (customerCode == null) {
+      try {
+        final resp = await http.post(
+          Uri.parse('https://api.paystack.co/customer'),
+          headers: {
+            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(
+              {'email': user.email ?? '', 'first_name': '', 'last_name': ''}),
+        );
+        if (resp.statusCode == 200 || resp.statusCode == 201) {
+          final data = jsonDecode(resp.body)['data'];
+          customerCode = data['customer_code'];
+          await supabase.from('profiles').update(
+              {'paystack_customer_code': customerCode}).eq('id', user.id);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('Failed to create customer: ${resp.body}')));
+          setModalState(() => _isProcessingSubscription = false);
+          return;
+        }
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error creating customer: $e')));
+        setModalState(() => _isProcessingSubscription = false);
+        return;
+      }
+    }
+
+    final reference = 'sub_${DateTime.now().millisecondsSinceEpoch}';
+    final payload = {
+      'amount': 70000,
+      'email': user.email,
+      'reference': reference,
+      'plan': 'PLN_2tgtzyaurt8qz0d',
+      'metadata': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id}
+    };
+
+    try {
+      final resp = await http.post(
+        Uri.parse('https://api.paystack.co/transaction/initialize'),
+        headers: {
+          'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode(payload),
+      );
+
+      if (resp.statusCode != 200) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Payment initialization failed: ${resp.body}')));
+        return;
+      }
+
+      final data = jsonDecode(resp.body)['data'];
+      final String? authUrlString = data['authorization_url'];
+
+      if (authUrlString != null) {
+        final Uri url = Uri.parse(authUrlString);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('pending_sub_reference', reference);
+
+        if (await canLaunchUrl(url)) {
+          await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text(
+                    'Payment opened. Complete it in the browser — we verify automatically...'),
+                duration: Duration(seconds: 8)),
+          );
+        } else {
+          throw 'Could not launch payment page';
+        }
+      }
+
+      final success = await _pollAndProcessVerification(reference,
+          maxAttempts: 30, interval: const Duration(seconds: 4));
+
+      if (success) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('pending_sub_reference');
+
+        setState(() {
+          _prefs.subscriptionTier = 'Membership';
+        });
+        await _prefs.savePreferences();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('✅ Subscription activated!'),
+              backgroundColor: Colors.green));
+          Navigator.pop(context); // Close the Bottom Sheet!
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Payment taking a while. You can close this; we will check again when you return.'),
+              backgroundColor: Colors.orange),
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Payment error: $e')));
+    } finally {
+      if (mounted) setModalState(() => _isProcessingSubscription = false);
+    }
+  }
+
+  Future<bool> _pollAndProcessVerification(String reference,
+      {int maxAttempts = 10,
+      Duration interval = const Duration(seconds: 3)}) async {
+    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        final response = await http.get(
+          Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
+          headers: {
+            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
+          },
+        );
+
+        if (response.statusCode == 200) {
+          final Map<String, dynamic> data = json.decode(response.body);
+          final bool ok = data['status'] == true;
+          final String? txStatus = data['data']?['status'] as String?;
+          if (ok && txStatus == 'success') {
+            final paystackData = data['data'];
+            final customerCode = paystackData['customer']?['customer_code'];
+            final subscriptionCode = paystackData['subscription_code'];
+
+            final user = Supabase.instance.client.auth.currentUser;
+            if (user != null) {
+              await Supabase.instance.client.from('profiles').update({
+                'subscription_tier': 'Membership',
+                'paystack_customer_code': customerCode,
+                'paystack_subscription_id': subscriptionCode,
+                'updated_at': DateTime.now().toIso8601String(),
+              }).eq('id', user.id);
+
+              _prefs.subscriptionTier = 'Membership';
+              await _prefs.savePreferences();
+            }
+            return true;
+          }
+        }
+      } catch (e) {
+        debugPrint('Error while verifying transaction: $e');
+      }
+      await Future.delayed(interval);
+    }
+    return false;
+  }
+
+  // Also include the helper for grid buttons
 }
 
 // ── NEW: Delegate for sticky Gist Bar ──

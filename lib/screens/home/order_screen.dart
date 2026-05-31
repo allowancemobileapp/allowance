@@ -4,8 +4,8 @@
 import 'dart:convert';
 
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
-import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
 
@@ -206,7 +206,7 @@ class _OrderScreenState extends State<OrderScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -250,7 +250,7 @@ class _OrderScreenState extends State<OrderScreen> {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 20, vertical: 8),
                             decoration: BoxDecoration(
-                              color: selected ? themeColor : Colors.grey[800],
+                              color: selected ? themeColor : Color(0xFF1E1E1E),
                               borderRadius: BorderRadius.circular(30),
                             ),
                             alignment: Alignment.center,
@@ -286,7 +286,7 @@ class _OrderScreenState extends State<OrderScreen> {
                               final name = meal['meals']['name'] ?? 'Unnamed';
                               final price = meal['price'] ?? 0;
                               return Card(
-                                color: Colors.grey[800],
+                                color: Color(0xFF1E1E1E),
                                 margin: const EdgeInsets.symmetric(vertical: 6),
                                 child: ListTile(
                                   title: Text(
@@ -324,65 +324,71 @@ class _OrderScreenState extends State<OrderScreen> {
   }
 
   // --- UPDATED: DELIVERY PICKER ---
-  // --- UPDATED: Formats cart as JSON ---
-  void _showDeliveryPersonnel() {
+  Future<void> _showDeliveryPersonnel() async {
     if (_cart.isEmpty) return;
 
-    final isPremium = widget.userPreferences.subscriptionTier == 'Membership';
+    final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
 
-    if (!isPremium) {
-      showModalBottomSheet(
-        context: context,
-        backgroundColor: Colors.grey[900],
-        shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-        builder: (ctx) => Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
-              const SizedBox(height: 16),
-              const Text('Subscribe to Allowance Plus',
-                  style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white)),
-              const SizedBox(height: 12),
-              const Text(
-                  'to get access to our trusted and verified delivery agents',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 16, color: Colors.white70)),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => SubscriptionScreen(
-                                userPreferences: widget.userPreferences,
-                                themeColor: themeColor)));
-                  },
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: themeColor,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16)),
-                  child: const Text('Subscribe to Allowance Plus',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
-                ),
+    // ENFORCE 5-HOUR LIMIT FOR FREE USERS (Candy Crush style)
+    if (!isPlus) {
+      final prefs = await SharedPreferences.getInstance();
+      final myId = supabase.auth.currentUser?.id;
+      final lastOrderStr = prefs.getString('last_order_time_$myId');
+
+      if (lastOrderStr != null) {
+        final lastOrder = DateTime.parse(lastOrderStr);
+        final diff = DateTime.now().difference(lastOrder);
+
+        if (diff.inHours < 5) {
+          final timeLeft = const Duration(hours: 5) - diff;
+          final timeString = "${timeLeft.inHours}h ${timeLeft.inMinutes % 60}m";
+
+          showModalBottomSheet(
+            context: context,
+            backgroundColor: const Color(0xFF1E1E1E),
+            isScrollControlled: true,
+            builder: (ctx) => Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.timer, color: Colors.orangeAccent, size: 60),
+                  const SizedBox(height: 16),
+                  const Text("Out of Energy!",
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  Text(
+                      "Free users can order food once every 5 hours.\n\nNext order available in: $timeString",
+                      textAlign: TextAlign.center,
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 16)),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF4CAF50)),
+                      child: const Text("Got it",
+                          style: TextStyle(
+                              color: Colors.black,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  )
+                ],
               ),
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Maybe later',
-                      style: TextStyle(color: Colors.white70))),
-            ],
-          ),
-        ),
-      );
-      return;
+            ),
+          );
+          return;
+        }
+      }
+      // Save new order time
+      await prefs.setString(
+          'last_order_time_$myId', DateTime.now().toIso8601String());
     }
 
     final orderLines = _cart
@@ -410,7 +416,7 @@ class _OrderScreenState extends State<OrderScreen> {
   void _openDeliveryAgentGrid(Map<String, dynamic> orderData) {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
@@ -467,7 +473,7 @@ class _OrderScreenState extends State<OrderScreen> {
                           children: [
                             CircleAvatar(
                               radius: 36,
-                              backgroundColor: Colors.grey[800],
+                              backgroundColor: Color(0xFF1E1E1E),
                               backgroundImage: person['avatar_url'] != null
                                   ? NetworkImage(person['avatar_url'])
                                   : null,
@@ -577,9 +583,9 @@ class _OrderScreenState extends State<OrderScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Color(0xFF121212),
         iconTheme: const IconThemeData(color: Colors.white),
         scrolledUnderElevation: 0,
         title: Center(
@@ -607,11 +613,11 @@ class _OrderScreenState extends State<OrderScreen> {
                       child: DropdownButtonFormField<Map<String, dynamic>>(
                         hint: const Text('Select Vendor',
                             style: TextStyle(color: Colors.white70)),
-                        value: _selectedVendor,
-                        dropdownColor: Colors.grey[850],
+                        initialValue: _selectedVendor,
+                        dropdownColor: Color(0xFF1E1E1E),
                         style: const TextStyle(color: Colors.white),
                         decoration: InputDecoration(
-                          fillColor: Colors.grey[800],
+                          fillColor: Color(0xFF1E1E1E),
                           filled: true,
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
@@ -664,7 +670,7 @@ class _OrderScreenState extends State<OrderScreen> {
                                 padding: const EdgeInsets.all(16),
                                 children: [
                                   Card(
-                                    color: Colors.grey[800]!.withOpacity(0.7),
+                                    color: Color(0xFF1E1E1E).withOpacity(0.7),
                                     elevation: 4,
                                     shape: RoundedRectangleBorder(
                                         borderRadius:

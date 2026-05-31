@@ -9,9 +9,9 @@ class TermsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Color(0xFF121212),
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.white),
         title: const Text('Terms & Agreement',
@@ -23,7 +23,7 @@ class TermsScreen extends StatelessWidget {
           margin: const EdgeInsets.all(16),
           padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
-            color: Colors.grey[850],
+            color: Color(0xFF1E1E1E),
             borderRadius: BorderRadius.circular(16),
             border: Border.all(color: Colors.white10),
           ),

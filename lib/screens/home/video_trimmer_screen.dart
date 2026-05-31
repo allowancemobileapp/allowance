@@ -54,9 +54,9 @@ class _VideoTrimmerScreenState extends State<VideoTrimmerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: Color(0xFF121212),
         title: const Text("Trim Video", style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
@@ -69,7 +69,7 @@ class _VideoTrimmerScreenState extends State<VideoTrimmerScreen> {
       body: Center(
         child: Container(
           padding: const EdgeInsets.only(bottom: 30.0),
-          color: Colors.black,
+          color: Color(0xFF121212),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             mainAxisSize: MainAxisSize.max,

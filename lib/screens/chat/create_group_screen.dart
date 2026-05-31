@@ -338,7 +338,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
     if (!isPlus) {
       return Scaffold(
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Color(0xFF121212),
         appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0),
         body: Center(
           child: Padding(
@@ -384,9 +384,9 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
     }
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Color(0xFF121212),
         title: Text(
           widget.isEdit ? "Edit Group" : "New Group",
           style: const TextStyle(color: Colors.white),
@@ -426,7 +426,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                       onTap: _pickAvatar,
                       child: CircleAvatar(
                         radius: 35,
-                        backgroundColor: Colors.grey[800],
+                        backgroundColor: Color(0xFF1E1E1E),
                         backgroundImage: _pickedAvatar != null
                             ? (kIsWeb
                                     ? NetworkImage(_pickedAvatar!.path)
@@ -448,7 +448,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                           labelText: "Group Name",
                           labelStyle: const TextStyle(color: Colors.white54),
                           filled: true,
-                          fillColor: Colors.grey[900],
+                          fillColor: Color(0xFF121212),
                           border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
                               borderSide: BorderSide.none),
@@ -468,7 +468,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                     labelText: "Description (Optional)",
                     labelStyle: const TextStyle(color: Colors.white54),
                     filled: true,
-                    fillColor: Colors.grey[900],
+                    fillColor: Color(0xFF121212),
                     border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide.none),
@@ -485,7 +485,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                 const SizedBox(height: 8),
                 Container(
                   decoration: BoxDecoration(
-                      color: Colors.grey[900],
+                      color: Color(0xFF121212),
                       borderRadius: BorderRadius.circular(12)),
                   child: Column(
                     children: [
@@ -527,49 +527,49 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                 const SizedBox(height: 8),
                 Container(
                   decoration: BoxDecoration(
-                      color: Colors.grey[900],
+                      color: Color(0xFF121212),
                       borderRadius: BorderRadius.circular(12)),
                   child: Column(
                     children: [
                       SwitchListTile(
                         title: const Text("Allow only Admins to chat",
                             style: TextStyle(color: Colors.white)),
-                        activeColor: themeColor,
+                        activeThumbColor: themeColor,
                         value: _onlyAdminsChat,
                         onChanged: (v) => setState(() => _onlyAdminsChat = v),
                       ),
                       SwitchListTile(
                         title: const Text("Allow sharing of Group Link",
                             style: TextStyle(color: Colors.white)),
-                        activeColor: themeColor,
+                        activeThumbColor: themeColor,
                         value: _allowShareLink,
                         onChanged: (v) => setState(() => _allowShareLink = v),
                       ),
                       SwitchListTile(
                         title: const Text("Allow posting of Photos",
                             style: TextStyle(color: Colors.white)),
-                        activeColor: themeColor,
+                        activeThumbColor: themeColor,
                         value: _allowPhotos,
                         onChanged: (v) => setState(() => _allowPhotos = v),
                       ),
                       SwitchListTile(
                         title: const Text("Allow posting of Videos",
                             style: TextStyle(color: Colors.white)),
-                        activeColor: themeColor,
+                        activeThumbColor: themeColor,
                         value: _allowVideos,
                         onChanged: (v) => setState(() => _allowVideos = v),
                       ),
                       SwitchListTile(
                         title: const Text("Allow posting of Links",
                             style: TextStyle(color: Colors.white)),
-                        activeColor: themeColor,
+                        activeThumbColor: themeColor,
                         value: _allowLinks,
                         onChanged: (v) => setState(() => _allowLinks = v),
                       ),
                       SwitchListTile(
                         title: const Text("Allow posting of Files",
                             style: TextStyle(color: Colors.white)),
-                        activeColor: themeColor,
+                        activeThumbColor: themeColor,
                         value: _allowFiles,
                         onChanged: (v) => setState(() => _allowFiles = v),
                       ),
@@ -582,7 +582,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                                 style: const TextStyle(
                                     color: Colors.amber, fontSize: 12))
                             : null,
-                        activeColor: themeColor,
+                        activeThumbColor: themeColor,
                         value: _timeLock,
                         onChanged: (v) {
                           if (v) {
@@ -618,7 +618,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                     hintStyle: const TextStyle(color: Colors.white54),
                     prefixIcon: const Icon(Icons.search, color: Colors.white54),
                     filled: true,
-                    fillColor: Colors.grey[850],
+                    fillColor: Color(0xFF1E1E1E),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
                       borderSide: BorderSide.none,
@@ -632,7 +632,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
 
                 Container(
                   decoration: BoxDecoration(
-                      color: Colors.grey[900],
+                      color: Color(0xFF121212),
                       borderRadius: BorderRadius.circular(12)),
                   child: _friends.isEmpty
                       ? Padding(
@@ -660,7 +660,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                                   style: const TextStyle(
                                       color: Colors.white54, fontSize: 12)),
                               secondary: CircleAvatar(
-                                backgroundColor: Colors.grey[800],
+                                backgroundColor: Color(0xFF1E1E1E),
                                 backgroundImage: user['avatar_url'] != null
                                     ? NetworkImage(user['avatar_url'])
                                     : null,
@@ -670,7 +670,7 @@ class _CreateGroupScreenState extends State<CreateGroupScreen> {
                                     : null,
                               ),
                               activeColor: themeColor,
-                              checkColor: Colors.black,
+                              checkColor: Color(0xFF121212),
                               value: isSelected,
                               onChanged: (val) {
                                 setState(() {

@@ -315,7 +315,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Color(0xFF121212),
         title: const Text('Cancel Subscription?',
             style: TextStyle(color: Colors.white)),
         content: const Text(
@@ -430,7 +430,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
         width: MediaQuery.of(context).size.width,
         height: 330,
         child: Card(
-          color: Colors.grey[800],
+          color: Color(0xFF1E1E1E),
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           child: Padding(
@@ -521,9 +521,9 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.grey[900],
+        backgroundColor: Color(0xFF121212),
         iconTheme: const IconThemeData(color: Colors.white),
         scrolledUnderElevation: 0,
         title: Center(

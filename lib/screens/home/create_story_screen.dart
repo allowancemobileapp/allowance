@@ -1,6 +1,5 @@
 // lib/screens/home/create_story_screen.dart
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:allowance/screens/home/video_trimmer_screen.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:wechat_camera_picker/wechat_camera_picker.dart';
@@ -191,9 +190,11 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
 
   // ==================== DURATION PICKER (NEW) ====================
   void _showDurationPicker() {
+    final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
+
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: const Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
       ),
@@ -206,48 +207,48 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(2))),
                   const SizedBox(height: 20),
-                  const Text(
-                    'Story Duration',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
+                  const Text('Story Duration',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold)),
                   const SizedBox(height: 10),
                   Text(
-                    'This story will disappear after ${_selectedDuration.toInt()} days',
+                    isPlus
+                        ? 'This story will disappear after ${_selectedDuration.toInt()} days'
+                        : 'Free users can only post 1-day stories.',
                     style: const TextStyle(color: Colors.white70, fontSize: 14),
+                    textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 30),
                   SliderTheme(
                     data: SliderTheme.of(context).copyWith(
                       activeTrackColor: const Color(0xFF4CAF50),
                       inactiveTrackColor: Colors.white10,
-                      thumbColor: Colors.white,
+                      thumbColor: isPlus ? Colors.white : Colors.grey,
                       overlayColor: const Color(0xFF4CAF50).withOpacity(0.2),
-                      valueIndicatorColor: const Color(0xFF4CAF50),
-                      valueIndicatorTextStyle:
-                          const TextStyle(color: Colors.white),
                     ),
                     child: Slider(
-                      value: _selectedDuration,
+                      value:
+                          isPlus ? _selectedDuration : 1.0, // Lock to 1 if free
                       min: 1,
                       max: 10,
                       divisions: 9,
-                      label: '${_selectedDuration.toInt()} Days',
-                      onChanged: (value) {
-                        setModalState(() => _selectedDuration = value);
-                        setState(() {}); // Keep parent state in sync
-                      },
+                      label: isPlus
+                          ? '${_selectedDuration.toInt()} Days'
+                          : '1 Day',
+                      onChanged: isPlus
+                          ? (value) {
+                              setModalState(() => _selectedDuration = value);
+                              setState(() {});
+                            }
+                          : null, // Disable slider if free
                     ),
                   ),
                   Padding(
@@ -258,9 +259,11 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
                         Text('1 Day',
                             style:
                                 TextStyle(color: Colors.white54, fontSize: 12)),
-                        Text('10 Days',
-                            style:
-                                TextStyle(color: Colors.white54, fontSize: 12)),
+                        Text('10 Days (Plus)',
+                            style: TextStyle(
+                                color: Colors.amber,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold)),
                       ],
                     ),
                   ),
@@ -269,8 +272,8 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
                     width: double.infinity,
                     child: ElevatedButton(
                       onPressed: () {
-                        Navigator.pop(context); // Close Picker
-                        _handleFinalUpload(); // Start Upload
+                        Navigator.pop(context);
+                        _handleFinalUpload();
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF4CAF50),
@@ -282,7 +285,7 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
                           style: TextStyle(
                               fontSize: 16,
                               fontWeight: FontWeight.bold,
-                              color: Colors.white)),
+                              color: Colors.black)),
                     ),
                   ),
                   const SizedBox(height: 10),
@@ -409,21 +412,11 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
-
-    if (!isPlus) {
-      return Scaffold(
-        backgroundColor: Colors.grey[900],
-        appBar: AppBar(
-            title: const Text('New Story'),
-            backgroundColor: Colors.transparent),
-        body: const Center(
-            child: Text("Paywall Area", style: TextStyle(color: Colors.white))),
-      );
-    }
+    // FIX: Completely removed the "Paywall Area" Scaffold return block.
+    // Everyone can access this screen now!
 
     return Scaffold(
-      backgroundColor: Colors.grey[900],
+      backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
         title: const Text('New Story',
             style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
@@ -432,6 +425,7 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: SafeArea(
+        // ... (Keep the rest of your body content exactly as it is)
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(20),
           child: Column(

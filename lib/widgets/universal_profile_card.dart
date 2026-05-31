@@ -64,11 +64,14 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     if (currentUserId == null) return;
 
     try {
+      final String safeId =
+          widget.targetUserId.toString().trim(); // <-- THE FIX
+
       final results = await Future.wait<dynamic>([
         supabase
             .from('profiles')
             .select()
-            .eq('id', widget.targetUserId)
+            .eq('id', safeId) // Use safeId instead of raw targetUserId
             .maybeSingle(),
         supabase
             .from('followers')
@@ -194,7 +197,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   void _showProfileMenu() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (ctx) => Column(
@@ -225,7 +228,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   void _showUserList(String title, bool showFollowers) {
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: Color(0xFF121212),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (context) {
@@ -294,7 +297,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
 
                       return ListTile(
                         leading: CircleAvatar(
-                          backgroundColor: Colors.grey[800],
+                          backgroundColor: Color(0xFF1E1E1E),
                           backgroundImage: profile['avatar_url'] != null
                               ? NetworkImage(profile['avatar_url'])
                               : null,
@@ -430,7 +433,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   Widget _buildShell(Widget child) {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.grey[900],
+        color: Color(0xFF121212),
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
       ),
       child: Column(
@@ -464,7 +467,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
         ),
         child: CircleAvatar(
           radius: 40,
-          backgroundColor: Colors.grey[800],
+          backgroundColor: Color(0xFF1E1E1E),
           backgroundImage: _profile!['avatar_url'] != null
               ? CachedNetworkImageProvider(_profile!['avatar_url'])
               : null,
@@ -583,7 +586,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
             ),
             label: Text(_isFollowing ? 'Following' : 'Follow'),
             style: ElevatedButton.styleFrom(
-              backgroundColor: _isFollowing ? Colors.grey[800] : themeColor,
+              backgroundColor: _isFollowing ? Color(0xFF1E1E1E) : themeColor,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
@@ -631,11 +634,11 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
               }
             },
             icon: const Icon(Icons.chat_bubble_outline,
-                size: 18, color: Colors.black),
+                size: 18, color: Color(0xFF121212)),
             label: const Text('Message'),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.white,
-              foregroundColor: Colors.black,
+              foregroundColor: Color(0xFF121212),
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12)),
               padding: const EdgeInsets.symmetric(vertical: 12),
@@ -719,7 +722,7 @@ class VerticalMomentFeed extends StatelessWidget {
         PageController(initialPage: initialIndex);
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Color(0xFF121212),
       body: PageView.builder(
         controller: pageController,
         scrollDirection: Axis.vertical,

@@ -241,7 +241,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                   children: [
                     CircleAvatar(
                         radius: 52,
-                        backgroundColor: Colors.grey[800],
+                        backgroundColor: Color(0xFF1E1E1E),
                         backgroundImage: imageProvider),
                     Positioned(
                       bottom: 0,
@@ -250,7 +250,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                         color: _accent,
                         shape: const CircleBorder(),
                         child: IconButton(
-                          icon: const Icon(Icons.edit, color: Colors.black),
+                          icon:
+                              const Icon(Icons.edit, color: Color(0xFF121212)),
                           onPressed: _pickAvatar,
                         ),
                       ),
@@ -342,7 +343,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                         child: Text(b,
                             style: const TextStyle(color: Colors.white))))
                     .toList(),
-                dropdownColor: Colors.grey[850],
+                dropdownColor: Color(0xFF1E1E1E),
                 decoration: _inputDecoration('Blood group'),
                 onChanged: (v) => setState(() => _bloodGroup = v),
                 style: const TextStyle(color: Colors.white),
@@ -370,7 +371,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                         height: 18,
                         width: 18,
                         child: CircularProgressIndicator(
-                            color: Colors.black, strokeWidth: 2))
+                            color: Color(0xFF121212), strokeWidth: 2))
                     : const Text('Save changes',
                         style: TextStyle(color: Colors.white)),
               ),

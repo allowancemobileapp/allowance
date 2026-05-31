@@ -2,7 +2,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:allowance/screens/home/create_story_screen.dart';
 import 'package:allowance/screens/home/home_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/screens/home/subscription_screen.dart';
@@ -157,7 +156,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
                       return ListTile(
                         leading: CircleAvatar(
-                          backgroundColor: Colors.grey[850],
+                          backgroundColor: Color(0xFF1E1E1E),
                           backgroundImage: profile['avatar_url'] != null
                               ? NetworkImage(profile['avatar_url'])
                               : null,
@@ -190,7 +189,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _confirmLogout() async {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1E1E1E),
+      backgroundColor: Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -231,7 +230,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       },
                       child: const Text('Log Out',
                           style: TextStyle(
-                              color: Colors.black,
+                              color: Color(0xFF121212),
                               fontWeight: FontWeight.bold)),
                     ),
                   ),
@@ -324,7 +323,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     showModalBottomSheet(
         context: context,
-        backgroundColor: const Color(0xFF1E1E1E),
+        backgroundColor: Color(0xFF1E1E1E),
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
@@ -347,7 +346,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       backgroundImage: acc['avatar_url'].toString().isNotEmpty
                           ? NetworkImage(acc['avatar_url'])
                           : null,
-                      backgroundColor: Colors.grey[800],
+                      backgroundColor: Color(0xFF1E1E1E),
                       child: acc['avatar_url'].toString().isEmpty
                           ? const Icon(Icons.person, color: Colors.white)
                           : null,
@@ -369,7 +368,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             await _switchToAccount(acc['refresh_token']);
                           },
                   );
-                }).toList(),
+                }),
                 const Divider(color: Colors.white24),
                 ListTile(
                   leading: const CircleAvatar(
@@ -490,7 +489,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _confirmDeleteAccount() async {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1E1E1E),
+      backgroundColor: Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => Padding(
@@ -532,7 +531,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     },
                     child: const Text('Delete',
                         style: TextStyle(
-                            color: Colors.black, fontWeight: FontWeight.bold)),
+                            color: Color(0xFF121212),
+                            fontWeight: FontWeight.bold)),
                   ),
                 ),
               ],
@@ -579,7 +579,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
         _buildCircularAction(
           icon: Icons.delete_forever,
           color: Colors.redAccent,
-          backgroundColor: Colors.black,
+          backgroundColor: Color(0xFF121212),
           label: 'Delete',
           onTap: _signingOut ? null : _confirmDeleteAccount,
         ),
@@ -654,6 +654,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       appBar: AppBar(
         backgroundColor: _bg,
         elevation: 0,
+        scrolledUnderElevation: 0, // <-- STOPS COLOR CHANGE ON SCROLL
+        surfaceTintColor:
+            Colors.transparent, // <-- STOPS COLOR CHANGE ON SCROLL
         centerTitle: true,
         title: Image.asset('assets/images/profile.png',
             height: 100, fit: BoxFit.contain),
@@ -747,28 +750,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           ),
                         ),
                       ),
-                      Positioned(
-                        bottom: 4,
-                        right: 4,
-                        child: GestureDetector(
-                          onTap: () {
-                            if (isPlus)
-                              Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                      builder: (_) => CreateStoryScreen(
-                                          userPreferences:
-                                              widget.userPreferences)));
-                            else
-                              _showUpgradeSheet(context);
-                          },
-                          child: const CircleAvatar(
-                              radius: 14,
-                              backgroundColor: _accent,
-                              child: Icon(Icons.add,
-                                  color: Colors.black, size: 18)),
-                        ),
-                      ),
+                      // <--- FIX: Removed the Positioned widget with the Plus button here!
                     ],
                   ),
                 ),
@@ -837,7 +819,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                 style: TextStyle(
                                     color: Colors.white54, fontSize: 12)),
                             value: profile['is_available_for_delivery'] == true,
-                            activeColor: _accent,
+                            activeThumbColor: _accent,
                             onChanged: (val) async {
                               setState(() => _cachedProfileData![
                                   'is_available_for_delivery'] = val);
@@ -943,60 +925,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   // Helper for Upgrade Sheet
-  void _showUpgradeSheet(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
-            const SizedBox(height: 16),
-            const Text(
-              'JOIN THE ALLOWANCE PLUS FAMILY',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Unlock Story Gist and profile customization.',
-              style: TextStyle(color: Colors.white70),
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF4CAF50),
-                    foregroundColor: Colors.black),
-                onPressed: () {
-                  Navigator.pop(ctx);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => SubscriptionScreen(
-                        userPreferences: widget.userPreferences,
-                        themeColor: _accent,
-                      ),
-                    ),
-                  );
-                },
-                child: const Text('Subscribe to Allowance Plus',
-                    style: TextStyle(fontWeight: FontWeight.bold)),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 
   Future<void> _fetchProfile() async {
     final supabase = Supabase.instance.client;
@@ -1112,7 +1040,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             title,
             textAlign: TextAlign.center,
             style: TextStyle(
-              color: _selectedSegment == index ? Colors.black : Colors.white54,
+              color: _selectedSegment == index
+                  ? Color(0xFF121212)
+                  : Colors.white54,
               fontWeight: FontWeight.bold,
               fontSize: 13.5, // Slightly smaller
             ),
@@ -1142,7 +1072,7 @@ class VerticalMomentFeed extends StatelessWidget {
         PageController(initialPage: initialIndex);
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Color(0xFF121212),
       body: PageView.builder(
         controller: pageController,
         scrollDirection: Axis.vertical,
@@ -1156,7 +1086,6 @@ class VerticalMomentFeed extends StatelessWidget {
 }
 
 class MomentGridItem extends StatefulWidget {
-  // Renamed from MemoryGridItem
   final List<Map<String, dynamic>> moments;
   final int index;
 
@@ -1226,10 +1155,11 @@ class _MomentGridItemState extends State<MomentGridItem> {
               CachedNetworkImage(
                 imageUrl: moment['media_url'],
                 fit: BoxFit.cover,
+                memCacheWidth: 400, // <--- FAST GPU THUMBNAIL CACHING
                 placeholder: (context, url) =>
-                    Container(color: Colors.grey[900]),
+                    Container(color: const Color(0xFF1E1E1E)),
                 errorWidget: (context, url, error) => Container(
-                  color: Colors.grey[900],
+                  color: const Color(0xFF1E1E1E),
                   child: const Icon(Icons.broken_image, color: Colors.white10),
                 ),
               ),
@@ -1282,7 +1212,7 @@ class _EnlargedMomentScreenState extends State<EnlargedMomentScreen> {
   void _showMomentOptions(BuildContext context, dynamic momentId) {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1E1E1E),
+      backgroundColor: Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -1333,7 +1263,7 @@ class _EnlargedMomentScreenState extends State<EnlargedMomentScreen> {
     final isVideo = widget.moment['media_type'] == 'video';
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Color(0xFF121212),
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -1387,7 +1317,7 @@ class _EnlargedMomentScreenState extends State<EnlargedMomentScreen> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.6),
+                      color: Color(0xFF121212).withOpacity(0.6),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Text(

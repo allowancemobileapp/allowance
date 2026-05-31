@@ -285,8 +285,8 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = Colors.grey[900];
-    final fieldFill = Colors.grey[850];
+    final bg = Color(0xFF121212);
+    final fieldFill = Color(0xFF1E1E1E);
 
     return Theme(
       data: ThemeData.dark().copyWith(scaffoldBackgroundColor: bg),
@@ -448,7 +448,7 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.grey[850],
+                      color: Color(0xFF1E1E1E),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(

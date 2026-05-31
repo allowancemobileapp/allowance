@@ -79,7 +79,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
       uiSettings: [
         AndroidUiSettings(
           toolbarTitle: 'Crop Image',
-          toolbarColor: Colors.black,
+          toolbarColor: Color(0xFF121212),
           toolbarWidgetColor: themeColor,
           initAspectRatio: CropAspectRatioPreset.original,
           lockAspectRatio: false,
@@ -194,9 +194,9 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: Color(0xFF121212),
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.close, color: Colors.white),
@@ -233,7 +233,10 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [Colors.transparent, Colors.black.withOpacity(0.8)],
+                  colors: [
+                    Colors.transparent,
+                    Color(0xFF121212).withOpacity(0.8)
+                  ],
                 ),
               ),
               child: Row(
@@ -242,7 +245,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       decoration: BoxDecoration(
-                        color: Colors.grey[900],
+                        color: Color(0xFF121212),
                         borderRadius: BorderRadius.circular(25),
                         border: Border.all(color: Colors.white10),
                       ),

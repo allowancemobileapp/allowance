@@ -3,8 +3,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:allowance/screens/chat/chat_room_screen.dart';
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
-import 'package:allowance/screens/chat/create_group_screen.dart';
-import 'package:allowance/screens/chat/explore_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -21,7 +19,9 @@ class ChatListScreen extends StatefulWidget {
   State<ChatListScreen> createState() => _ChatListScreenState();
 }
 
-class _ChatListScreenState extends State<ChatListScreen> {
+class _ChatListScreenState extends State<ChatListScreen>
+    with AutomaticKeepAliveClientMixin {
+  // <-- ADD MIXIN
   final Color themeColor = const Color(0xFF4CAF50);
   int _selectedTabIndex = 0; // 0: Friends, 1: General, 2: Groups
   final TextEditingController _searchController = TextEditingController();
@@ -42,6 +42,9 @@ class _ChatListScreenState extends State<ChatListScreen> {
   bool _isLoading = true;
   String? _myId;
   late PageController _pageController; // <--- ADD THIS
+
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -183,88 +186,18 @@ class _ChatListScreenState extends State<ChatListScreen> {
     super.dispose();
   }
 
-  void _showPlusMenu() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.blueAccent.withOpacity(0.2),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.explore, color: Colors.blueAccent),
-              ),
-              title: const Text('Explore',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold)),
-              subtitle: const Text('Discover new users and public groups',
-                  style: TextStyle(color: Colors.white54)),
-              onTap: () {
-                Navigator.pop(ctx);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => ExploreScreen(
-                          userPreferences: widget.userPreferences)),
-                );
-              },
-            ),
-            const SizedBox(height: 12),
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: themeColor.withOpacity(0.2),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(Icons.group_add, color: themeColor),
-              ),
-              title: const Text('Create Group',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold)),
-              subtitle: const Text('Start a public or private community',
-                  style: TextStyle(color: Colors.white54)),
-              onTap: () {
-                Navigator.pop(ctx);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (context) => CreateGroupScreen(
-                          userPreferences: widget.userPreferences)),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     if (_myId == null) {
       return const Scaffold(body: Center(child: Text("Please log in")));
     }
 
     if (_isLoading) {
       return Scaffold(
-        backgroundColor: Colors.black,
+        backgroundColor: Color(0xFF121212),
         appBar: AppBar(
-          backgroundColor: Colors.black,
+          backgroundColor: Color(0xFF121212),
           elevation: 0,
           centerTitle: true,
           iconTheme: const IconThemeData(color: Colors.white),
@@ -318,17 +251,15 @@ class _ChatListScreenState extends State<ChatListScreen> {
     }
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: const Color(0xFF121212), // <-- OFFICIAL BG
       appBar: AppBar(
-        backgroundColor: Colors.black,
+        backgroundColor: const Color(0xFF121212), // <-- OFFICIAL BG
         elevation: 0,
+        scrolledUnderElevation: 0,
         centerTitle: true,
         iconTheme: const IconThemeData(color: Colors.white),
-        title: Image.asset(
-          'assets/images/chats.png', // <--- Your custom Chats PNG
-          height: 100,
-          fit: BoxFit.contain,
-        ),
+        title: Image.asset('assets/images/chats.png',
+            height: 100, fit: BoxFit.contain),
       ),
       body: SafeArea(
         child: Column(
@@ -337,7 +268,8 @@ class _ChatListScreenState extends State<ChatListScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: CupertinoSearchTextField(
                 controller: _searchController,
-                backgroundColor: Colors.grey[900],
+                backgroundColor:
+                    const Color(0xFF1E1E1E), // <-- FIX: Visible Card Color
                 style: const TextStyle(color: Colors.white),
                 placeholderStyle: const TextStyle(color: Colors.white54),
                 placeholder: 'Search chats, friends, or groups...',
@@ -349,8 +281,9 @@ class _ChatListScreenState extends State<ChatListScreen> {
               child: SizedBox(
                 width: double.infinity,
                 child: CupertinoSlidingSegmentedControl<int>(
-                  backgroundColor: Colors.grey[900]!,
-                  thumbColor: Colors.grey[700]!,
+                  backgroundColor:
+                      const Color(0xFF1E1E1E), // <-- FIX: Visible Card Color
+                  thumbColor: const Color(0xFF2A2A2A),
                   groupValue: _selectedTabIndex,
                   children: {
                     0: _buildTabLabel('Friends', 0, friendsUnread),
@@ -375,26 +308,20 @@ class _ChatListScreenState extends State<ChatListScreen> {
                   setState(() => _selectedTabIndex = index);
                 },
                 children: [
-                  _buildChatListForTab(0), // Friends Page
-                  _buildChatListForTab(1), // General Page
-                  _buildChatListForTab(2), // Groups Page
+                  _buildChatListForTab(0),
+                  _buildChatListForTab(1),
+                  _buildChatListForTab(2),
                 ],
               ),
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: themeColor,
-        onPressed: _showPlusMenu,
-        child: const Icon(Icons.add, color: Colors.white, size: 32),
-      ),
     );
   }
 
   Widget _buildChatListForTab(int tabIndex) {
-    final searchText =
-        _searchController.text.toLowerCase(); // <--- Get search query
+    final searchText = _searchController.text.toLowerCase();
 
     final filteredChats = _chats.where((chat) {
       final isGroup = chat['is_group'] == true;
@@ -402,7 +329,6 @@ class _ChatListScreenState extends State<ChatListScreen> {
 
       if (tabIndex == 2) {
         if (!isGroup) return false;
-        // Group search filter
         final chatName =
             (chat['group_name'] ?? chat['name'] ?? '').toString().toLowerCase();
         if (searchText.isNotEmpty && !chatName.contains(searchText))
@@ -456,14 +382,28 @@ class _ChatListScreenState extends State<ChatListScreen> {
               itemCount: filteredChats.length,
               itemBuilder: (context, index) {
                 final chat = filteredChats[index];
+
+                // --- FIX: Extract targetUserId here to prevent N+1 network delay! ---
+                String targetUserId = '';
+                if (chat['is_group'] != true) {
+                  final otherP = _allParticipants.firstWhere(
+                    (p) =>
+                        p['chat_id'].toString() == chat['id'].toString() &&
+                        p['user_id'] != _myId,
+                    orElse: () => <String, dynamic>{},
+                  );
+                  targetUserId =
+                      otherP.isNotEmpty ? otherP['user_id'].toString() : '';
+                }
+
                 return _ChatTile(
                   key: Key(chat['id'].toString()),
                   chat: chat,
                   myId: _myId!,
                   themeColor: themeColor,
                   userPreferences: widget.userPreferences,
-                  searchQuery:
-                      searchText, // <--- FIX: Passing search query to child tile
+                  searchQuery: searchText,
+                  targetUserId: targetUserId, // <-- PASSED DOWN
                 );
               },
             ),
@@ -502,6 +442,7 @@ class _ChatTile extends StatefulWidget {
   final Color themeColor;
   final UserPreferences userPreferences;
   final String searchQuery;
+  final String targetUserId; // <-- NEW: Received from parent
 
   const _ChatTile({
     super.key,
@@ -509,6 +450,7 @@ class _ChatTile extends StatefulWidget {
     required this.myId,
     required this.themeColor,
     required this.userPreferences,
+    required this.targetUserId, // <-- NEW
     this.searchQuery = '',
   });
 
@@ -520,7 +462,6 @@ class _ChatTileState extends State<_ChatTile> {
   final supabase = Supabase.instance.client;
   Map<String, dynamic>? _metaData;
   bool _isLoadingMeta = true;
-  String _targetUserId = '';
 
   late final Stream<List<Map<String, dynamic>>> _messagesStream;
   late final Stream<List<Map<String, dynamic>>> _participantsStream;
@@ -528,7 +469,6 @@ class _ChatTileState extends State<_ChatTile> {
   @override
   void initState() {
     super.initState();
-    // Cache streams here so they don't rebuild infinitely
     _messagesStream = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
@@ -560,39 +500,31 @@ class _ChatTileState extends State<_ChatTile> {
         return;
       }
 
-      final participantData = await supabase
-          .from('chat_participants')
-          .select('user_id')
-          .eq('chat_id', widget.chat['id'])
-          .neq('user_id', widget.myId)
-          .maybeSingle();
+      final targetUserId = widget.targetUserId;
+      if (targetUserId.isEmpty) return;
 
-      if (participantData == null) return;
-      _targetUserId = participantData['user_id'] ?? '';
-
-      // --- NEW: LOAD CACHED PROFILE DATA INSTANTLY ---
+      // --- INSTANT CACHE CHECK (Loads in 0.001 seconds) ---
       final prefs = await SharedPreferences.getInstance();
-      final cachedProfile = prefs.getString('profile_cache_$_targetUserId');
+      final cachedProfile = prefs.getString('profile_cache_$targetUserId');
       if (cachedProfile != null) {
         if (mounted) {
           setState(() {
             _metaData = jsonDecode(cachedProfile);
-            _isLoadingMeta = false;
+            _isLoadingMeta = false; // <-- STOPS THE SPINNER IMMEDIATELY
           });
         }
       }
 
-      // FETCH FRESH DATA FROM NETWORK
+      // --- SILENT BACKGROUND NETWORK FETCH ---
       final profileData = await supabase
           .from('profiles')
           .select('username, avatar_url, school_name, subscription_tier')
-          .eq('id', _targetUserId)
+          .eq('id', targetUserId)
           .maybeSingle();
-
       final storyCheck = await supabase
           .from('stories')
           .select('id')
-          .eq('user_id', _targetUserId)
+          .eq('user_id', targetUserId)
           .gt('expires_at', DateTime.now().toUtc().toIso8601String())
           .limit(1);
 
@@ -604,9 +536,7 @@ class _ChatTileState extends State<_ChatTile> {
         'has_story': storyCheck.isNotEmpty,
       };
 
-      // SAVE TO CACHE & UPDATE UI
-      await prefs.setString(
-          'profile_cache_$_targetUserId', jsonEncode(newMeta));
+      await prefs.setString('profile_cache_$targetUserId', jsonEncode(newMeta));
 
       if (mounted) {
         setState(() {
@@ -630,12 +560,12 @@ class _ChatTileState extends State<_ChatTile> {
   }
 
   Future<void> _openStory() async {
-    if (_targetUserId.isEmpty) return;
+    if (widget.targetUserId.isEmpty) return;
     final response = await supabase
         .from('stories')
         .select(
-            'id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)') // <-- Added user_id here
-        .eq('user_id', _targetUserId)
+            'id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count, profiles:user_id(username, avatar_url)')
+        .eq('user_id', widget.targetUserId)
         .gt('expires_at', DateTime.now().toUtc().toIso8601String())
         .order('created_at', ascending: true);
 
@@ -673,25 +603,25 @@ class _ChatTileState extends State<_ChatTile> {
   Widget build(BuildContext context) {
     if (_isLoadingMeta) {
       return ListTile(
-        leading: CircleAvatar(radius: 28, backgroundColor: Colors.grey[900]),
+        leading:
+            const CircleAvatar(radius: 28, backgroundColor: Color(0xFF121212)),
         title: Container(
             height: 12,
             width: 100,
             decoration: BoxDecoration(
-                color: Colors.grey[900],
+                color: const Color(0xFF121212),
                 borderRadius: BorderRadius.circular(4))),
         subtitle: Container(
             height: 10,
             width: 150,
             decoration: BoxDecoration(
-                color: Colors.grey[900],
+                color: const Color(0xFF121212),
                 borderRadius: BorderRadius.circular(4))),
       );
     }
 
     final title = _metaData?['title'] ?? "Chat";
 
-    // <--- FIX: This dynamically hides the chat if the search query doesn't match the username!
     if (widget.searchQuery.isNotEmpty &&
         !title.toLowerCase().contains(widget.searchQuery)) {
       return const SizedBox.shrink();
@@ -701,11 +631,7 @@ class _ChatTileState extends State<_ChatTile> {
     final chatId = widget.chat['id'];
     final hasStory = _metaData?['has_story'] == true;
     final isPlus = _metaData?['is_plus'] == true;
-
-    final dynamic isGroupRaw = widget.chat['is_group'];
-    final bool isGroup = isGroupRaw == true ||
-        isGroupRaw == 1 ||
-        isGroupRaw.toString() == 'true';
+    final isGroup = widget.chat['is_group'] == true;
 
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: _messagesStream,
@@ -730,9 +656,8 @@ class _ChatTileState extends State<_ChatTile> {
                 (p) => p['user_id'] != widget.myId && p['is_typing'] == true);
 
             final myParticipant = participants.firstWhere(
-              (p) => p['user_id'] == widget.myId,
-              orElse: () => <String, dynamic>{},
-            );
+                (p) => p['user_id'] == widget.myId,
+                orElse: () => <String, dynamic>{});
             final bool localIsAdmin = myParticipant['role'] == 'admin' ||
                 myParticipant['is_admin'] == true;
 
@@ -740,35 +665,32 @@ class _ChatTileState extends State<_ChatTile> {
               onTap: () {
                 if (isGroup) {
                   Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => ChatRoomScreen(
-                        chatId: chatId,
-                        chatTitle: title,
-                        isAdmin: localIsAdmin,
-                        userPreferences: widget.userPreferences,
-                        isGroup: true,
-                        creatorId: widget.chat['creator_id']?.toString(),
-                      ),
-                    ),
-                  );
+                      context,
+                      MaterialPageRoute(
+                          builder: (context) => ChatRoomScreen(
+                                chatId: chatId,
+                                chatTitle: title,
+                                isAdmin: localIsAdmin,
+                                userPreferences: widget.userPreferences,
+                                isGroup: true,
+                                creatorId:
+                                    widget.chat['creator_id']?.toString(),
+                              )));
                 } else {
                   Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => IndividualChatScreen(
-                        chatId: chatId,
-                        recipientProfile: {
-                          'id': _targetUserId,
-                          'username': title,
-                          'avatar_url': avatarUrl,
-                          'school_name': _metaData?['school_name'],
-                          'is_group': false,
-                        },
-                        userPreferences: widget.userPreferences,
-                      ),
-                    ),
-                  );
+                      context,
+                      MaterialPageRoute(
+                          builder: (context) => IndividualChatScreen(
+                                chatId: chatId,
+                                recipientProfile: {
+                                  'id': widget.targetUserId,
+                                  'username': title,
+                                  'avatar_url': avatarUrl,
+                                  'school_name': _metaData?['school_name'],
+                                  'is_group': false,
+                                },
+                                userPreferences: widget.userPreferences,
+                              )));
                 }
               },
               contentPadding:
@@ -781,13 +703,12 @@ class _ChatTileState extends State<_ChatTile> {
                   decoration: hasStory
                       ? BoxDecoration(
                           shape: BoxShape.circle,
-                          border: Border.all(
-                              color: widget.themeColor, width: 2), // Story Ring
-                        )
+                          border:
+                              Border.all(color: widget.themeColor, width: 2))
                       : null,
                   child: CircleAvatar(
                     radius: 28,
-                    backgroundColor: Colors.grey[900],
+                    backgroundColor: const Color(0xFF121212),
                     backgroundImage:
                         avatarUrl != null ? NetworkImage(avatarUrl) : null,
                     child: avatarUrl == null
@@ -804,29 +725,24 @@ class _ChatTileState extends State<_ChatTile> {
                     child: Row(
                       children: [
                         Flexible(
-                          child: Text(
-                            title,
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
+                            child: Text(title,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis)),
                         if (isPlus) ...[
                           const SizedBox(width: 4),
-                          const Icon(Icons.star, color: Colors.amber, size: 16),
+                          const Icon(Icons.star, color: Colors.amber, size: 16)
                         ],
                       ],
                     ),
                   ),
-                  Text(
-                    isTyping ? "typing..." : lastMessageTime,
-                    style: TextStyle(
-                        color: isTyping ? widget.themeColor : Colors.white54,
-                        fontSize: 12),
-                  ),
+                  Text(isTyping ? "typing..." : lastMessageTime,
+                      style: TextStyle(
+                          color: isTyping ? widget.themeColor : Colors.white54,
+                          fontSize: 12)),
                 ],
               ),
               subtitle: Row(
@@ -841,15 +757,14 @@ class _ChatTileState extends State<_ChatTile> {
                               style: TextStyle(
                                   color: widget.themeColor.withOpacity(0.7),
                                   fontSize: 12)),
-                        Text(
-                          isTyping ? "typing..." : lastMessage,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              color:
-                                  isTyping ? widget.themeColor : Colors.white54,
-                              fontSize: 14),
-                        ),
+                        Text(isTyping ? "typing..." : lastMessage,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                color: isTyping
+                                    ? widget.themeColor
+                                    : Colors.white54,
+                                fontSize: 14)),
                       ],
                     ),
                   ),
@@ -860,7 +775,7 @@ class _ChatTileState extends State<_ChatTile> {
                           color: widget.themeColor, shape: BoxShape.circle),
                       child: Text(unreadCount.toString(),
                           style: const TextStyle(
-                              color: Colors.black,
+                              color: Color(0xFF121212),
                               fontSize: 10,
                               fontWeight: FontWeight.bold)),
                     ),

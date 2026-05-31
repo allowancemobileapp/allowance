@@ -60,8 +60,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
   late Future<List<Map<String, dynamic>>> _schoolsFuture;
   bool _isSubmitting = false;
-  List<XFile> _pickedImages = [];
-  List<Uint8List> _pickedImageBytes = [];
+  final List<XFile> _pickedImages = [];
+  final List<Uint8List> _pickedImageBytes = [];
   List<XFile> _pickedVideos = []; // ← NEW
   bool _isVideoMode = false;
 
@@ -219,6 +219,15 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       return;
     }
 
+    // --- PAYSTACK VALIDATION CHECK ---
+    if (user.email == null || user.email!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text(
+              'Your account requires an email address to process payments.'),
+          backgroundColor: Colors.redAccent));
+      return;
+    }
+
     setState(() => _isSubmitting = true);
     int? draftGistId;
 
@@ -230,7 +239,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       String mediaType = 'image';
 
       if (_pickedVideos.isNotEmpty) {
-        // ====================== VIDEO UPLOAD ======================
         mediaType = 'video';
         final video = _pickedVideos.first;
         final ext = video.name.split('.').last.toLowerCase();
@@ -252,7 +260,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         uploadedUrls.add(publicUrl);
         uploadedPaths.add(filePath);
       } else {
-        // ====================== IMAGE UPLOAD (max 3) ======================
         for (int i = 0; i < _pickedImages.length; i++) {
           final image = _pickedImages[i];
           final ext = image.name.split('.').last;
@@ -286,11 +293,10 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'user_id': user.id,
         'type': dbType,
         'title': _titleController.text.trim(),
-        'image_url': uploadedUrls.first, // backward compatibility
-        'image_urls':
-            mediaType == 'image' ? uploadedUrls : [], // only for images
+        'image_url': uploadedUrls.first,
+        'image_urls': mediaType == 'image' ? uploadedUrls : [],
         'image_path': uploadedPaths.first,
-        'media_type': mediaType, // ← IMPORTANT: tells DB it's video
+        'media_type': mediaType,
         'number_of_days': numDays,
         'price_per_day': pricePerDay,
         'paid': false,
@@ -321,11 +327,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         return;
       }
 
-      // 3. Paystack payment flow (unchanged)
+      // 3. Paystack payment flow
       final reference = 'gist_${const Uuid().v4()}';
       final payload = {
         'amount': totalNaira * 100,
-        'email': user.email ?? '',
+        'email': user.email,
         'reference': reference,
         'metadata': {'gist_id': draftGistId.toString()},
       };
@@ -339,8 +345,19 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         body: jsonEncode(payload),
       );
 
+      // --- THE FIX IS HERE: DON'T FAIL SILENTLY ---
       if (httpResp.statusCode != 200) {
         await supabase.from('gists').delete().eq('id', draftGistId);
+
+        if (mounted) {
+          final errData = jsonDecode(httpResp.body);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Paystack Error: ${errData['message'] ?? 'Check your .env API Keys or Network'}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ));
+        }
         return;
       }
 
