@@ -56,6 +56,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   Timer? _typingTimer;
   List<Map<String, dynamic>> _messages = [];
   StreamSubscription? _msgSub;
+  Timer? _remoteTypingTimer;
 
   Map<String, dynamic>? _chatMeta;
   List<Map<String, dynamic>> _participants = [];
@@ -197,7 +198,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           final myId = supabase.auth.currentUser?.id;
           final remoteTyping = data.any((p) =>
               p['user_id']?.toString() != myId && p['is_typing'] == true);
+
           setState(() => _remoteUserIsTyping = remoteTyping);
+
+          // BUG FIX: Auto-clear stuck typing indicators after 4 seconds
+          if (remoteTyping) {
+            _remoteTypingTimer?.cancel();
+            _remoteTypingTimer = Timer(const Duration(seconds: 4), () {
+              if (mounted) setState(() => _remoteUserIsTyping = false);
+            });
+          }
         });
   }
 
@@ -474,9 +484,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
       if (type == 'image') {
         if (source == ImageSource.gallery) {
-          pickedFiles = await picker.pickMultiImage(imageQuality: 85);
+          // --- FIX: CRUSH IMAGE QUALITY TO 50% ---
+          pickedFiles = await picker.pickMultiImage(imageQuality: 50);
         } else {
-          final file = await picker.pickImage(source: source, imageQuality: 85);
+          // --- FIX: CRUSH IMAGE QUALITY TO 50% ---
+          final file = await picker.pickImage(source: source, imageQuality: 50);
           if (file != null) pickedFiles.add(file);
         }
       } else {
@@ -2124,26 +2136,27 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   // NEW: Jumps back to the present chat
 
   Future<void> _setupMessageStream() async {
-    // 1. Instantly load messages from local cache!
     final prefs = await SharedPreferences.getInstance();
     final cachedMsgs = prefs.getString('msgs_${widget.chatId}');
+
     if (cachedMsgs != null && mounted) {
+      // SPEED FIX: Only load the first 100 into UI to prevent 5-minute freezes
+      final List<dynamic> decoded = jsonDecode(cachedMsgs);
       setState(() {
-        _messages = List<Map<String, dynamic>>.from(jsonDecode(cachedMsgs));
+        _messages = List<Map<String, dynamic>>.from(decoded.take(100));
       });
     }
 
-    // 2. Listen to Supabase silently in the background
     _msgSub = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
         .eq('chat_id', widget.chatId)
         .order('created_at', ascending: false)
+        .limit(100) // SPEED FIX: Stop fetching 10,000 messages at once
         .listen((data) {
           if (mounted) {
             setState(() => _messages = data);
           }
-          // Update cache with fresh data
           prefs.setString('msgs_${widget.chatId}', jsonEncode(data));
         });
   }
@@ -2270,39 +2283,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                 onPressed: _showPlusOptions,
               ),
               Expanded(
-                // OUTSIDE THE BOX FIX: Removed the buggy Focus() wrapper
                 child: TextField(
                   controller: _messageController,
                   focusNode: _focusNode,
                   style: const TextStyle(color: Colors.white),
                   maxLines: 5,
                   minLines: 1,
-                  textInputAction:
-                      TextInputAction.send, // <-- Native Send button
+                  textInputAction: TextInputAction.newline,
                   keyboardType: TextInputType.multiline,
-                  onSubmitted: (_) =>
-                      _sendMessage(), // <-- Fires message on Enter
-                  onChanged: (val) {
-                    if (!_isTyping && val.isNotEmpty) {
-                      _isTyping = true;
-                      supabase
-                          .from('chat_participants')
-                          .update({'is_typing': true}).match({
-                        'chat_id': widget.chatId,
-                        'user_id': supabase.auth.currentUser!.id,
-                      });
-                    }
-                    _typingTimer?.cancel();
-                    _typingTimer = Timer(const Duration(seconds: 2), () {
-                      _isTyping = false;
-                      supabase
-                          .from('chat_participants')
-                          .update({'is_typing': false}).match({
-                        'chat_id': widget.chatId,
-                        'user_id': supabase.auth.currentUser!.id,
-                      });
-                    });
-                  },
+                  // --- FIX: Using the proper _handleTyping method! ---
+                  onChanged: _handleTyping,
                   decoration: InputDecoration(
                     hintText: 'Message...',
                     hintStyle: const TextStyle(color: Colors.white54),
@@ -2317,7 +2307,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   ),
                 ),
               ),
-              // Rebuild ONLY the send button, avoiding listview lag
               ValueListenableBuilder<TextEditingValue>(
                   valueListenable: _messageController,
                   builder: (context, value, child) {

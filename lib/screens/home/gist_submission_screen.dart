@@ -9,8 +9,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:http/http.dart' as http;
 import 'dart:convert';
 // ignore: unused_import
 import 'dart:developer' as developer;
@@ -169,28 +167,26 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     final pendingJson = prefs.getString('pending_gist_payment');
     if (pendingJson == null) return;
 
-    final Map<String, dynamic> data = jsonDecode(pendingJson);
+    final data = jsonDecode(pendingJson);
     final String reference = data['reference'] as String;
     final int gistId = data['gistId'] as int;
+    final String gateway = data['gateway'] ?? 'paystack';
+    final int numDays = data['numberOfDays'] as int? ?? 1;
 
-    // We don't need to pass days here because _pollAndVerifyGistPayment already reads it
     setState(() => _isSubmitting = true);
 
-    final success = await _pollAndVerifyGistPayment(reference, gistId);
+    final success =
+        await _pollAndVerifyGistPayment(reference, gateway, gistId, numDays);
 
     if (success) {
       await prefs.remove('pending_gist_payment');
-
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('✅ Gist payment recovered and published!'),
-              backgroundColor: Colors.green),
-        );
-        Navigator.of(context).pop(); // close screen
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('✅ Gist payment recovered and published!'),
+            backgroundColor: Colors.green));
+        Navigator.of(context).pop();
       }
     }
-    // If still processing, leave the pending data for next time
     if (mounted) setState(() => _isSubmitting = false);
   }
 
@@ -219,20 +215,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       return;
     }
 
-    // --- PAYSTACK VALIDATION CHECK ---
-    if (user.email == null || user.email!.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text(
-              'Your account requires an email address to process payments.'),
-          backgroundColor: Colors.redAccent));
-      return;
-    }
-
     setState(() => _isSubmitting = true);
     int? draftGistId;
+    bool paymentLaunched =
+        false; // 🔥 CRITICAL FIX: Locks the draft from being deleted
 
     try {
-      // 1. Upload media (either images OR one video)
+      // 1. UPLOAD MEDIA
       const bucket = 'gist-images';
       final List<String> uploadedUrls = [];
       final List<String> uploadedPaths = [];
@@ -246,18 +235,13 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
         if (kIsWeb) {
           final bytes = await video.readAsBytes();
-          await supabase.storage.from(bucket).uploadBinary(
-                filePath,
-                bytes,
-                fileOptions: FileOptions(contentType: 'video/$ext'),
-              );
+          await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
+              fileOptions: FileOptions(contentType: 'video/$ext'));
         } else {
           final file = File(video.path);
           await supabase.storage.from(bucket).upload(filePath, file);
         }
-
-        final publicUrl = supabase.storage.from(bucket).getPublicUrl(filePath);
-        uploadedUrls.add(publicUrl);
+        uploadedUrls.add(supabase.storage.from(bucket).getPublicUrl(filePath));
         uploadedPaths.add(filePath);
       } else {
         for (int i = 0; i < _pickedImages.length; i++) {
@@ -267,27 +251,25 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
           if (kIsWeb) {
             final bytes = await image.readAsBytes();
-            await supabase.storage.from(bucket).uploadBinary(
-                  filePath,
-                  bytes,
-                  fileOptions: const FileOptions(contentType: 'image/*'),
-                );
+            await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
+                fileOptions: const FileOptions(contentType: 'image/*'));
           } else {
             final file = File(image.path);
             await supabase.storage.from(bucket).upload(filePath, file);
           }
-
-          final publicUrl =
-              supabase.storage.from(bucket).getPublicUrl(filePath);
-          uploadedUrls.add(publicUrl);
+          uploadedUrls
+              .add(supabase.storage.from(bucket).getPublicUrl(filePath));
           uploadedPaths.add(filePath);
         }
       }
 
-      // 2. Create draft gist
+      // 2. CREATE DRAFT GIST
       final numDays = int.tryParse(_durationController.text) ?? 0;
       final pricePerDay = _pricePerDay;
       final totalNaira = (pricePerDay * numDays).toInt();
+
+      // 🔥 FIX 1: Generate the reference FIRST!
+      final reference = 'gist_${const Uuid().v4()}';
 
       final draftPayload = {
         'user_id': user.id,
@@ -303,6 +285,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'status': 'draft',
         'start_date': DateTime.now().toUtc().toIso8601String().split('T').first,
         'category': _selectedCategory,
+        'payment_reference':
+            reference, // 🔥 FIX 2: SAVE IT TO THE DATABASE HERE!
       };
 
       if (dbType == 'local' &&
@@ -310,7 +294,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           chosenSchoolId.isNotEmpty) {
         draftPayload['school_id'] = int.tryParse(chosenSchoolId);
       }
-
       if (_urlController.text.trim().isNotEmpty) {
         draftPayload['url'] = _urlController.text.trim();
       }
@@ -327,80 +310,113 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         return;
       }
 
-      // 3. Paystack payment flow
-      final reference = 'gist_${const Uuid().v4()}';
-      final payload = {
-        'amount': totalNaira * 100,
-        'email': user.email,
-        'reference': reference,
-        'metadata': {'gist_id': draftGistId.toString()},
-      };
+      // 3. INITIALIZE PAYMENT (Flutterwave Primary, Paystack Backup)
+      // (Remove the `final reference = ...` line from here since we moved it up)
+      String gateway = 'flutterwave';
+      String? authUrlString;
 
-      final httpResp = await http.post(
-        Uri.parse('https://api.paystack.co/transaction/initialize'),
-        headers: {
-          'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
-          'Content-Type': 'application/json'
-        },
-        body: jsonEncode(payload),
-      );
+      // ... rest of your payment initialization code remains the exact same ...
 
-      // --- THE FIX IS HERE: DON'T FAIL SILENTLY ---
-      if (httpResp.statusCode != 200) {
-        await supabase.from('gists').delete().eq('id', draftGistId);
-
-        if (mounted) {
-          final errData = jsonDecode(httpResp.body);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(
-                'Paystack Error: ${errData['message'] ?? 'Check your .env API Keys or Network'}'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
-          ));
+      try {
+        final flwResp = await supabase.functions.invoke(
+          'flutterwave-init',
+          body: {
+            'tx_ref': reference,
+            'amount': totalNaira.toString(),
+            'currency': 'NGN',
+            'redirect_url': 'https://allowanceapp.org',
+            'customer': {'email': user.email ?? 'user@allowance.com'},
+            'meta': {'gist_id': draftGistId.toString()},
+            'customizations': {
+              'title': 'Gist Promotion',
+              'description': 'Paying for Ad'
+            }
+          },
+        );
+        final data =
+            flwResp.data is String ? jsonDecode(flwResp.data) : flwResp.data;
+        if (flwResp.status == 200 && data != null && data['data'] != null) {
+          authUrlString = data['data']['link'];
+        } else {
+          throw 'Flutterwave failed';
         }
-        return;
+      } catch (e) {
+        gateway = 'paystack';
+        try {
+          final payResp = await supabase.functions.invoke(
+            'paystack-init',
+            body: {
+              'amount': totalNaira * 100,
+              'email': user.email ?? 'user@allowance.com',
+              'reference': reference,
+              'metadata': {'gist_id': draftGistId.toString()}
+            },
+          );
+          final data =
+              payResp.data is String ? jsonDecode(payResp.data) : payResp.data;
+          if (payResp.status == 200 && data != null && data['data'] != null) {
+            authUrlString = data['data']['authorization_url'];
+          } else {
+            throw 'Paystack failed';
+          }
+        } catch (err) {
+          await supabase.from('gists').delete().eq('id', draftGistId);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('Payment gateways offline. Try again later.'),
+                backgroundColor: Colors.red));
+          }
+          return;
+        }
       }
 
-      final authUrl = jsonDecode(httpResp.body)['data']['authorization_url'];
+      // 4. SAVE PREFS AND LAUNCH URL
+      paymentLaunched = true; // 🔥 Locks the draft from deletion!
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
           'pending_gist_payment',
           jsonEncode({
             'reference': reference,
+            'gateway': gateway,
             'gistId': draftGistId,
             'numberOfDays': numDays,
           }));
 
-      final uri = Uri.parse(authUrl);
-      await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
+      if (authUrlString != null) {
+        final uri = Uri.parse(authUrlString);
+        if (await canLaunchUrl(uri)) {
+          // 🔥 THE FIX: If on Web, open a NEW tab so the app doesn't die!
+          await launchUrl(uri,
+              mode: kIsWeb
+                  ? LaunchMode.externalApplication
+                  : LaunchMode.inAppBrowserView);
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'Payment opened. Complete it — we verify automatically...'),
-            duration: Duration(seconds: 8)),
-      );
-
-      final success = await _pollAndVerifyGistPayment(reference, draftGistId);
-
-      if (success) {
-        await prefs.remove('pending_gist_payment');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('✅ Gist published!'),
-              backgroundColor: Colors.green));
-          Navigator.of(context).pop();
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content: Text('Payment opened! Verifying in the background...'),
+                backgroundColor: Colors.blueAccent,
+                duration: Duration(seconds: 6)));
+          }
         }
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text(
-              'Payment taking a while. We will check again when you return.'),
-          backgroundColor: Colors.orange,
-        ));
+      }
+
+      // 5. FIRE AND FORGET
+      _pollAndVerifyGistPayment(reference, gateway, draftGistId, numDays)
+          .then((success) async {
+        if (success) {
+          await prefs.remove('pending_gist_payment');
+        }
+      });
+
+      // 6. CLOSE PAGE IMMEDIATELY
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+        Navigator.of(context).pop();
       }
     } catch (e) {
-      if (draftGistId != null) {
+      // 🔥 CRITICAL FIX: Only delete the draft if the payment process never launched
+      if (draftGistId != null && !paymentLaunched) {
         try {
           await supabase.from('gists').delete().eq('id', draftGistId);
         } catch (_) {}
@@ -414,50 +430,57 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     }
   }
 
-  // ==================== POLLING (now 100% safe even if user leaves screen) ====================
-  Future<bool> _pollAndVerifyGistPayment(String reference, int gistId) async {
-    // Try to get saved numberOfDays from pending data (most reliable)
+  Future<bool> _pollAndVerifyGistPayment(
+      String reference, String gateway, int gistId, int numDays) async {
     final prefs = await SharedPreferences.getInstance();
-    final pendingJson = prefs.getString('pending_gist_payment');
-    int savedDays = 0;
+    int savedDays = numDays;
 
-    if (pendingJson != null) {
+    try {
+      final pendingJson = prefs.getString('pending_gist_payment');
+      if (pendingJson != null) {
+        savedDays =
+            (jsonDecode(pendingJson)['numberOfDays'] as num?)?.toInt() ??
+                savedDays;
+      }
+    } catch (_) {}
+
+    for (int attempt = 0; attempt < 15; attempt++) {
       try {
-        final data = jsonDecode(pendingJson) as Map<String, dynamic>;
-        savedDays = (data['numberOfDays'] as num?)?.toInt() ?? 0;
-      } catch (_) {}
-    }
-
-    // Fallback to controller if nothing saved
-    if (savedDays == 0) {
-      savedDays = int.tryParse(_durationController.text) ?? 0;
-    }
-
-    for (int attempt = 0; attempt < 12; attempt++) {
-      try {
-        final resp = await http.get(
-          Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
-          headers: {
-            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
-          },
+        final funcResp = await Supabase.instance.client.functions.invoke(
+          'verify-payment',
+          body: {'reference': reference, 'gateway': gateway},
         );
 
-        if (resp.statusCode == 200) {
-          final data = jsonDecode(resp.body);
-          if (data['status'] == true && data['data']?['status'] == 'success') {
-            final amountPaid = data['data']['amount'] as int;
+        final data =
+            funcResp.data is String ? jsonDecode(funcResp.data) : funcResp.data;
 
+        if (funcResp.status == 200 && data != null) {
+          bool isSuccess = false;
+          int amountPaid = 0;
+
+          if (gateway == 'paystack' &&
+              data['status'] == true &&
+              data['data']?['status'] == 'success') {
+            isSuccess = true;
+            amountPaid = data['data']['amount'] as int;
+          } else if (gateway == 'flutterwave' &&
+              data['status'] == 'success' &&
+              data['data']?['status'] == 'successful') {
+            isSuccess = true;
+            amountPaid = (data['data']['amount'] as num).toInt() * 100;
+          }
+
+          if (isSuccess) {
             await Supabase.instance.client.from('gists').update({
               'paid': true,
               'status': 'active',
               'payment_reference': reference,
               'amount_paid': amountPaid,
               'end_date': DateTime.now()
-                  .add(Duration(days: savedDays)) // ← NOW USES SAVED VALUE
+                  .add(Duration(days: savedDays))
                   .toIso8601String(),
               'updated_at': DateTime.now().toIso8601String(),
             }).eq('id', gistId);
-
             return true;
           }
         }

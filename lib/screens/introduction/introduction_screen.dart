@@ -26,6 +26,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   final _emailCtl = TextEditingController();
   final _pwCtl = TextEditingController();
   final _usernameCtl = TextEditingController();
+  final _referralCtl = TextEditingController();
   bool _loading = false;
   bool _isSignUp = false;
   bool _obscurePassword = true;
@@ -37,7 +38,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
 
-    // <-- NEW: Enforce Terms of Service Checkbox -->
     if (_isSignUp && !_acceptedTerms) {
       _showError(
           "You must agree to the Terms of Service to create an account.");
@@ -49,79 +49,79 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     final supabase = Supabase.instance.client;
     final usernameVal = _usernameCtl.text.trim();
     final emailVal = _emailCtl.text.trim();
+    final referralCode = _referralCtl.text.trim().toLowerCase();
+    String? referrerId;
 
     try {
-      // 1) PRE-CHECK: Check username availability before starting the Auth process
       if (_isSignUp) {
+        // 1) CHECK USERNAME
         final existing = await supabase
             .from('profiles')
             .select('username')
             .eq('username', usernameVal)
             .maybeSingle();
-
         if (existing != null) {
           _showError('This username is already taken. Please choose another.');
           setState(() => _loading = false);
           return;
         }
-      }
 
-      if (_isSignUp) {
-        // 2) SIGN UP FLOW
-        final signUpRes = await supabase.auth.signUp(
-          email: emailVal,
-          password: _pwCtl.text,
-        );
+        // 2) CHECK REFERRAL CODE (If provided)
+        if (referralCode.isNotEmpty) {
+          final referrer = await supabase
+              .from('profiles')
+              .select('id')
+              .eq('username', referralCode)
+              .maybeSingle();
+          if (referrer == null) {
+            _showError('Invalid referral code. Please check the username.');
+            setState(() => _loading = false);
+            return;
+          }
+          referrerId = referrer['id'];
+        }
 
+        // 3) SIGN UP
+        final signUpRes =
+            await supabase.auth.signUp(email: emailVal, password: _pwCtl.text);
         if (signUpRes.user == null) throw AuthException('Sign up failed');
 
-        // 3) INITIAL PROFILE UPSERT
+        // 4) UPSERT PROFILE WITH REFERRAL
         await supabase.from('profiles').upsert({
           'id': signUpRes.user!.id,
           'email': emailVal,
           'username': usernameVal,
+          'referred_by': referrerId, // <-- SAVES THE REFERRAL!
           'created_at': DateTime.now().toUtc().toIso8601String(),
           'updated_at': DateTime.now().toUtc().toIso8601String(),
         });
 
         await widget.userPreferences.loadPreferences();
-
         if (mounted) {
-          await Navigator.of(context).pushReplacement(
-            MaterialPageRoute(
+          await Navigator.of(context).pushReplacement(MaterialPageRoute(
               builder: (_) =>
-                  EditProfileScreen(userPreferences: widget.userPreferences),
-            ),
-          );
+                  EditProfileScreen(userPreferences: widget.userPreferences)));
           widget.onFinishIntro();
         }
       } else {
-        // 4) LOG IN FLOW
-        await supabase.auth.signInWithPassword(
-          email: emailVal,
-          password: _pwCtl.text,
-        );
-
+        await supabase.auth
+            .signInWithPassword(email: emailVal, password: _pwCtl.text);
         await widget.userPreferences.loadPreferences();
         widget.onFinishIntro();
-
         if (mounted) {
           Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (_) =>
-                  HomeScreen(userPreferences: widget.userPreferences),
-            ),
-          );
+              context,
+              MaterialPageRoute(
+                  builder: (_) =>
+                      HomeScreen(userPreferences: widget.userPreferences)));
         }
       }
     } on AuthException catch (e) {
       String message = e.message;
-      if (message.contains('Invalid login credentials')) {
+      if (message.contains('Invalid login credentials'))
         message = 'Incorrect email or password.';
-      } else if (message.contains('User already registered')) {
+      else if (message.contains('User already registered'))
         message = 'An account with this email already exists.';
-      }
       _showError(message);
     } on PostgrestException catch (e) {
       if (e.code == '23505' || e.message.contains('profiles_username_unique')) {
@@ -138,43 +138,39 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     }
   }
 
-// Helper to keep code clean
-  void _showError(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.redAccent,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
   Future<void> _signInWithGoogle() async {
-    setState(() => _loading = true);
+    final referralCode = _referralCtl.text.trim().toLowerCase();
+    String? referrerId;
     final supabase = Supabase.instance.client;
 
+    setState(() => _loading = true);
+
     try {
-      // 1. Web Flow (Redirect inside browser)
+      // 1) PRE-CHECK REFERRAL BEFORE OAUTH (If signing up)
+      if (_isSignUp && referralCode.isNotEmpty) {
+        final referrer = await supabase
+            .from('profiles')
+            .select('id')
+            .eq('username', referralCode)
+            .maybeSingle();
+        if (referrer == null) {
+          _showError('Invalid referral code. Please check the username.');
+          setState(() => _loading = false);
+          return;
+        }
+        referrerId = referrer['id'];
+      }
+
       if (kIsWeb) {
-        await supabase.auth.signInWithOAuth(
-          OAuthProvider.google,
-          // FORCE ACCOUNT SELECTION ON WEB
-          queryParams: {'prompt': 'select_account'},
-        );
+        await supabase.auth.signInWithOAuth(OAuthProvider.google,
+            queryParams: {'prompt': 'select_account'});
         return;
       }
 
-      // 2. Native Mobile Flow (Elegant inside-app popup)
       const webClientId =
           '463313212619-b0fl0uekmftif09otfpnj27cqm9cgrp7.apps.googleusercontent.com';
-
-      final GoogleSignIn googleSignIn = GoogleSignIn(
-        serverClientId: webClientId,
-      );
-
-      // FORCE ACCOUNT SELECTION ON MOBILE
-      // We sign out of the local native session first so the picker always pops up!
+      final GoogleSignIn googleSignIn =
+          GoogleSignIn(serverClientId: webClientId);
       await googleSignIn.signOut();
 
       final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
@@ -188,34 +184,47 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
       final accessToken = googleAuth.accessToken;
       final idToken = googleAuth.idToken;
 
-      if (idToken == null) {
-        throw 'Missing Google ID Token.';
+      if (idToken == null) throw 'Missing Google ID Token.';
+
+      final authRes = await supabase.auth.signInWithIdToken(
+          provider: OAuthProvider.google,
+          idToken: idToken,
+          accessToken: accessToken);
+
+      // 2) UPDATE REFERRAL IF NEW ACCOUNT
+      if (_isSignUp && referrerId != null && authRes.user != null) {
+        await supabase
+            .from('profiles')
+            .update({'referred_by': referrerId}).eq('id', authRes.user!.id);
       }
 
-      // Authenticate with Supabase using native credentials
-      await supabase.auth.signInWithIdToken(
-        provider: OAuthProvider.google,
-        idToken: idToken,
-        accessToken: accessToken,
-      );
-
-      // Load user preferences after successful authentication
       await widget.userPreferences.loadPreferences();
       widget.onFinishIntro();
 
       if (mounted) {
         Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => HomeScreen(userPreferences: widget.userPreferences),
-          ),
-        );
+            context,
+            MaterialPageRoute(
+                builder: (_) =>
+                    HomeScreen(userPreferences: widget.userPreferences)));
       }
     } catch (e) {
       _showError('Google Sign-In failed: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+// Helper to keep code clean
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.redAccent,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   Future<void> _forgotPassword() async {
@@ -309,7 +318,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Color(0xFF121212),
+      backgroundColor: const Color(0xFF121212),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
@@ -320,39 +329,32 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // 1. App Icon
                   Center(
-                    child: Image.asset(
-                      'assets/images/app_icon.png',
-                      height: 90,
-                      fit: BoxFit.contain,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(20),
+                      child: Image.asset('assets/images/app_icon.png',
+                          height: 90, fit: BoxFit.contain),
                     ),
                   ),
-
                   const SizedBox(height: 4),
-
-                  // 2. Allowance Logo
                   Center(
                     child: Transform.scale(
                       scale: 3.0,
-                      child: Image.asset(
-                        'assets/images/allowance_logo.png',
-                        width: MediaQuery.of(context).size.width * 0.7,
-                        height: 70,
-                        fit: BoxFit.contain,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.asset('assets/images/allowance_logo.png',
+                            width: MediaQuery.of(context).size.width * 0.7,
+                            height: 70,
+                            fit: BoxFit.contain),
                       ),
                     ),
                   ),
-
                   const SizedBox(height: 12),
-
-                  Text(
-                    _isSignUp ? 'Create a new account' : 'Welcome back',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16, color: Colors.white54),
-                  ),
+                  Text(_isSignUp ? 'Create a new account' : 'Welcome back',
+                      textAlign: TextAlign.center,
+                      style:
+                          const TextStyle(fontSize: 16, color: Colors.white54)),
                   const SizedBox(height: 48),
-
                   _buildTextField(
                     controller: _emailCtl,
                     label: 'Email',
@@ -379,41 +381,47 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                     validator: (v) =>
                         (v == null || v.length < 6) ? 'Min 6 characters' : null,
                   ),
-
-                  // --- ADDED: FORGOT PASSWORD TRIGGER TEXT (Appears only on Log In view) ---
-                  // --- FIXED: Centered Forgot Password Trigger ---
                   if (!_isSignUp)
                     Align(
-                      alignment: Alignment.center, // <-- CHANGED TO CENTER
+                      alignment: Alignment.center,
                       child: TextButton(
                         onPressed: _loading ? null : _forgotPassword,
-                        child: const Text(
-                          'Forgot Password?',
-                          style: TextStyle(
-                              color: Color(0xFF4CAF50),
-                              fontWeight: FontWeight.bold),
-                        ),
+                        child: const Text('Forgot Password?',
+                            style: TextStyle(
+                                color: Color(0xFF4CAF50),
+                                fontWeight: FontWeight.bold)),
                       ),
                     ),
-
                   AnimatedSize(
                     duration: const Duration(milliseconds: 300),
                     child: _isSignUp
-                        ? Padding(
-                            padding: const EdgeInsets.only(top: 16.0),
-                            child: _buildTextField(
-                              controller: _usernameCtl,
-                              label: 'Username',
-                              icon: Icons.person_outline,
-                              validator: (v) => (_isSignUp && (v ?? '').isEmpty)
-                                  ? 'Required'
-                                  : null,
-                            ),
+                        ? Column(
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.only(top: 16.0),
+                                child: _buildTextField(
+                                  controller: _usernameCtl,
+                                  label: 'Username',
+                                  icon: Icons.person_outline,
+                                  validator: (v) =>
+                                      (_isSignUp && (v ?? '').isEmpty)
+                                          ? 'Required'
+                                          : null,
+                                ),
+                              ),
+                              // --- NEW: REFERRAL CODE FIELD ---
+                              Padding(
+                                padding: const EdgeInsets.only(top: 16.0),
+                                child: _buildTextField(
+                                  controller: _referralCtl,
+                                  label: 'Referral Code (Optional)',
+                                  icon: Icons.card_giftcard,
+                                ),
+                              ),
+                            ],
                           )
                         : const SizedBox.shrink(),
                   ),
-
-                  // <-- TERMS & CONDITIONS CHECKBOX -->
                   if (_isSignUp)
                     Padding(
                       padding: const EdgeInsets.only(top: 20.0),
@@ -424,18 +432,15 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                             activeColor: const Color(0xFF4CAF50),
                             checkColor: Colors.white,
                             side: const BorderSide(color: Colors.white54),
-                            onChanged: (val) {
-                              setState(() => _acceptedTerms = val ?? false);
-                            },
+                            onChanged: (val) =>
+                                setState(() => _acceptedTerms = val ?? false),
                           ),
                           Expanded(
                             child: GestureDetector(
-                              onTap: () {
-                                Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                        builder: (_) => const TermsScreen()));
-                              },
+                              onTap: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                      builder: (_) => const TermsScreen())),
                               child: RichText(
                                 text: const TextSpan(
                                   text: "I agree to the ",
@@ -443,13 +448,13 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                                       color: Colors.white70, fontSize: 13),
                                   children: [
                                     TextSpan(
-                                      text: "Terms of Service & Privacy Policy",
-                                      style: TextStyle(
-                                        color: Color(0xFF4CAF50),
-                                        fontWeight: FontWeight.bold,
-                                        decoration: TextDecoration.underline,
-                                      ),
-                                    ),
+                                        text:
+                                            "Terms of Service & Privacy Policy",
+                                        style: TextStyle(
+                                            color: Color(0xFF4CAF50),
+                                            fontWeight: FontWeight.bold,
+                                            decoration:
+                                                TextDecoration.underline))
                                   ],
                                 ),
                               ),
@@ -458,7 +463,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                         ],
                       ),
                     ),
-
                   const SizedBox(height: 30),
                   _loading
                       ? const Center(
@@ -469,39 +473,33 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                             ElevatedButton(
                               onPressed: _submit,
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: Color(0xFF121212),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 18),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(16)),
-                              ),
+                                  backgroundColor: Colors.white,
+                                  foregroundColor: const Color(0xFF121212),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 18),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(16))),
                               child: Text(_isSignUp ? 'Sign Up' : 'Log In',
                                   style: const TextStyle(
                                       fontSize: 18,
                                       fontWeight: FontWeight.bold)),
                             ),
-
-                            // --- ADDED: GOOGLE SIGN-IN BUTTON ---
                             const SizedBox(height: 16),
                             OutlinedButton.icon(
                               onPressed: _loading ? null : _signInWithGoogle,
                               style: OutlinedButton.styleFrom(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 18),
-                                side: const BorderSide(color: Colors.white24),
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(16)),
-                              ),
+                                  padding:
+                                      const EdgeInsets.symmetric(vertical: 18),
+                                  side: const BorderSide(color: Colors.white24),
+                                  shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(16))),
                               icon: const Icon(Icons.g_mobiledata,
                                   color: Colors.white, size: 30),
-                              label: const Text(
-                                'Continue with Google',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 16,
-                                    fontWeight: FontWeight.bold),
-                              ),
+                              label: const Text('Continue with Google',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold)),
                             ),
                           ],
                         ),
@@ -520,7 +518,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                               text: _isSignUp ? 'Log In' : 'Sign Up',
                               style: const TextStyle(
                                   color: Colors.white,
-                                  fontWeight: FontWeight.bold)),
+                                  fontWeight: FontWeight.bold))
                         ],
                       ),
                     ),

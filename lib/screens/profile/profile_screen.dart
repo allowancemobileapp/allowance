@@ -3,8 +3,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:allowance/screens/home/home_screen.dart';
+import 'package:allowance/screens/home/moment_viewer_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
-import 'package:allowance/screens/home/subscription_screen.dart';
 import 'package:allowance/screens/settings/terms_screen.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -659,7 +659,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             Colors.transparent, // <-- STOPS COLOR CHANGE ON SCROLL
         centerTitle: true,
         title: Image.asset('assets/images/profile.png',
-            height: 100, fit: BoxFit.contain),
+            height: 110, fit: BoxFit.contain),
         automaticallyImplyLeading: false,
         actions: [
           if (isPlus)
@@ -1003,12 +1003,26 @@ class _ProfileScreenState extends State<ProfileScreen> {
           children: [
             Icon(Icons.photo_library_outlined, color: Colors.white24, size: 40),
             SizedBox(height: 8),
-            Text("No Moments yet",
-                style: TextStyle(color: Colors.white38)), // Updated string
+            Text("No Moments yet", style: TextStyle(color: Colors.white38)),
           ],
         ),
       );
     }
+
+    // <-- FIX: Inject profile data manually since stream() doesn't support joins!
+    final List<Map<String, dynamic>> enrichedMoments = _moments.map((m) {
+      return {
+        ...m,
+        'profiles': {
+          'username': _cachedProfileData?['username'] ??
+              widget.userPreferences.username,
+          'avatar_url': _cachedProfileData?['avatar_url'] ??
+              widget.userPreferences.avatarUrl,
+          'school_name': _cachedProfileData?['school_name'] ??
+              widget.userPreferences.schoolName,
+        }
+      };
+    }).toList();
 
     return GridView.builder(
       shrinkWrap: true,
@@ -1019,9 +1033,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
         mainAxisSpacing: 2,
         childAspectRatio: 0.8,
       ),
-      itemCount: _moments.length,
+      itemCount: enrichedMoments.length,
       itemBuilder: (context, index) {
-        return MomentGridItem(moments: _moments, index: index); // Updated class
+        return MomentGridItem(
+            moments: enrichedMoments, index: index); // Pass enriched list
       },
     );
   }
@@ -1128,13 +1143,17 @@ class _MomentGridItemState extends State<MomentGridItem> {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (context) => VerticalMomentFeed(
+            builder: (context) => MomentViewerScreen(
+              // <-- Uses the new global screen
               moments: widget.moments,
               initialIndex: widget.index,
+              userPreferences:
+                  UserPreferences(), // Create empty/default if required
             ),
           ),
         );
       },
+// ...
       child: ClipRRect(
         borderRadius: BorderRadius.circular(4),
         child: Stack(

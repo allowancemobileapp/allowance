@@ -382,71 +382,210 @@ class _TicketCardState extends State<_TicketCard> {
     try {
       final data = jsonDecode(pendingJson) as Map<String, dynamic>;
       final reference = data['reference'] as String;
+      final gateway = data['gateway'] ?? 'paystack';
       final ticketId = data['ticketId'] as int;
       final quantity = data['quantity'] as int;
 
-      final success =
-          await _pollAndVerifyTicketPayment(reference, ticketId, quantity);
+      final success = await _pollAndVerifyTicketPayment(
+          reference, gateway, ticketId, quantity);
       if (success) {
         await prefs.remove('pending_ticket_payment');
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text('✅ Ticket recovered and purchased!'),
-                backgroundColor: Colors.green),
-          );
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('✅ Ticket recovered and purchased!'),
+              backgroundColor: Colors.green));
           widget.onPurchaseSuccess();
         }
       }
     } catch (_) {}
   }
 
-  Future<bool> _pollAndVerifyTicketPayment(
-      String reference, int ticketId, int quantity) async {
-    for (int attempt = 0; attempt < 25; attempt++) {
+  Future<void> _buyTicket() async {
+    final supabase = Supabase.instance.client;
+    final user = supabase.auth.currentUser;
+    if (user == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please log in to buy tickets.')));
+      return;
+    }
+    if (widget.event.ticketsRemaining <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('This event is sold out.')));
+      return;
+    }
+
+    final quantity = await _showQuantityDialog();
+    if (quantity == null || quantity <= 0) return;
+    if (widget.event.ticketsRemaining < quantity) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Not enough tickets available.')));
+      return;
+    }
+
+    final priceNaira = widget.event.price.toInt();
+    if (priceNaira <= 0) return;
+
+    setState(() => _isProcessing = true);
+
+    try {
+      final reference =
+          'ticket_${widget.event.id}_${DateTime.now().millisecondsSinceEpoch}';
+      String gateway = 'paystack';
+      String? authUrlString;
+
       try {
-        final resp = await http.get(
-          Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
-          headers: {
-            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
-            'Content-Type': 'application/json',
+        final funcResp = await supabase.functions.invoke(
+          'paystack-init',
+          body: {
+            'amount': priceNaira * quantity * 100,
+            'email': user.email ?? 'user@allowance.com',
+            'reference': reference,
+            'metadata': {
+              'ticket_id': widget.event.id,
+              'user_id': user.id,
+              'quantity': quantity
+            }
           },
         );
 
-        if (resp.statusCode == 200) {
-          final data = jsonDecode(resp.body) as Map<String, dynamic>;
-          if (data['status'] == true && data['data']?['status'] == 'success') {
-            final totalNaira = (data['data']['amount'] as int) ~/ 100;
-            final perTicketNaira = (totalNaira / quantity).round();
+        final data =
+            funcResp.data is String ? jsonDecode(funcResp.data) : funcResp.data;
+        if (funcResp.status == 200 && data != null && data['data'] != null) {
+          authUrlString = data['data']['authorization_url'];
+        } else {
+          throw 'Paystack failed: ${funcResp.data}';
+        }
+      } catch (e) {
+        gateway = 'flutterwave';
+        try {
+          final flwResp = await supabase.functions.invoke(
+            'flutterwave-init',
+            body: {
+              'tx_ref': reference,
+              'amount': (priceNaira * quantity).toString(),
+              'currency': 'NGN',
+              'redirect_url': 'https://allowanceapp.org',
+              'customer': {'email': user.email ?? 'user@allowance.com'},
+              'meta': {
+                'ticket_id': widget.event.id,
+                'user_id': user.id,
+                'quantity': quantity
+              },
+              'customizations': {
+                'title': widget.event.name,
+                'description': 'Ticket Purchase'
+              }
+            },
+          );
 
+          final data =
+              flwResp.data is String ? jsonDecode(flwResp.data) : flwResp.data;
+          if (flwResp.status == 200 && data != null && data['data'] != null) {
+            authUrlString = data['data']['link'];
+          } else {
+            throw 'Flutterwave failed: ${flwResp.data}';
+          }
+        } catch (err) {
+          if (mounted)
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text('Gateways offline: $err'),
+                backgroundColor: Colors.red));
+          return;
+        }
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          'pending_ticket_payment',
+          jsonEncode({
+            'reference': reference,
+            'gateway': gateway,
+            'ticketId': widget.event.id,
+            'quantity': quantity
+          }));
+
+      if (authUrlString != null &&
+          await canLaunchUrl(Uri.parse(authUrlString))) {
+        await launchUrl(Uri.parse(authUrlString),
+            mode: LaunchMode.inAppBrowserView);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Payment opened. Complete it — we verify automatically...'),
+            duration: Duration(seconds: 8)));
+      }
+
+      final success = await _pollAndVerifyTicketPayment(
+          reference, gateway, widget.event.id, quantity);
+
+      if (success) {
+        await prefs.remove('pending_ticket_payment');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('✅ Ticket purchased!'),
+              backgroundColor: Colors.green));
+          widget.onPurchaseSuccess();
+        }
+      } else {
+        if (mounted)
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Payment taking a while. We check again later.'),
+              backgroundColor: Colors.orange));
+      }
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Payment error: $e')));
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
+  }
+
+  Future<bool> _pollAndVerifyTicketPayment(
+      String reference, String gateway, int ticketId, int quantity) async {
+    for (int attempt = 0; attempt < 25; attempt++) {
+      try {
+        final funcResp = await Supabase.instance.client.functions.invoke(
+          'verify-payment',
+          body: {'reference': reference, 'gateway': gateway},
+        );
+
+        final data =
+            funcResp.data is String ? jsonDecode(funcResp.data) : funcResp.data;
+        if (funcResp.status == 200 && data != null) {
+          int? amountPaidPerTicketNaira;
+
+          if (gateway == 'paystack' &&
+              data['status'] == true &&
+              data['data']?['status'] == 'success') {
+            amountPaidPerTicketNaira =
+                ((data['data']['amount'] as int) ~/ 100) ~/ quantity;
+          } else if (gateway == 'flutterwave' &&
+              data['status'] == 'success' &&
+              data['data']?['status'] == 'successful') {
+            amountPaidPerTicketNaira =
+                (data['data']['amount'] as num).toInt() ~/ quantity;
+          }
+
+          if (amountPaidPerTicketNaira != null) {
             final supabase = Supabase.instance.client;
             final user = supabase.auth.currentUser;
-
             if (user != null) {
-              // Insert one row per ticket
               for (int i = 0; i < quantity; i++) {
                 await supabase.from('ticket_purchases').insert({
                   'user_id': user.id,
                   'ticket_id': ticketId,
                   'payment_reference': reference,
-                  'amount_paid': perTicketNaira,
-                  'status': 'success',
+                  'amount_paid': amountPaidPerTicketNaira,
+                  'status': 'success'
                 });
               }
-
-              // ←←← THIS IS THE FIX: Call the RPC instead of direct UPDATE
-              await supabase.rpc('decrement_tickets_remaining', params: {
-                'p_ticket_id': ticketId,
-                'p_quantity': quantity,
-              });
+              await supabase.rpc('decrement_tickets_remaining',
+                  params: {'p_ticket_id': ticketId, 'p_quantity': quantity});
             }
-
             return true;
           }
         }
-      } catch (e) {
-        // Optional: you can log the error if you want
-      }
+      } catch (_) {}
       await Future.delayed(const Duration(seconds: 4));
     }
     return false;
@@ -488,152 +627,6 @@ class _TicketCardState extends State<_TicketCard> {
       return '$hours hr${hours > 1 ? 's' : ''} left';
     } else {
       return '$minutes min left';
-    }
-  }
-
-  Future<void> _buyTicket() async {
-    final supabase = Supabase.instance.client;
-    final user = supabase.auth.currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please log in to buy tickets.')),
-      );
-      return;
-    }
-    if (widget.event.ticketsRemaining <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('This event is sold out.')),
-      );
-      return;
-    }
-
-    final quantity = await _showQuantityDialog();
-    if (quantity == null || quantity <= 0) return;
-
-    if (widget.event.ticketsRemaining < quantity) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Not enough tickets available.')),
-      );
-      return;
-    }
-
-    final priceNaira = widget.event.price.toInt();
-    if (priceNaira <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'Sorry, there\'s an issue with the ticket price. Please try again later.')),
-      );
-      return;
-    }
-
-    setState(() => _isProcessing = true);
-    final paystackSecretKey = dotenv.env['PAYSTACK_SECRET_KEY'];
-    if (paystackSecretKey == null || paystackSecretKey.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text(
-                'Sorry, the payment system is unavailable right now. Please try again later.')),
-      );
-      setState(() => _isProcessing = false);
-      return;
-    }
-
-    try {
-      final reference =
-          'ticket_${widget.event.id}_${DateTime.now().millisecondsSinceEpoch}';
-
-      final payload = {
-        'amount': priceNaira * quantity * 100,
-        'email': user.email ?? '',
-        'reference': reference,
-        'metadata': {
-          'ticket_id': widget.event.id,
-          'user_id': user.id,
-          'quantity': quantity
-        }
-      };
-
-      final httpResp = await http.post(
-        Uri.parse('https://api.paystack.co/transaction/initialize'),
-        headers: {
-          'Authorization': 'Bearer $paystackSecretKey',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode(payload),
-      );
-
-      if (httpResp.statusCode != 200) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'Sorry, we couldn\'t start the payment process. Please try again.')),
-        );
-        return;
-      }
-
-      final body = jsonDecode(httpResp.body) as Map<String, dynamic>;
-      final authUrl = body['data']?['authorization_url'];
-      if (authUrl == null)
-        throw 'Sorry, payment setup failed. Please try again.';
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        'pending_ticket_payment',
-        jsonEncode({
-          'reference': reference,
-          'ticketId': widget.event.id,
-          'quantity': quantity,
-        }),
-      );
-
-      final uri = Uri.parse(authUrl);
-      bool launched = await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
-      if (!launched) {
-        launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      }
-      if (!launched) {
-        throw 'Unable to open the payment page. Please check your browser settings.';
-      }
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content:
-              Text('Payment opened. Complete it — we verify automatically...'),
-          duration: Duration(seconds: 8),
-        ),
-      );
-
-      final success = await _pollAndVerifyTicketPayment(
-          reference, widget.event.id, quantity);
-
-      if (success) {
-        await prefs.remove('pending_ticket_payment');
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('✅ Ticket purchased!'),
-              backgroundColor: Colors.green,
-            ),
-          );
-          widget.onPurchaseSuccess();
-        }
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                  'Payment taking a while. We will check again when you return.'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Payment error: $e')));
-    } finally {
-      if (mounted) setState(() => _isProcessing = false);
     }
   }
 

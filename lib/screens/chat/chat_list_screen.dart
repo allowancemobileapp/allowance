@@ -366,6 +366,13 @@ class _ChatListScreenState extends State<ChatListScreen>
       return bTime.compareTo(aTime);
     });
 
+    // --- NEW: Calculate unread counts globally so tiles don't have to! ---
+    final unreadByChat = <String, int>{};
+    for (var msg in _unreadMessages.where((m) => m['sender_id'] != _myId)) {
+      final cId = msg['chat_id'].toString();
+      unreadByChat[cId] = (unreadByChat[cId] ?? 0) + 1;
+    }
+
     return RefreshIndicator(
       color: themeColor,
       onRefresh: _handleRefresh,
@@ -382,13 +389,13 @@ class _ChatListScreenState extends State<ChatListScreen>
               itemCount: filteredChats.length,
               itemBuilder: (context, index) {
                 final chat = filteredChats[index];
+                final chatIdStr = chat['id'].toString();
 
-                // --- FIX: Extract targetUserId here to prevent N+1 network delay! ---
                 String targetUserId = '';
                 if (chat['is_group'] != true) {
                   final otherP = _allParticipants.firstWhere(
                     (p) =>
-                        p['chat_id'].toString() == chat['id'].toString() &&
+                        p['chat_id'].toString() == chatIdStr &&
                         p['user_id'] != _myId,
                     orElse: () => <String, dynamic>{},
                   );
@@ -396,14 +403,30 @@ class _ChatListScreenState extends State<ChatListScreen>
                       otherP.isNotEmpty ? otherP['user_id'].toString() : '';
                 }
 
+                // Global data passed down
+                final unreadCount = unreadByChat[chatIdStr] ?? 0;
+                final chatParts = _allParticipants
+                    .where((p) => p['chat_id'].toString() == chatIdStr)
+                    .toList();
+                final isTyping = chatParts.any(
+                    (p) => p['user_id'] != _myId && p['is_typing'] == true);
+                final myPart = chatParts.firstWhere(
+                    (p) => p['user_id'] == _myId,
+                    orElse: () => <String, dynamic>{});
+                final amIAdmin =
+                    myPart['role'] == 'admin' || myPart['is_admin'] == true;
+
                 return _ChatTile(
-                  key: Key(chat['id'].toString()),
+                  key: Key(chatIdStr),
                   chat: chat,
                   myId: _myId!,
                   themeColor: themeColor,
                   userPreferences: widget.userPreferences,
                   searchQuery: searchText,
-                  targetUserId: targetUserId, // <-- PASSED DOWN
+                  targetUserId: targetUserId,
+                  unreadCount: unreadCount,
+                  isTyping: isTyping,
+                  amIAdmin: amIAdmin,
                 );
               },
             ),
@@ -435,14 +458,16 @@ class _ChatListScreenState extends State<ChatListScreen>
 }
 
 /// A dedicated widget for each chat row.
-/// FIX: Moved its streams to initState to stop it from crashing the app!
 class _ChatTile extends StatefulWidget {
   final Map<String, dynamic> chat;
   final String myId;
   final Color themeColor;
   final UserPreferences userPreferences;
   final String searchQuery;
-  final String targetUserId; // <-- NEW: Received from parent
+  final String targetUserId;
+  final int unreadCount;
+  final bool isTyping;
+  final bool amIAdmin;
 
   const _ChatTile({
     super.key,
@@ -450,7 +475,10 @@ class _ChatTile extends StatefulWidget {
     required this.myId,
     required this.themeColor,
     required this.userPreferences,
-    required this.targetUserId, // <-- NEW
+    required this.targetUserId,
+    required this.unreadCount,
+    required this.isTyping,
+    required this.amIAdmin,
     this.searchQuery = '',
   });
 
@@ -463,68 +491,74 @@ class _ChatTileState extends State<_ChatTile> {
   Map<String, dynamic>? _metaData;
   bool _isLoadingMeta = true;
 
-  late final Stream<List<Map<String, dynamic>>> _messagesStream;
-  late final Stream<List<Map<String, dynamic>>> _participantsStream;
+  late final Stream<List<Map<String, dynamic>>> _lastMessageStream;
+  String _cachedLastMessage = "Tap to chat";
+  String _cachedLastMessageTime = "";
 
   @override
   void initState() {
     super.initState();
-    _messagesStream = supabase
+    // SPEED FIX: Limit stream to 1 message to save memory!
+    _lastMessageStream = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
         .eq('chat_id', widget.chat['id'])
-        .order('created_at', ascending: false);
-
-    _participantsStream = supabase.from('chat_participants').stream(
-        primaryKey: ['chat_id', 'user_id']).eq('chat_id', widget.chat['id']);
+        .order('created_at', ascending: false)
+        .limit(1);
 
     _fetchMetaData();
   }
 
   Future<void> _fetchMetaData() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // 1. INSTANT OFFLINE CACHE LOAD
+    final cachedMeta = prefs
+        .getString('profile_cache_${widget.targetUserId}_${widget.chat['id']}');
+    final cachedLastMsg = prefs.getString('last_msg_${widget.chat['id']}');
+
+    if (mounted) {
+      if (cachedMeta != null) _metaData = jsonDecode(cachedMeta);
+      if (cachedLastMsg != null) {
+        final decodedMsg = jsonDecode(cachedLastMsg);
+        _cachedLastMessage = decodedMsg['content'] ?? '📷 Media';
+        _cachedLastMessageTime = _formatTime(decodedMsg['time']);
+      }
+      if (_metaData != null) setState(() => _isLoadingMeta = false);
+    }
+
     try {
       if (widget.chat['is_group'] == true) {
-        if (mounted) {
+        final newMeta = {
+          'title':
+              widget.chat['group_name'] ?? widget.chat['name'] ?? "Group Chat",
+          'avatar_url': widget.chat['group_avatar'],
+          'is_plus': false,
+          'has_story': false,
+        };
+        prefs.setString(
+            'profile_cache_${widget.targetUserId}_${widget.chat['id']}',
+            jsonEncode(newMeta));
+        if (mounted)
           setState(() {
-            _metaData = {
-              'title': widget.chat['group_name'] ??
-                  widget.chat['name'] ??
-                  "Group Chat",
-              'avatar_url': widget.chat['group_avatar'],
-              'is_plus': false,
-              'has_story': false,
-            };
+            _metaData = newMeta;
             _isLoadingMeta = false;
           });
-        }
         return;
       }
 
-      final targetUserId = widget.targetUserId;
-      if (targetUserId.isEmpty) return;
+      if (widget.targetUserId.isEmpty) return;
 
-      // --- INSTANT CACHE CHECK (Loads in 0.001 seconds) ---
-      final prefs = await SharedPreferences.getInstance();
-      final cachedProfile = prefs.getString('profile_cache_$targetUserId');
-      if (cachedProfile != null) {
-        if (mounted) {
-          setState(() {
-            _metaData = jsonDecode(cachedProfile);
-            _isLoadingMeta = false; // <-- STOPS THE SPINNER IMMEDIATELY
-          });
-        }
-      }
-
-      // --- SILENT BACKGROUND NETWORK FETCH ---
+      // 2. NETWORK SYNC
       final profileData = await supabase
           .from('profiles')
           .select('username, avatar_url, school_name, subscription_tier')
-          .eq('id', targetUserId)
+          .eq('id', widget.targetUserId)
           .maybeSingle();
       final storyCheck = await supabase
           .from('stories')
           .select('id')
-          .eq('user_id', targetUserId)
+          .eq('user_id', widget.targetUserId)
           .gt('expires_at', DateTime.now().toUtc().toIso8601String())
           .limit(1);
 
@@ -536,7 +570,9 @@ class _ChatTileState extends State<_ChatTile> {
         'has_story': storyCheck.isNotEmpty,
       };
 
-      await prefs.setString('profile_cache_$targetUserId', jsonEncode(newMeta));
+      prefs.setString(
+          'profile_cache_${widget.targetUserId}_${widget.chat['id']}',
+          jsonEncode(newMeta));
 
       if (mounted) {
         setState(() {
@@ -568,32 +604,26 @@ class _ChatTileState extends State<_ChatTile> {
         .eq('user_id', widget.targetUserId)
         .gt('expires_at', DateTime.now().toUtc().toIso8601String())
         .order('created_at', ascending: true);
-
     final stories = response as List<dynamic>;
-
     if (stories.isNotEmpty && mounted) {
       Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => StoryViewerScreen(
-            stories: stories,
-            initialIndex: 0,
-            userPreferences: widget.userPreferences,
-          ),
-        ),
-      );
+          context,
+          MaterialPageRoute(
+              builder: (_) => StoryViewerScreen(
+                  stories: stories,
+                  initialIndex: 0,
+                  userPreferences: widget.userPreferences)));
     }
   }
 
   String _formatTime(String? timestamp) {
-    if (timestamp == null) return "";
+    if (timestamp == null || timestamp.isEmpty) return "";
     try {
       DateTime date = DateTime.parse(timestamp).toLocal();
-      if (DateTime.now().difference(date).inDays == 0) {
+      if (DateTime.now().difference(date).inDays == 0)
         return DateFormat('h:mm a').format(date);
-      } else {
+      else
         return DateFormat('MMM d').format(date);
-      }
     } catch (e) {
       return "";
     }
@@ -621,11 +651,9 @@ class _ChatTileState extends State<_ChatTile> {
     }
 
     final title = _metaData?['title'] ?? "Chat";
-
     if (widget.searchQuery.isNotEmpty &&
-        !title.toLowerCase().contains(widget.searchQuery)) {
+        !title.toLowerCase().contains(widget.searchQuery))
       return const SizedBox.shrink();
-    }
 
     final avatarUrl = _metaData?['avatar_url'];
     final chatId = widget.chat['id'];
@@ -634,155 +662,134 @@ class _ChatTileState extends State<_ChatTile> {
     final isGroup = widget.chat['is_group'] == true;
 
     return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _messagesStream,
+      stream: _lastMessageStream,
       builder: (context, msgSnapshot) {
-        final messages = msgSnapshot.data ?? [];
-        int unreadCount = messages
-            .where(
-                (m) => m['is_read'] == false && m['sender_id'] != widget.myId)
-            .length;
-        String lastMessage = messages.isNotEmpty
-            ? (messages.first['content'] ?? '📷 Media')
-            : "Tap to chat";
-        String lastMessageTime = messages.isNotEmpty
-            ? _formatTime(messages.first['created_at'])
-            : '';
+        if (msgSnapshot.hasData && msgSnapshot.data!.isNotEmpty) {
+          final msg = msgSnapshot.data!.first;
+          _cachedLastMessage = msg['content'] ?? '📷 Media';
+          _cachedLastMessageTime = _formatTime(msg['created_at']);
+          SharedPreferences.getInstance().then((prefs) => prefs.setString(
+              'last_msg_$chatId',
+              jsonEncode(
+                  {'content': _cachedLastMessage, 'time': msg['created_at']})));
+        }
 
-        return StreamBuilder<List<Map<String, dynamic>>>(
-          stream: _participantsStream,
-          builder: (context, partSnapshot) {
-            final participants = partSnapshot.data ?? [];
-            bool isTyping = participants.any(
-                (p) => p['user_id'] != widget.myId && p['is_typing'] == true);
-
-            final myParticipant = participants.firstWhere(
-                (p) => p['user_id'] == widget.myId,
-                orElse: () => <String, dynamic>{});
-            final bool localIsAdmin = myParticipant['role'] == 'admin' ||
-                myParticipant['is_admin'] == true;
-
-            return ListTile(
-              onTap: () {
-                if (isGroup) {
-                  Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (context) => ChatRoomScreen(
-                                chatId: chatId,
-                                chatTitle: title,
-                                isAdmin: localIsAdmin,
-                                userPreferences: widget.userPreferences,
-                                isGroup: true,
-                                creatorId:
-                                    widget.chat['creator_id']?.toString(),
-                              )));
-                } else {
-                  Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (context) => IndividualChatScreen(
-                                chatId: chatId,
-                                recipientProfile: {
-                                  'id': widget.targetUserId,
-                                  'username': title,
-                                  'avatar_url': avatarUrl,
-                                  'school_name': _metaData?['school_name'],
-                                  'is_group': false,
-                                },
-                                userPreferences: widget.userPreferences,
-                              )));
-                }
-              },
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              leading: GestureDetector(
-                onTap: (isGroup || !hasStory) ? null : _openStory,
-                child: Container(
-                  padding:
-                      hasStory ? const EdgeInsets.all(2.5) : EdgeInsets.zero,
-                  decoration: hasStory
-                      ? BoxDecoration(
-                          shape: BoxShape.circle,
-                          border:
-                              Border.all(color: widget.themeColor, width: 2))
-                      : null,
-                  child: CircleAvatar(
-                    radius: 28,
-                    backgroundColor: const Color(0xFF121212),
-                    backgroundImage:
-                        avatarUrl != null ? NetworkImage(avatarUrl) : null,
-                    child: avatarUrl == null
-                        ? Icon(isGroup ? Icons.group : Icons.person,
-                            color: widget.themeColor)
-                        : null,
-                  ),
+        return ListTile(
+          onTap: () {
+            if (isGroup) {
+              Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (context) => ChatRoomScreen(
+                          chatId: chatId.toString(),
+                          chatTitle: title,
+                          isAdmin: widget.amIAdmin,
+                          userPreferences: widget.userPreferences,
+                          isGroup: true,
+                          creatorId: widget.chat['creator_id']?.toString())));
+            } else {
+              Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (context) => IndividualChatScreen(
+                          chatId: chatId.toString(),
+                          recipientProfile: {
+                            'id': widget.targetUserId,
+                            'username': title,
+                            'avatar_url': avatarUrl,
+                            'school_name': _metaData?['school_name'],
+                            'is_group': false
+                          },
+                          userPreferences: widget.userPreferences)));
+            }
+          },
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          leading: GestureDetector(
+            onTap: (isGroup || !hasStory) ? null : _openStory,
+            child: Container(
+              padding: hasStory ? const EdgeInsets.all(2.5) : EdgeInsets.zero,
+              decoration: hasStory
+                  ? BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: widget.themeColor, width: 2))
+                  : null,
+              child: CircleAvatar(
+                radius: 28,
+                backgroundColor: const Color(0xFF121212),
+                backgroundImage:
+                    avatarUrl != null ? NetworkImage(avatarUrl) : null,
+                child: avatarUrl == null
+                    ? Icon(isGroup ? Icons.group : Icons.person,
+                        color: widget.themeColor)
+                    : null,
+              ),
+            ),
+          ),
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                        child: Text(title,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis)),
+                    if (isPlus) ...[
+                      const SizedBox(width: 4),
+                      const Icon(Icons.star, color: Colors.amber, size: 16)
+                    ],
+                  ],
                 ),
               ),
-              title: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Row(
-                      children: [
-                        Flexible(
-                            child: Text(title,
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis)),
-                        if (isPlus) ...[
-                          const SizedBox(width: 4),
-                          const Icon(Icons.star, color: Colors.amber, size: 16)
-                        ],
-                      ],
-                    ),
-                  ),
-                  Text(isTyping ? "typing..." : lastMessageTime,
-                      style: TextStyle(
-                          color: isTyping ? widget.themeColor : Colors.white54,
-                          fontSize: 12)),
-                ],
+              Text(widget.isTyping ? "typing..." : _cachedLastMessageTime,
+                  style: TextStyle(
+                      color:
+                          widget.isTyping ? widget.themeColor : Colors.white54,
+                      fontSize: 12)),
+            ],
+          ),
+          subtitle: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_metaData?['school_name'] != null && !isGroup)
+                      Text(_metaData!['school_name'],
+                          style: TextStyle(
+                              color: widget.themeColor.withOpacity(0.7),
+                              fontSize: 12)),
+                    Text(widget.isTyping ? "typing..." : _cachedLastMessage,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: widget.isTyping
+                                ? widget.themeColor
+                                : Colors.white54,
+                            fontSize: 14)),
+                  ],
+                ),
               ),
-              subtitle: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (_metaData?['school_name'] != null && !isGroup)
-                          Text(_metaData!['school_name'],
-                              style: TextStyle(
-                                  color: widget.themeColor.withOpacity(0.7),
-                                  fontSize: 12)),
-                        Text(isTyping ? "typing..." : lastMessage,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                color: isTyping
-                                    ? widget.themeColor
-                                    : Colors.white54,
-                                fontSize: 14)),
-                      ],
-                    ),
-                  ),
-                  if (unreadCount > 0)
-                    Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                          color: widget.themeColor, shape: BoxShape.circle),
-                      child: Text(unreadCount.toString(),
-                          style: const TextStyle(
-                              color: Color(0xFF121212),
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold)),
-                    ),
-                ],
-              ),
-            );
-          },
+              if (widget.unreadCount > 0)
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                      color: widget.themeColor, shape: BoxShape.circle),
+                  child: Text(widget.unreadCount.toString(),
+                      style: const TextStyle(
+                          color: Color(0xFF121212),
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold)),
+                ),
+            ],
+          ),
         );
       },
     );

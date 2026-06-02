@@ -49,6 +49,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   bool _isFollowing = false;
   Map<String, dynamic>? _replyMessage;
   bool _showScrollToBottom = false; // <-- REMOVED "final"
+  Timer? _remoteTypingTimer;
 
   // For file/media logic
   final Map<String, Color> _userColors = {};
@@ -242,26 +243,27 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   Future<void> _setupMessageStream() async {
-    // 1. Instantly load messages from local cache!
     final prefs = await SharedPreferences.getInstance();
     final cachedMsgs = prefs.getString('msgs_${widget.chatId}');
+
     if (cachedMsgs != null && mounted) {
+      // SPEED FIX: Only load the first 100 into UI to prevent 5-minute freezes
+      final List<dynamic> decoded = jsonDecode(cachedMsgs);
       setState(() {
-        _messages = List<Map<String, dynamic>>.from(jsonDecode(cachedMsgs));
+        _messages = List<Map<String, dynamic>>.from(decoded.take(100));
       });
     }
 
-    // 2. Listen to Supabase silently in the background
     _msgSub = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
         .eq('chat_id', widget.chatId)
         .order('created_at', ascending: false)
+        .limit(100) // SPEED FIX: Stop fetching 10,000 messages at once
         .listen((data) {
           if (mounted) {
             setState(() => _messages = data);
           }
-          // Update cache with fresh data
           prefs.setString('msgs_${widget.chatId}', jsonEncode(data));
         });
   }
@@ -300,13 +302,19 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         .stream(primaryKey: ['chat_id', 'user_id'])
         .eq('chat_id', widget.chatId)
         .listen((data) {
-          if (data.isNotEmpty && mounted) {
-            final remote = data
-                .where((p) => p['user_id'] != supabase.auth.currentUser!.id);
-            if (remote.isNotEmpty) {
-              setState(() =>
-                  _remoteUserIsTyping = remote.first['is_typing'] == true);
-            }
+          if (!mounted) return;
+          final myId = supabase.auth.currentUser?.id;
+          final remoteTyping = data.any((p) =>
+              p['user_id']?.toString() != myId && p['is_typing'] == true);
+
+          setState(() => _remoteUserIsTyping = remoteTyping);
+
+          // BUG FIX: Auto-clear stuck typing indicators after 4 seconds
+          if (remoteTyping) {
+            _remoteTypingTimer?.cancel();
+            _remoteTypingTimer = Timer(const Duration(seconds: 4), () {
+              if (mounted) setState(() => _remoteUserIsTyping = false);
+            });
           }
         });
   }
@@ -704,41 +712,16 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                 onPressed: _showPlusOptions,
               ),
               Expanded(
-                // OUTSIDE THE BOX FIX: Removed the buggy Focus(onKeyEvent:) wrapper!
-                // Let Flutter's native keyboard handler do its job.
                 child: TextField(
                   controller: _messageController,
                   focusNode: _focusNode,
                   style: const TextStyle(color: Colors.white),
                   maxLines: 5,
                   minLines: 1,
-                  textInputAction: TextInputAction
-                      .send, // <-- Native Send button on keyboard
+                  textInputAction: TextInputAction.newline,
                   keyboardType: TextInputType.multiline,
-                  onSubmitted: (_) =>
-                      _sendMessage(), // <-- Fires message on Enter
-                  onChanged: (val) {
-                    // Start typing logic without forcing the WHOLE chat list to rebuild
-                    if (!_isTyping && val.isNotEmpty) {
-                      _isTyping = true;
-                      supabase
-                          .from('chat_participants')
-                          .update({'is_typing': true}).match({
-                        'chat_id': widget.chatId,
-                        'user_id': supabase.auth.currentUser!.id,
-                      });
-                    }
-                    _typingTimer?.cancel();
-                    _typingTimer = Timer(const Duration(seconds: 2), () {
-                      _isTyping = false;
-                      supabase
-                          .from('chat_participants')
-                          .update({'is_typing': false}).match({
-                        'chat_id': widget.chatId,
-                        'user_id': supabase.auth.currentUser!.id,
-                      });
-                    });
-                  },
+                  // --- FIX: Using the proper _handleTyping method! ---
+                  onChanged: _handleTyping,
                   decoration: InputDecoration(
                     hintText: 'Message...',
                     hintStyle: const TextStyle(color: Colors.white54),
@@ -753,7 +736,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                   ),
                 ),
               ),
-              // OUTSIDE THE BOX FIX: Only rebuild the SEND button when text changes, NOT the chat history!
               ValueListenableBuilder<TextEditingValue>(
                   valueListenable: _messageController,
                   builder: (context, value, child) {
@@ -1292,67 +1274,15 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   // --- UPDATED: Text colors dynamically change based on isMe ---
+  // --- UPDATED: Handles VERY LONG TEXT to prevent GPU vanishing bug ---
   Widget _buildTextAndTimestamp(
       String content, String timeStr, bool isMe, bool isRead) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      child: Wrap(
-        alignment: WrapAlignment.end,
-        crossAxisAlignment: WrapCrossAlignment.end,
-        spacing: 8,
-        children: [
-          CachedLinkify(
-            // <-- SWAPPED FOR HIGH-SPEED RENDERER
-            onOpen: (link) async {
-              final String urlString = link.url;
-
-              if (urlString.contains('allowanceapp.org/gist/')) {
-                final gistId = urlString.split('/').last;
-                Navigator.pushNamed(context, '/gist',
-                    arguments: {'id': gistId});
-                return;
-              }
-
-              final Uri url = Uri.parse(urlString);
-              if (await canLaunchUrl(url)) {
-                await launchUrl(url, mode: LaunchMode.externalApplication);
-              }
-            },
-            text: content,
-            style: TextStyle(
-              color: isMe ? Colors.black : Colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
-            ),
-            linkStyle: TextStyle(
-              color: isMe ? Colors.black87 : const Color(0xFF53BDEB),
-              decoration: TextDecoration.underline,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                timeStr,
-                style: TextStyle(
-                  color: isMe ? Colors.black54 : Colors.white60,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              if (isMe) ...[
-                const SizedBox(width: 4),
-                Icon(
-                  isRead ? Icons.done_all : Icons.done,
-                  size: 14,
-                  color: isRead ? Colors.blue : Colors.black54,
-                ),
-              ],
-            ],
-          ),
-        ],
-      ),
+    return ExpandableMessageText(
+      text: content,
+      timeStr: timeStr,
+      isMe: isMe,
+      isRead: isRead,
+      parentContext: context,
     );
   }
 
@@ -1467,9 +1397,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
       if (type == 'image') {
         if (source == ImageSource.gallery) {
-          pickedFiles = await picker.pickMultiImage(imageQuality: 85);
+          // --- FIX: CRUSH IMAGE QUALITY TO 50% ---
+          pickedFiles = await picker.pickMultiImage(imageQuality: 50);
         } else {
-          final file = await picker.pickImage(source: source, imageQuality: 85);
+          // --- FIX: CRUSH IMAGE QUALITY TO 50% ---
+          final file = await picker.pickImage(source: source, imageQuality: 50);
           if (file != null) pickedFiles.add(file);
         }
       } else {
@@ -1692,5 +1624,122 @@ class _CachedLinkifyState extends State<CachedLinkify> {
   @override
   Widget build(BuildContext context) {
     return _cachedWidget;
+  }
+}
+
+// =========================================================================
+// EXPANDABLE TEXT WIDGET (Fixes disappearing long messages)
+// =========================================================================
+class ExpandableMessageText extends StatefulWidget {
+  final String text;
+  final String timeStr;
+  final bool isMe;
+  final bool isRead;
+  final BuildContext parentContext;
+
+  const ExpandableMessageText({
+    super.key,
+    required this.text,
+    required this.timeStr,
+    required this.isMe,
+    required this.isRead,
+    required this.parentContext,
+  });
+
+  @override
+  State<ExpandableMessageText> createState() => _ExpandableMessageTextState();
+}
+
+class _ExpandableMessageTextState extends State<ExpandableMessageText> {
+  bool _isExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    const int limit = 400; // Character limit before truncation
+    final bool isLong = widget.text.length > limit;
+    final String displayText = (isLong && !_isExpanded)
+        ? '${widget.text.substring(0, limit)}...'
+        : widget.text;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Wrap(
+        alignment: WrapAlignment.end,
+        crossAxisAlignment: WrapCrossAlignment.end,
+        spacing: 8,
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min, // Keeps it inline if text is short
+            children: [
+              Linkify(
+                onOpen: (link) async {
+                  final String urlString = link.url;
+                  if (urlString.contains('allowanceapp.org/gist/')) {
+                    final gistId = urlString.split('/').last;
+                    Navigator.pushNamed(widget.parentContext, '/gist',
+                        arguments: {'id': gistId});
+                    return;
+                  }
+                  final Uri url = Uri.parse(urlString);
+                  if (await canLaunchUrl(url)) {
+                    await launchUrl(url, mode: LaunchMode.externalApplication);
+                  }
+                },
+                text: displayText,
+                style: TextStyle(
+                  color: widget.isMe ? Colors.black : Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                ),
+                linkStyle: TextStyle(
+                  color: widget.isMe ? Colors.black87 : const Color(0xFF53BDEB),
+                  decoration: TextDecoration.underline,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              if (isLong && !_isExpanded)
+                GestureDetector(
+                  onTap: () => setState(() => _isExpanded = true),
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 8.0, bottom: 2.0),
+                    child: Text(
+                      'Read more',
+                      style: TextStyle(
+                        color: widget.isMe
+                            ? Colors.black54
+                            : const Color(0xFF4CAF50),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.timeStr,
+                style: TextStyle(
+                  color: widget.isMe ? Colors.black54 : Colors.white60,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              if (widget.isMe) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  widget.isRead ? Icons.done_all : Icons.done,
+                  size: 14,
+                  color: widget.isRead ? Colors.blue : Colors.black54,
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }

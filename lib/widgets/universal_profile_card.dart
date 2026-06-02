@@ -124,7 +124,8 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
       if (profileResp != null && (!isPrivate || isFollowingStatus || isMe)) {
         fetchedMoments = await supabase
             .from('moments')
-            .select()
+            // <-- FIX: Added the join for profiles!
+            .select('*, profiles:user_id(username, avatar_url, school_name)')
             .eq('user_id', widget.targetUserId)
             .order('created_at', ascending: false)
             .limit(12);
@@ -700,37 +701,6 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
           Text(label,
               style: const TextStyle(color: Colors.white54, fontSize: 14)),
         ],
-      ),
-    );
-  }
-}
-
-class VerticalMomentFeed extends StatelessWidget {
-  // Renamed from VerticalMemoryFeed
-  final List<dynamic> moments;
-  final int initialIndex;
-
-  const VerticalMomentFeed({
-    super.key,
-    required this.moments,
-    required this.initialIndex,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final PageController pageController =
-        PageController(initialPage: initialIndex);
-
-    return Scaffold(
-      backgroundColor: Color(0xFF121212),
-      body: PageView.builder(
-        controller: pageController,
-        scrollDirection: Axis.vertical,
-        itemCount: moments.length,
-        itemBuilder: (context, index) {
-          // FIX: Call EnlargedMomentScreen instead of EnlargedMemoryScreen
-          return EnlargedMomentScreen(moment: moments[index]);
-        },
       ),
     );
   }

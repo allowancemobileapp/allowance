@@ -21,6 +21,7 @@ import 'package:allowance/screens/home/favorites_screen.dart';
 import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/screens/home/ticket_screen.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
@@ -61,7 +62,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // 1. Updated _colorfulTabs (Circular icons, Library added)
   final List<Map<String, dynamic>> _colorfulTabs = [
     {"label": "Favorites", "icon": BoxIcons.bxs_heart, "color": Colors.orange},
-    {"label": "Tickets", "icon": BoxIcons.bxs_chat, "color": Colors.purple},
+    {"label": "Tickets", "icon": BoxIcons.bxs_coupon, "color": Colors.purple},
     {"label": "Order", "icon": BoxIcons.bx_food_menu, "color": Colors.teal},
     {
       "label": "Library",
@@ -1675,7 +1676,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // --- 1. UNIVERSAL PLUS MENU ---
-  // --- 1. UNIVERSAL PLUS MENU (WRAP CONTENT) ---
   // --- 1. UNIVERSAL PLUS MENU (ROW-BY-ROW) ---
   void _showUniversalPlusMenu(BuildContext context) {
     final isPlus = _prefs.subscriptionTier == 'Membership';
@@ -1857,6 +1857,34 @@ class _HomeScreenState extends State<HomeScreen> {
                       }
                     },
                   ),
+                  // --- NEW: REFERRALS WITH LIVE STATS ---
+                  FutureBuilder<Map<String, dynamic>?>(
+                      future: supabase
+                          .from('referral_leaderboard')
+                          .select('total_users, total_subs')
+                          .eq('referrer_id',
+                              supabase.auth.currentUser?.id ?? '')
+                          .maybeSingle(),
+                      builder: (context, snapshot) {
+                        int u = 0;
+                        int s = 0;
+                        if (snapshot.hasData && snapshot.data != null) {
+                          u = snapshot.data!['total_users'] ?? 0;
+                          s = snapshot.data!['total_subs'] ?? 0;
+                        }
+
+                        return _buildActionRowItem(
+                          icon: Icons.diversity_3,
+                          color: Colors.amber,
+                          title: 'Referrals',
+                          subtitle:
+                              'Your code: ${_prefs.username ?? 'Unknown'}\nu: $u, s: $s',
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _showReferralLeaderboard();
+                          },
+                        );
+                      }),
                 ],
               ),
             ),
@@ -1986,6 +2014,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   Icons.timer, 'Post Stories that last up to 10 days'),
               _buildPerkRow(
                   BoxIcons.bxs_coupon, 'Create & Sell Tickets for events'),
+              _buildPerkRow(BoxIcons.bx_food_menu,
+                  'Unlimited food orders (No 5-hour wait)'),
 
               const SizedBox(height: 32),
               SizedBox(
@@ -2013,6 +2043,382 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         );
       }),
+    );
+  }
+
+  // --- NEW: REFERRAL LEADERBOARD ---
+  // --- 1. REPLACE: _showReferralLeaderboard ---
+  void _showReferralLeaderboard() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF121212), // Match profile BG
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) {
+        int localSegment = 0; // 0 for Users, 1 for Subs
+        return StatefulBuilder(
+            builder: (BuildContext context, StateSetter setModalState) {
+          return DraggableScrollableSheet(
+            initialChildSize: 0.85,
+            minChildSize: 0.5,
+            maxChildSize: 0.95,
+            expand: false,
+            builder: (_, scrollController) => Column(
+              children: [
+                const SizedBox(height: 12),
+                Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2))),
+                const SizedBox(height: 16),
+
+                // --- NEW: LEADERBOARD TITLE ADDED HERE ---
+                const Text('LEADERBOARD 🏆',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.5)),
+                const SizedBox(height: 4),
+                Text('Your Code: ${_prefs.username ?? ''}',
+                    style: TextStyle(
+                        color: themeColor,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+
+                // --- UPDATED SEGMENTED CONTROL (Matches Profile Screen exactly) ---
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 60), // Match Profile Screen padding
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E), // _card color
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white10)),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () => setModalState(() => localSegment = 0),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  vertical: 8), // Reduced height
+                              decoration: BoxDecoration(
+                                color: localSegment == 0
+                                    ? themeColor
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text("Users",
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: localSegment == 0
+                                          ? Colors.black
+                                          : Colors.white54,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13.5)),
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () => setModalState(() => localSegment = 1),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  vertical: 8), // Reduced height
+                              decoration: BoxDecoration(
+                                color: localSegment == 1
+                                    ? themeColor
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text("Subscribers",
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                      color: localSegment == 1
+                                          ? Colors.black
+                                          : Colors.white54,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13.5)),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                Expanded(
+                  child: FutureBuilder<List<dynamic>>(
+                    future: supabase
+                        .from('referral_leaderboard')
+                        .select()
+                        .order(localSegment == 0 ? 'total_users' : 'total_subs',
+                            ascending: false)
+                        .limit(50),
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting)
+                        return Center(
+                            child:
+                                CircularProgressIndicator(color: themeColor));
+                      final data = snapshot.data ?? [];
+                      final filteredData = data.where((r) {
+                        final count = localSegment == 0
+                            ? (r['total_users'] ?? 0)
+                            : (r['total_subs'] ?? 0);
+                        return count > 0;
+                      }).toList();
+
+                      if (filteredData.isEmpty)
+                        return const Center(
+                            child: Text('No referrals yet on the leaderboard.',
+                                style: TextStyle(color: Colors.white54)));
+
+                      return ListView.builder(
+                        controller: scrollController,
+                        itemCount: filteredData.length,
+                        itemBuilder: (context, index) {
+                          final row = filteredData[index];
+                          final username =
+                              row['referrer_username'] ?? 'Unknown';
+                          final avatarUrl =
+                              row['referrer_avatar_url']; // <-- NEW: AVATAR
+                          final count = localSegment == 0
+                              ? row['total_users']
+                              : row['total_subs'];
+                          final dateRaw = row['first_referral_date'];
+                          final dateFormatted = dateRaw != null
+                              ? DateFormat('d MMMM')
+                                  .format(DateTime.parse(dateRaw))
+                              : 'Unknown';
+
+                          String prefix = '${index + 1}.';
+                          if (index == 0)
+                            prefix = '🥇';
+                          else if (index == 1)
+                            prefix = '🥈';
+                          else if (index == 2) prefix = '🥉';
+
+                          return ListTile(
+                            // --- UPDATED: ADDED AVATAR TO LEADING ---
+                            leading: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(prefix,
+                                    style: const TextStyle(fontSize: 22)),
+                                const SizedBox(width: 8),
+                                CircleAvatar(
+                                  radius: 18,
+                                  backgroundColor: Colors.grey[800],
+                                  backgroundImage: avatarUrl != null
+                                      ? NetworkImage(avatarUrl)
+                                      : null,
+                                  child: avatarUrl == null
+                                      ? const Icon(Icons.person,
+                                          color: Colors.white54, size: 20)
+                                      : null,
+                                ),
+                              ],
+                            ),
+                            title: Text('@$username',
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16)),
+                            subtitle: Text(
+                                '$count ${localSegment == 0 ? 'users' : 'subs'} since $dateFormatted',
+                                style: const TextStyle(
+                                    color: Colors.white54, fontSize: 12)),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+
+                // Fixed Bottom Bar for Benefits
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                  decoration: const BoxDecoration(
+                      color: Color(0xFF1E1E1E),
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(24))),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('View Rewards & Benefits 🎁',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold)),
+                      ElevatedButton(
+                        onPressed: () => _showBenefitsSheet(context),
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: themeColor,
+                            foregroundColor: Colors.black,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12))),
+                        child: const Text('Show',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                      )
+                    ],
+                  ),
+                )
+              ],
+            ),
+          );
+        });
+      },
+    );
+  }
+
+  // --- 2. REPLACE: _showBenefitsSheet ---
+  void _showBenefitsSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF121212),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (_, scrollController) => Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: ListView(
+            controller: scrollController,
+            children: [
+              const Text('Referral Benefits 🎉',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 12),
+
+              // --- UPDATED TEXT ---
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                    color: themeColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: themeColor.withOpacity(0.5))),
+                child: Column(
+                  children: [
+                    Text('LTG = Life Time Gist Credits',
+                        style: TextStyle(
+                            color: themeColor,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold),
+                        textAlign: TextAlign.center),
+                    const SizedBox(height: 4),
+                    Text('1m+s = 1 Month Plus Subscription',
+                        style: TextStyle(
+                            color: themeColor,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold),
+                        textAlign: TextAlign.center),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 32),
+
+              const Text('👥 USER REFERRALS',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
+              const Divider(color: Colors.white24, height: 24),
+              _buildBenefitText('10 USERS', '1m+s', '🌱'),
+              _buildBenefitText('50 USERS', '20 LTG and 1m+s', '🥉'),
+              _buildBenefitText('100 USERS', '50 LTG and 2m+s', '🥈'),
+              _buildBenefitText('200 USERS',
+                  '100 LTG and 3m+s\n(FIRST TO HIT: 150 LTG and 5m+s)', '🥇'),
+              _buildBenefitText('500 USERS',
+                  '150 LTG and 5m+s\n(FIRST TO HIT: 300 LTG and 7m+s)', '💎'),
+              _buildBenefitText('1000 USERS',
+                  '300 LTG and 7m+s\n(FIRST TO HIT: 500 LTG and 1y+s)', '👑'),
+
+              const SizedBox(height: 32),
+
+              const Text('🌟 SUB REFERRALS',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
+              const Divider(color: Colors.white24, height: 24),
+              _buildBenefitText('10 SUBS', '1m+s and ₦2k', '💸'),
+              _buildBenefitText('50 SUBS', '5m+s and ₦10k', '💰'),
+              _buildBenefitText('100 SUBS', '10m+s and ₦20k', '🏦'),
+              _buildBenefitText(
+                  '200 SUBS',
+                  '20m+s and ₦40k\n(FIRST TO HIT: ₦40k EVERY MONTH for a year)',
+                  '🏆'),
+              _buildBenefitText(
+                  '500 SUBS',
+                  '50m+s and ₦100k\n(FIRST TO HIT: ₦100k EVERY MONTH for a year)',
+                  '🚀'),
+              _buildBenefitText(
+                  '1000 SUBS',
+                  '100m+s and ₦200k\n(FIRST TO HIT: ₦200k EVERY MONTH for a year)',
+                  '🐐'),
+
+              const SizedBox(height: 40),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- 3. REPLACE: _buildBenefitText ---
+  Widget _buildBenefitText(String milestone, String reward, String emoji) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12.0),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E1E1E),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white10),
+        ),
+        child: Row(
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 28)),
+            const SizedBox(width: 16),
+            Expanded(
+              child: RichText(
+                text: TextSpan(
+                  style: const TextStyle(
+                      color: Colors.white70, fontSize: 14, height: 1.4),
+                  children: [
+                    TextSpan(
+                        text: '$milestone\n',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                            fontSize: 16)),
+                    TextSpan(
+                        text: reward,
+                        style: const TextStyle(
+                            color: Color(0xFF4CAF50),
+                            fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -2121,36 +2527,51 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // =========================================================================
-  // SUBSCRIPTION PAYMENT LOGIC
+  // SUBSCRIPTION PAYMENT LOGIC (WITH FAILOVER)
   // =========================================================================
 
   Future<void> _recoverPendingSubscription() async {
     final prefs = await SharedPreferences.getInstance();
-    final pendingRef = prefs.getString('pending_sub_reference');
-    if (pendingRef == null) return;
+    final pendingJson = prefs.getString('pending_sub_reference');
+    if (pendingJson == null) return;
 
     setState(() => _isProcessingSubscription = true);
 
-    final success =
-        await _pollAndProcessVerification(pendingRef, maxAttempts: 1);
-
-    if (success) {
-      await prefs.remove('pending_sub_reference');
-      if (mounted) {
-        setState(() {
-          _prefs.subscriptionTier = 'Membership';
-        });
-        await _prefs.savePreferences();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('✅ Subscription recovered!'),
-              backgroundColor: Colors.green),
-        );
+    try {
+      String reference = '';
+      String gateway = 'paystack';
+      if (pendingJson.startsWith('{')) {
+        final data = jsonDecode(pendingJson);
+        reference = data['reference'];
+        gateway = data['gateway'] ?? 'paystack';
+      } else {
+        reference = pendingJson;
       }
-    }
+
+      // FIX: Now correctly passes both reference AND gateway!
+      final success =
+          await _pollAndProcessVerification(reference, gateway, maxAttempts: 1);
+
+      if (success) {
+        await prefs.remove('pending_sub_reference');
+        if (mounted) {
+          setState(() {
+            _prefs.subscriptionTier = 'Membership';
+          });
+          await _prefs.savePreferences();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('✅ Subscription recovered!'),
+                backgroundColor: Colors.green),
+          );
+        }
+      }
+    } catch (_) {}
+
     if (mounted) setState(() => _isProcessingSubscription = false);
   }
 
+  // --- 2. SUBSCRIBE TO MEMBERSHIP (FAILOVER LOGIC) ---
   Future<void> _subscribeToMembership(
       BuildContext context, StateSetter setModalState) async {
     setModalState(() => _isProcessingSubscription = true);
@@ -2162,173 +2583,200 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    String? customerCode;
-    try {
-      final profile = await supabase
-          .from('profiles')
-          .select('paystack_customer_code')
-          .eq('id', user.id)
-          .maybeSingle();
-      customerCode = profile?['paystack_customer_code'] as String?;
-    } catch (e) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Error fetching profile: $e')));
-      setModalState(() => _isProcessingSubscription = false);
-      return;
-    }
+    final reference = 'sub_${DateTime.now().millisecondsSinceEpoch}';
+    final int amountNaira = 700;
+    String gateway = 'paystack';
+    String? authUrlString;
 
-    if (customerCode == null) {
-      try {
-        final resp = await http.post(
-          Uri.parse('https://api.paystack.co/customer'),
-          headers: {
-            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode(
-              {'email': user.email ?? '', 'first_name': '', 'last_name': ''}),
-        );
-        if (resp.statusCode == 200 || resp.statusCode == 201) {
-          final data = jsonDecode(resp.body)['data'];
-          customerCode = data['customer_code'];
-          await supabase.from('profiles').update(
-              {'paystack_customer_code': customerCode}).eq('id', user.id);
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('Failed to create customer: ${resp.body}')));
-          setModalState(() => _isProcessingSubscription = false);
-          return;
+    try {
+      // === ATTEMPT PAYSTACK FIRST ===
+      final paystackPayload = {
+        'amount': amountNaira * 100, // Paystack uses Kobo
+        'email': user.email ?? 'user@allowance.com',
+        'reference': reference,
+        'plan': 'PLN_2tgtzyaurt8qz0d',
+        'metadata': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id}
+      };
+
+      final resp = await http
+          .post(
+            Uri.parse('https://api.paystack.co/transaction/initialize'),
+            headers: {
+              'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
+              'Content-Type': 'application/json'
+            },
+            body: jsonEncode(paystackPayload),
+          )
+          .timeout(const Duration(seconds: 8));
+
+      if (resp.statusCode == 200) {
+        authUrlString = jsonDecode(resp.body)['data']['authorization_url'];
+      } else {
+        throw 'Paystack unavailable';
+      }
+    } catch (e) {
+      // === FAILOVER TO FLUTTERWAVE ===
+      debugPrint('Paystack failed. Rerouting to Flutterwave... Error: $e');
+      gateway = 'flutterwave';
+
+      final flwPayload = {
+        'tx_ref': reference,
+        'amount': amountNaira.toString(),
+        'currency': 'NGN',
+        'redirect_url': 'https://allowanceapp.org',
+        'customer': {'email': user.email ?? 'user@allowance.com'},
+        'payment_plan': dotenv.env['FLW_PLAN_ID'] ?? '',
+        // 🔥 FIX: Added 'plan_code' so the Webhook knows to upgrade the user!
+        'meta': {
+          'user_id': user.id,
+          'plan_code': dotenv.env['FLW_PLAN_ID'] ?? 'Allowance_Plus'
+        },
+        'customizations': {
+          'title': 'Allowance Plus',
+          'description': 'Subscription payment'
         }
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error creating customer: $e')));
+      };
+
+      try {
+        final flwResp = await http.post(
+          Uri.parse('https://api.flutterwave.com/v3/payments'),
+          headers: {
+            'Authorization': 'Bearer ${dotenv.env['FLW_SECRET_KEY']}',
+            'Content-Type': 'application/json'
+          },
+          body: jsonEncode(flwPayload),
+        );
+
+        if (flwResp.statusCode == 200) {
+          authUrlString = jsonDecode(flwResp.body)['data']['link'];
+        } else {
+          debugPrint('Flutterwave Error Body: ${flwResp.body}');
+          throw 'Flutterwave unavailable';
+        }
+      } catch (flwErr) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text(
+                  'Both payment gateways are currently offline. Try again later.'),
+              backgroundColor: Colors.red));
+        }
         setModalState(() => _isProcessingSubscription = false);
         return;
       }
     }
 
-    final reference = 'sub_${DateTime.now().millisecondsSinceEpoch}';
-    final payload = {
-      'amount': 70000,
-      'email': user.email,
-      'reference': reference,
-      'plan': 'PLN_2tgtzyaurt8qz0d',
-      'metadata': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id}
-    };
+    if (authUrlString != null) {
+      final Uri url = Uri.parse(authUrlString);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('pending_sub_reference',
+          jsonEncode({'reference': reference, 'gateway': gateway}));
 
-    try {
-      final resp = await http.post(
-        Uri.parse('https://api.paystack.co/transaction/initialize'),
-        headers: {
-          'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode(payload),
-      );
-
-      if (resp.statusCode != 200) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('Payment initialization failed: ${resp.body}')));
-        return;
-      }
-
-      final data = jsonDecode(resp.body)['data'];
-      final String? authUrlString = data['authorization_url'];
-
-      if (authUrlString != null) {
-        final Uri url = Uri.parse(authUrlString);
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('pending_sub_reference', reference);
-
-        if (await canLaunchUrl(url)) {
-          await launchUrl(url, mode: LaunchMode.inAppBrowserView);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text(
-                    'Payment opened. Complete it in the browser — we verify automatically...'),
-                duration: Duration(seconds: 8)),
-          );
-        } else {
-          throw 'Could not launch payment page';
-        }
-      }
-
-      final success = await _pollAndProcessVerification(reference,
-          maxAttempts: 30, interval: const Duration(seconds: 4));
-
-      if (success) {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.remove('pending_sub_reference');
-
-        setState(() {
-          _prefs.subscriptionTier = 'Membership';
-        });
-        await _prefs.savePreferences();
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('✅ Subscription activated!'),
-              backgroundColor: Colors.green));
-          Navigator.pop(context); // Close the Bottom Sheet!
-        }
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Payment opened. Complete it in the browser — we verify automatically...'),
+            duration: Duration(seconds: 8)));
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'Payment taking a while. You can close this; we will check again when you return.'),
-              backgroundColor: Colors.orange),
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Could not launch payment page')));
+        }
       }
-    } catch (e) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Payment error: $e')));
-    } finally {
-      if (mounted) setModalState(() => _isProcessingSubscription = false);
     }
+
+    final success = await _pollAndProcessVerification(reference, gateway,
+        maxAttempts: 30, interval: const Duration(seconds: 4));
+
+    if (success) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('pending_sub_reference');
+      setState(() {
+        _prefs.subscriptionTier = 'Membership';
+      });
+      await _prefs.savePreferences();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('✅ Subscription activated!'),
+            backgroundColor: Colors.green));
+        Navigator.pop(context); // Close the Bottom Sheet!
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Payment taking a while. You can close this; we will check again when you return.'),
+            backgroundColor: Colors.orange));
+      }
+    }
+    if (mounted) setModalState(() => _isProcessingSubscription = false);
   }
 
-  Future<bool> _pollAndProcessVerification(String reference,
+  Future<bool> _pollAndProcessVerification(String reference, String gateway,
       {int maxAttempts = 10,
       Duration interval = const Duration(seconds: 3)}) async {
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        final response = await http.get(
-          Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
-          headers: {
-            'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
-          },
-        );
-
-        if (response.statusCode == 200) {
-          final Map<String, dynamic> data = json.decode(response.body);
-          final bool ok = data['status'] == true;
-          final String? txStatus = data['data']?['status'] as String?;
-          if (ok && txStatus == 'success') {
-            final paystackData = data['data'];
-            final customerCode = paystackData['customer']?['customer_code'];
-            final subscriptionCode = paystackData['subscription_code'];
-
-            final user = Supabase.instance.client.auth.currentUser;
-            if (user != null) {
-              await Supabase.instance.client.from('profiles').update({
-                'subscription_tier': 'Membership',
-                'paystack_customer_code': customerCode,
-                'paystack_subscription_id': subscriptionCode,
-                'updated_at': DateTime.now().toIso8601String(),
-              }).eq('id', user.id);
-
-              _prefs.subscriptionTier = 'Membership';
-              await _prefs.savePreferences();
+        if (gateway == 'paystack') {
+          final response = await http.get(
+            Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
+            headers: {
+              'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
+            },
+          );
+          if (response.statusCode == 200) {
+            final data = jsonDecode(response.body);
+            if (data['status'] == true &&
+                data['data']?['status'] == 'success') {
+              await _activateSubscriptionDb(
+                  data['data']['customer']?['customer_code'],
+                  data['data']['subscription_code']);
+              return true;
             }
-            return true;
+          }
+        } else if (gateway == 'flutterwave') {
+          final response = await http.get(
+            Uri.parse(
+                'https://api.flutterwave.com/v3/transactions/verify_by_txref?tx_ref=$reference'),
+            headers: {
+              'Authorization': 'Bearer ${dotenv.env['FLW_SECRET_KEY']}'
+            },
+          );
+          if (response.statusCode == 200) {
+            final data = jsonDecode(response.body);
+            if (data['status'] == 'success' &&
+                data['data']?['status'] == 'successful') {
+              await _activateSubscriptionDb('FLW_NATIVE', 'FLW_SUB');
+              return true;
+            }
           }
         }
       } catch (e) {
-        debugPrint('Error while verifying transaction: $e');
+        debugPrint('Verify transaction error: $e');
       }
       await Future.delayed(interval);
     }
     return false;
+  }
+
+  // FIX: This method was missing! It handles the database update
+  Future<void> _activateSubscriptionDb(
+      String? customerCode, String? subCode) async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user != null) {
+      await Supabase.instance.client.from('profiles').update({
+        'subscription_tier': 'Membership',
+        'paystack_customer_code': customerCode,
+        'paystack_subscription_id': subCode,
+        'updated_at': DateTime.now().toIso8601String(),
+      }).eq('id', user.id);
+
+      setState(() {
+        _prefs.subscriptionTier = 'Membership';
+      });
+      await _prefs.savePreferences();
+    }
   }
 
   // Also include the helper for grid buttons
@@ -2522,7 +2970,9 @@ class _GistItemCardState extends State<_GistItemCard>
         await Supabase.instance.client.from('messages').insert({
           'chat_id': chatId,
           'sender_id': myId,
-          'content': 'Check out this Gist: $truncatedTitle\n$gistLink',
+          // --- UPDATED GIST SHARE TEXT ---
+          'content':
+              'Check out this Gist on Allowance!\n$truncatedTitle\n$gistLink',
           'media_url': mediaUrlToUse,
           'media_type': widget.gist['media_type'] ?? 'image',
           'is_read': false,
@@ -2583,7 +3033,9 @@ class _GistItemCardState extends State<_GistItemCard>
                         style: TextStyle(color: Colors.white)),
                     onTap: () {
                       Navigator.pop(ctx);
-                      Share.share('$truncatedTitle\n$gistLink');
+                      // --- UPDATED GIST SHARE TEXT ---
+                      Share.share(
+                          'Check out this Gist on Allowance!\n$truncatedTitle\n$gistLink');
                     },
                   ),
                   const Divider(color: Colors.white10),

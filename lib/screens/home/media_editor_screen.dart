@@ -1,5 +1,8 @@
 // lib/screens/home/media_editor_screen.dart
 import 'dart:io';
+import 'dart:typed_data';
+import 'dart:typed_data';
+import 'dart:typed_data';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/video_trimmer_screen.dart'; // Ensure this exists
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -8,6 +11,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:video_compress/video_compress.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class MediaEditorScreen extends StatefulWidget {
   final XFile file;
@@ -111,22 +116,22 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   }
 
   // =====================================
-  // BACKGROUND POSTING
+  // BACKGROUND POSTING WITH COMPRESSION
   // =====================================
   void _startBackgroundUpload() async {
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser!.id;
     final caption = _captionController.text.trim();
-    final fileToUpload = _currentFile;
     final isVideo = widget.isVideo;
 
+    // 1. Close the screen immediately so user isn't stuck waiting
     Navigator.pop(context);
 
+    // 2. Show loading snackbar
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content:
-            Text('Uploading moment to your profile... 🚀'), // Updated string
-        duration: Duration(seconds: 2),
+        content: Text('Compressing and uploading... 🚀'),
+        duration: Duration(seconds: 4),
       ),
     );
 
@@ -134,7 +139,27 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
       final extension = isVideo ? '.mp4' : '.jpg';
       final fileName = '${DateTime.now().millisecondsSinceEpoch}$extension';
 
-      final bytes = await fileToUpload.readAsBytes();
+      Uint8List bytes;
+
+      if (isVideo && !kIsWeb) {
+        // --- WHATSAPP-STYLE AGGRESSIVE VIDEO COMPRESSION ---
+        final info = await VideoCompress.compressVideo(
+          _currentFile.path,
+          quality:
+              VideoQuality.MediumQuality, // Drops 100MB to ~5MB (720p/480p)
+          deleteOrigin: false,
+          includeAudio: true,
+        );
+
+        if (info != null && info.file != null) {
+          bytes = await info.file!.readAsBytes();
+        } else {
+          bytes =
+              await _currentFile.readAsBytes(); // Fallback if compression fails
+        }
+      } else {
+        bytes = await _currentFile.readAsBytes();
+      }
 
       await supabase.storage.from('memories-bucket').uploadBinary(
             fileName,
@@ -145,8 +170,8 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
       final publicUrl =
           supabase.storage.from('memories-bucket').getPublicUrl(fileName);
 
+      // Save to 'moments' table (since you renamed it from memories)
       await supabase.from('moments').insert({
-        // Changed insertion target to moments
         'user_id': userId,
         'media_url': publicUrl,
         'caption': caption,
@@ -154,22 +179,32 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
         'created_at': DateTime.now().toUtc().toIso8601String(),
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Moment posted successfully!'), // Updated string
-          backgroundColor: Colors.green,
-        ),
-      );
+      // 4. Show success message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ Moment posted successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
     } catch (e) {
       debugPrint('Background Upload error: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-              '❌ Could not post moment. Please check your internet connection and try again.'), // Updated string
-          backgroundColor: Colors.redAccent,
-          duration: Duration(seconds: 4),
-        ),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content:
+                Text('❌ Could not post moment. Please check your connection.'),
+            backgroundColor: Colors.redAccent,
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+    } finally {
+      // Clear compressor cache to save user's phone storage!
+      if (isVideo && !kIsWeb) {
+        VideoCompress.deleteAllCache();
+      }
     }
   }
 
