@@ -127,8 +127,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
             // <-- FIX: Added the join for profiles!
             .select('*, profiles:user_id(username, avatar_url, school_name)')
             .eq('user_id', widget.targetUserId)
-            .order('created_at', ascending: false)
-            .limit(12);
+            .order('created_at', ascending: false);
       }
 
       if (mounted) {

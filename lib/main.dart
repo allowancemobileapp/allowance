@@ -12,9 +12,10 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:app_links/app_links.dart';
 import 'screens/home/single_gist_screen.dart';
 
-// Firebase
+// Firebase & Local Notifications
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'firebase_options.dart';
 
 import 'models/user_preferences.dart';
@@ -23,6 +24,20 @@ import 'screens/home/home_screen.dart';
 import 'screens/profile/edit_profile_screen.dart';
 import 'shared/services/fcm_service.dart';
 import 'widgets/custom_loading_screen.dart';
+
+// 🔥 1. Initialize the High Importance Channel for Android
+const AndroidNotificationChannel channel = AndroidNotificationChannel(
+  'high_importance_channel', // This matches the ID in your Edge Function!
+  'High Importance Notifications',
+  description:
+      'This channel is used for important notifications like DMs and Gists.',
+  importance: Importance.max, // THIS IS WHAT MAKES IT POP OUT
+  playSound: true,
+  enableVibration: true,
+);
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,6 +54,47 @@ Future<void> main() async {
 
   if (!kIsWeb) {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+
+    // 🔥 2. Create the channel on the device
+    await flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(channel);
+
+    // 🔥 3. Force iOS/Foreground notifications to present aggressively
+    await FirebaseMessaging.instance
+        .setForegroundNotificationPresentationOptions(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+
+    // 🔥 4. Listen for notifications WHILE the app is open and pop them down!
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      RemoteNotification? notification = message.notification;
+      AndroidNotification? android = message.notification?.android;
+
+      if (notification != null && android != null) {
+        flutterLocalNotificationsPlugin.show(
+          notification.hashCode,
+          notification.title,
+          notification.body,
+          NotificationDetails(
+            android: AndroidNotificationDetails(
+              channel.id,
+              channel.name,
+              channelDescription: channel.description,
+              icon:
+                  '@mipmap/ic_launcher', // Make sure this matches your app icon!
+              importance: Importance.max,
+              priority: Priority.max,
+              playSound: true,
+              enableVibration: true,
+            ),
+          ),
+        );
+      }
+    });
   }
 
   await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
@@ -89,7 +145,26 @@ class _AllowanceAppState extends State<AllowanceApp> {
   }
 
   void _handleDeepLink(Uri uri) {
-    // 1. Handle regular gist link routing
+    // 1. Catch the Rich Preview Share Links from WhatsApp/Twitter
+    if (uri.pathSegments.contains('share')) {
+      final type = uri.queryParameters['type'];
+      final id = uri.queryParameters['id'];
+
+      if (type == 'gist' && id != null) {
+        Future.delayed(const Duration(milliseconds: 500), () {
+          navigatorKey.currentState?.pushNamed('/gist', arguments: {'id': id});
+        });
+      } else if (type == 'moment' && id != null) {
+        // Handle opening a shared Moment natively
+        Future.delayed(const Duration(milliseconds: 500), () {
+          navigatorKey.currentState
+              ?.pushNamed('/moment', arguments: {'id': id});
+        });
+      }
+      return;
+    }
+
+    // 2. Handle standard fallback links
     if (uri.pathSegments.contains('gist')) {
       final gistId = uri.pathSegments.last;
       Future.delayed(const Duration(milliseconds: 500), () {
@@ -99,7 +174,16 @@ class _AllowanceAppState extends State<AllowanceApp> {
       return;
     }
 
-    // 2. Handle Reset Password deep-link routing
+    if (uri.pathSegments.contains('moment')) {
+      final momentId = uri.pathSegments.last;
+      Future.delayed(const Duration(milliseconds: 500), () {
+        navigatorKey.currentState
+            ?.pushNamed('/moment', arguments: {'id': momentId});
+      });
+      return;
+    }
+
+    // 3. Handle Reset Password
     if (uri.host == 'reset-password' ||
         uri.pathSegments.contains('reset-password')) {
       Future.delayed(const Duration(milliseconds: 500), () {
@@ -122,9 +206,8 @@ class _AllowanceAppState extends State<AllowanceApp> {
       _authSub = Supabase.instance.client.auth.onAuthStateChange
           .listen((authState) async {
         final session = authState.session;
-        final event = authState.event; // <-- ADDED: Track event type
+        final event = authState.event;
 
-        // --- NEW: Intercept Password Recovery and Route to ResetPasswordScreen ---
         if (event == AuthChangeEvent.passwordRecovery) {
           navigatorKey.currentState?.push(
             MaterialPageRoute(builder: (_) => const ResetPasswordScreen()),
@@ -170,7 +253,7 @@ class _AllowanceAppState extends State<AllowanceApp> {
   @override
   void dispose() {
     _authSub?.cancel();
-    _linkSubscription?.cancel(); // Clear the link listener
+    _linkSubscription?.cancel();
     super.dispose();
   }
 
@@ -181,18 +264,16 @@ class _AllowanceAppState extends State<AllowanceApp> {
       title: 'Allowance',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(primarySwatch: Colors.indigo),
-
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
       supportedLocales: const [
-        Locale('en', ''), // English
+        Locale('en', ''),
       ],
-
-      // --- ROUTE GENERATOR (Catches the /gist link) ---
       onGenerateRoute: (settings) {
+        // 1. Handle standard internal pushes
         if (settings.name == '/gist') {
           final args = settings.arguments as Map<String, dynamic>?;
           final gistId = args?['id'] ?? '';
@@ -200,9 +281,28 @@ class _AllowanceAppState extends State<AllowanceApp> {
             builder: (_) => SingleGistScreen(gistId: gistId.toString()),
           );
         }
+
+        // 2. 🔥 THE FIX: Handle Web and Cold-Start Deep Links
+        // This catches URLs like: allowanceapp.org/share?type=gist&id=123
+        if (settings.name != null && settings.name!.startsWith('/share')) {
+          final uri = Uri.parse(settings.name!);
+          final type = uri.queryParameters['type'];
+          final id = uri.queryParameters['id'];
+
+          if (type == 'gist' && id != null) {
+            return MaterialPageRoute(
+              builder: (_) => SingleGistScreen(gistId: id),
+            );
+          } else if (type == 'moment' && id != null) {
+            // Uncomment this once you have MomentViewerScreen ready!
+            // return MaterialPageRoute(
+            //   builder: (_) => MomentViewerScreen(...),
+            // );
+          }
+        }
+
         return null;
       },
-
       home: _isInitialized ? _buildHome() : const CustomLoadingScreen(),
     );
   }

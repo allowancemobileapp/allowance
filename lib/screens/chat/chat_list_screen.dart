@@ -49,10 +49,17 @@ class _ChatListScreenState extends State<ChatListScreen>
   @override
   void initState() {
     super.initState();
-    _pageController = PageController(
-        initialPage: _selectedTabIndex); // <--- INITIALIZE PAGE CONTROLLER
+    _pageController = PageController(initialPage: _selectedTabIndex);
     _myId = supabase.auth.currentUser?.id;
+
     if (_myId != null) {
+      // 🔥 FIX: Clean up any stuck typing statuses from previous app crashes silently!
+      supabase
+          .from('chat_participants')
+          .update({'is_typing': false})
+          .eq('user_id', _myId!)
+          .catchError((_) {});
+
       _loadCachedData();
       _setupStreams();
 
@@ -405,6 +412,15 @@ class _ChatListScreenState extends State<ChatListScreen>
 
                 // Global data passed down
                 final unreadCount = unreadByChat[chatIdStr] ?? 0;
+                final String myUsername =
+                    widget.userPreferences.username?.toLowerCase() ?? '';
+                final hasMention = unreadCount > 0 &&
+                    _unreadMessages.any((m) =>
+                        m['chat_id'].toString() == chatIdStr &&
+                        m['content']
+                            .toString()
+                            .toLowerCase()
+                            .contains('@$myUsername'));
                 final chatParts = _allParticipants
                     .where((p) => p['chat_id'].toString() == chatIdStr)
                     .toList();
@@ -427,6 +443,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                   unreadCount: unreadCount,
                   isTyping: isTyping,
                   amIAdmin: amIAdmin,
+                  hasMention: hasMention,
                 );
               },
             ),
@@ -468,6 +485,7 @@ class _ChatTile extends StatefulWidget {
   final int unreadCount;
   final bool isTyping;
   final bool amIAdmin;
+  final bool hasMention;
 
   const _ChatTile({
     super.key,
@@ -480,6 +498,7 @@ class _ChatTile extends StatefulWidget {
     required this.isTyping,
     required this.amIAdmin,
     this.searchQuery = '',
+    this.hasMention = false,
   });
 
   @override
@@ -495,10 +514,13 @@ class _ChatTileState extends State<_ChatTile> {
   String _cachedLastMessage = "Tap to chat";
   String _cachedLastMessageTime = "";
 
+  // 🔥 NEW: Auto-clearing typing timer
+  bool _localIsTyping = false;
+  Timer? _typingClearTimer;
+
   @override
   void initState() {
     super.initState();
-    // SPEED FIX: Limit stream to 1 message to save memory!
     _lastMessageStream = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
@@ -507,6 +529,36 @@ class _ChatTileState extends State<_ChatTile> {
         .limit(1);
 
     _fetchMetaData();
+    _handleTypingProp(widget.isTyping); // Initialize typing state
+  }
+
+  // 🔥 NEW: Listens for changes from the database stream
+  @override
+  void didUpdateWidget(_ChatTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isTyping != oldWidget.isTyping) {
+      _handleTypingProp(widget.isTyping);
+    }
+  }
+
+  // 🔥 NEW: Kills the typing indicator after 4 seconds automatically!
+  void _handleTypingProp(bool isTyping) {
+    if (isTyping) {
+      setState(() => _localIsTyping = true);
+      _typingClearTimer?.cancel();
+      _typingClearTimer = Timer(const Duration(seconds: 4), () {
+        if (mounted) setState(() => _localIsTyping = false);
+      });
+    } else {
+      _typingClearTimer?.cancel();
+      if (_localIsTyping) setState(() => _localIsTyping = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _typingClearTimer?.cancel(); // Clean up timer
+    super.dispose();
   }
 
   Future<void> _fetchMetaData() async {
@@ -747,10 +799,10 @@ class _ChatTileState extends State<_ChatTile> {
                   ],
                 ),
               ),
-              Text(widget.isTyping ? "typing..." : _cachedLastMessageTime,
+              Text(_localIsTyping ? "typing..." : _cachedLastMessageTime,
                   style: TextStyle(
                       color:
-                          widget.isTyping ? widget.themeColor : Colors.white54,
+                          _localIsTyping ? widget.themeColor : Colors.white54,
                       fontSize: 12)),
             ],
           ),
@@ -766,11 +818,11 @@ class _ChatTileState extends State<_ChatTile> {
                           style: TextStyle(
                               color: widget.themeColor.withOpacity(0.7),
                               fontSize: 12)),
-                    Text(widget.isTyping ? "typing..." : _cachedLastMessage,
+                    Text(_localIsTyping ? "typing..." : _cachedLastMessage,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                            color: widget.isTyping
+                            color: _localIsTyping
                                 ? widget.themeColor
                                 : Colors.white54,
                             fontSize: 14)),
@@ -778,15 +830,31 @@ class _ChatTileState extends State<_ChatTile> {
                 ),
               ),
               if (widget.unreadCount > 0)
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                      color: widget.themeColor, shape: BoxShape.circle),
-                  child: Text(widget.unreadCount.toString(),
-                      style: const TextStyle(
-                          color: Color(0xFF121212),
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold)),
+                Row(
+                  children: [
+                    if (widget.hasMention)
+                      Container(
+                        margin: const EdgeInsets.only(right: 6),
+                        padding: const EdgeInsets.all(4),
+                        decoration: const BoxDecoration(
+                            color: Colors.grey, shape: BoxShape.circle),
+                        child: const Text('@',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold)),
+                      ),
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                          color: widget.themeColor, shape: BoxShape.circle),
+                      child: Text(widget.unreadCount.toString(),
+                          style: const TextStyle(
+                              color: Color(0xFF121212),
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold)),
+                    ),
+                  ],
                 ),
             ],
           ),

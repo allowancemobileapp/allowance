@@ -161,11 +161,17 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         referrerId = referrer['id'];
       }
 
+      // === 🔥 FIX APPLIED HERE 🔥 ===
       if (kIsWeb) {
+        // Uri.base.origin automatically detects if you are on localhost OR allowanceapp.org
         await supabase.auth.signInWithOAuth(OAuthProvider.google,
+            redirectTo: Uri.base.origin,
             queryParams: {'prompt': 'select_account'});
+        // Note: On Web, the browser leaves the app to go to Google.
+        // When it returns, the app restarts and main.dart catches the login!
         return;
       }
+      // ==============================
 
       const webClientId =
           '463313212619-b0fl0uekmftif09otfpnj27cqm9cgrp7.apps.googleusercontent.com';

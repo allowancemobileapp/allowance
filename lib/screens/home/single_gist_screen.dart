@@ -215,7 +215,8 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
     );
   }
 
-  Future<void> _downloadGistImage(String imageUrl) async {
+  // 🔥 FIX: Now handles both Images AND Videos safely!
+  Future<void> _downloadMedia(String url, String mediaType) async {
     try {
       final hasAccess = await Gal.hasAccess();
       if (!hasAccess) {
@@ -224,17 +225,27 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
       }
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Downloading to gallery...')));
-      final file = await DefaultCacheManager().getSingleFile(imageUrl);
-      await Gal.putImage(file.path);
-      if (mounted)
+
+      final file = await DefaultCacheManager().getSingleFile(url);
+
+      // Check if it's a video or image
+      if (mediaType == 'video') {
+        await Gal.putVideo(file.path);
+      } else {
+        await Gal.putImage(file.path);
+      }
+
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('✅ Saved to Gallery/Photos!'),
             backgroundColor: Colors.green));
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('❌ Could not save image.'),
+            content: Text('❌ Could not save media.'),
             backgroundColor: Colors.red));
+      }
     }
   }
 
@@ -264,7 +275,7 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
     final String truncatedTitle =
         title.length > 50 ? '${title.substring(0, 50)}...' : title;
     final String gistLink =
-        'https://www.allowanceapp.org/gist/${widget.gistId}';
+        'https://www.allowanceapp.org/share?type=gist&id=${widget.gistId}';
     final friendsFuture = _fetchFriends(myId);
 
     showModalBottomSheet(
@@ -640,7 +651,8 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
                       final target = imagesToShow.isNotEmpty
                           ? imagesToShow[_localPageIndex]
                           : imageUrl;
-                      if (target.isNotEmpty) _downloadGistImage(target);
+                      // 🔥 FIX: Pass the mediaType so it knows whether to save as Video or Image
+                      if (target.isNotEmpty) _downloadMedia(target, mediaType);
                     },
                     child: const Padding(
                       padding: EdgeInsets.symmetric(horizontal: 16),

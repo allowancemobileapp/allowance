@@ -5,6 +5,10 @@
       "destination": "/.well-known/assetlinks.json"
     },
     {
+      "source": "/share",
+      "destination": "https://quuazutreaitqoquzolg.supabase.co/functions/v1/og-preview"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

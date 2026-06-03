@@ -539,6 +539,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   // --- REPLACE YOUR BUILD METHOD WITH THIS (Uses cached _messages) ---
   @override
   Widget build(BuildContext context) {
+    // 🔥 FIX: Calculate max width exactly ONCE per screen build, protecting the chat bubbles from keyboard resizes!
+    final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: _buildAppBar(),
@@ -558,10 +561,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                       : ListView.builder(
                           controller: _scrollController,
                           reverse: true,
-                          cacheExtent: 2000,
-                          addRepaintBoundaries:
-                              true, // Cache render layer compilations on GPU
-                          addAutomaticKeepAlives: true, // Retain state memory
+                          // Removed cacheExtent here to save RAM as well
+                          addRepaintBoundaries: true,
+                          addAutomaticKeepAlives: true,
                           keyboardDismissBehavior:
                               ScrollViewKeyboardDismissBehavior.onDrag,
                           padding: const EdgeInsets.all(12),
@@ -596,7 +598,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                                               fontSize: 12)),
                                     ),
                                   ),
-                                _buildBubble(_messages, index),
+                                // 🔥 FIX: Pass the pre-calculated width down!
+                                _buildBubble(_messages, index, maxBubbleWidth),
                               ],
                             );
                           },
@@ -944,31 +947,34 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     }
   }
 
-  Widget _buildBubble(List<Map<String, dynamic>> messages, int index) {
+  Widget _buildBubble(
+      List<Map<String, dynamic>> messages, int index, double maxWidth) {
     final message = messages[index];
     final messageId = message['id'].toString();
 
-    final isMe = message['sender_id'] == supabase.auth.currentUser!.id;
+    // NOTE FOR CHAT_ROOM_SCREEN:
+    // In Chat_Room_Screen, the isMe logic is: final myId = supabase.auth.currentUser?.id; final isMe = message['sender_id']?.toString() == myId;
+    // In Individual_Chat_Screen, the isMe logic is: final isMe = message['sender_id'] == supabase.auth.currentUser!.id;
+    // Ensure you keep your respective screen's `isMe` and rendering logic inside this block, just make sure to REMOVE View.of(context) and use `maxWidth` in the constraints!
+
+    final isMe =
+        message['sender_id']?.toString() == supabase.auth.currentUser?.id;
     final content = (message['content'] ?? '').toString();
-    final timeStr = _formatTime(message['created_at']);
+    final timeStr =
+        _formatTime(message['created_at']?.toString() ?? message['created_at']);
     final isRead = message['is_read'] == true;
 
     final hasMedia = message['media_url'] != null;
     final mediaType = message['media_type']?.toString() ?? 'text';
     final isFile = mediaType == 'file';
+
+    // (If pasting this in IndividualChatScreen, leave the isOrder logic here)
     final isOrder = mediaType == 'order';
 
     final bool isHighlighted = _highlightedMessageId == messageId;
 
-    // OUTSIDE THE BOX: Read physical dimensions directly from the platform view.
-    // This bypasses the InheritedWidget subscription, stopping keyboard resizes from rebuilding the bubbles.
-    final view = View.of(context);
-    final hardwareWidth = view.physicalSize.width / view.devicePixelRatio;
-
     return RepaintBoundary(
-      // Caches painted pixels on the GPU
       child: Container(
-        // Changed from AnimatedContainer to standard Container to stop layout engine thrashing
         padding: const EdgeInsets.symmetric(vertical: 2),
         decoration: BoxDecoration(
           color: isHighlighted
@@ -980,6 +986,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
           direction: DismissDirection.startToEnd,
           confirmDismiss: (_) {
             HapticFeedback.lightImpact();
+            // Call _onSwipeToReply(message) if in ChatRoomScreen
             setState(() => _replyMessage = message);
             return Future.value(false);
           },
@@ -995,8 +1002,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
               child: Container(
                 key: ValueKey(messageId),
                 margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                constraints: BoxConstraints(
-                    maxWidth: hardwareWidth * 0.75), // Safe non-reactive width
+                // 🔥 FIX: We now use the passed-in maxWidth, preventing the 60fps layout recalculation!
+                constraints: BoxConstraints(maxWidth: maxWidth),
                 decoration: BoxDecoration(
                   color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
                   borderRadius: BorderRadius.circular(16).copyWith(
@@ -1009,14 +1016,19 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (isOrder)
+                      // *Keep your existing rendering logic for _buildOrderCard, _buildReplyInsideBubble, _buildMediaSection, etc. here depending on which screen you are pasting this into!*
+
+                      if (isOrder) // Individual Chat Only
                         _buildOrderCard(content, timeStr, isMe, isRead),
+
                       if (message['reply_to_id'] != null ||
                           (message['reply_content']?.startsWith('Story_') ??
                               false))
                         _buildReplyInsideBubble(message),
-                      if (hasMedia)
+
+                      if (hasMedia) // In chat_room it's called _buildMediaWithOverlay or _buildMediaSection depending on file. Use whatever was already there!
                         _buildMediaSection(message, isMe, isRead, timeStr),
+
                       if (!isOrder &&
                           !isFile &&
                           content.isNotEmpty &&

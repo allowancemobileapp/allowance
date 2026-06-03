@@ -7,7 +7,6 @@ import 'package:allowance/screens/home/moment_viewer_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:http/http.dart' as http;
 import 'package:icons_plus/icons_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -1070,8 +1069,9 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   // --- OUTSIDE THE BOX: Render instantly from blueprints without math ---
+  // --- UPDATED: Removes cacheExtent memory leak ---
   Widget _buildCustomMasonryGrid() {
-    // 1. Instantly group the data (Takes < 1ms)
+    // 1. Instantly group the data
     final largeItems = _exploreItems
         .where(
             (e) => e['explore_type'] == 'moment' || e['explore_type'] == 'gist')
@@ -1129,7 +1129,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
       }
     }
 
-    // 2. Read exact device width directly to ignore keyboard/appbar resizes
+    // 2. Read exact device width directly
     final double screenWidth = MediaQuery.sizeOf(context).width;
     const double spacing = 10.0;
     final double w = (screenWidth - 32 - (spacing * 2)) / 3;
@@ -1139,7 +1139,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
     return ListView.builder(
       padding: const EdgeInsets.all(16),
       physics: const AlwaysScrollableScrollPhysics(),
-      cacheExtent: 2500, // <-- FAST SCROLLING: Keeps off-screen images loaded!
+      // 🔥 FIX: Removed cacheExtent: 2500. Let Flutter manage memory naturally!
       itemCount: layouts.length,
       itemBuilder: (context, index) {
         final row = layouts[index];
@@ -1207,6 +1207,92 @@ class _ExploreScreenState extends State<ExploreScreen> {
         }
         return const SizedBox.shrink();
       },
+    );
+  }
+
+  // --- UPDATED: Automatically clears old cache to stop memory leaks ---
+  Widget _buildMediaThumb(String url, String text, IconData fallbackIcon,
+      {bool isVideo = false}) {
+    Widget imageWidget;
+
+    // 🔥 FIX: Stop the app from crashing by limiting thumbnail cache size to 40
+    if (_videoThumbCache.length > 40) {
+      _videoThumbCache.clear();
+    }
+
+    if (isVideo && url.isNotEmpty) {
+      if (kIsWeb) {
+        imageWidget = Container(
+            color: Colors.grey[850],
+            child: const Center(
+                child: Icon(Icons.videocam, color: Colors.white24, size: 50)));
+      } else if (_videoThumbCache.containsKey(url)) {
+        imageWidget = Image.memory(_videoThumbCache[url]!, fit: BoxFit.cover);
+      } else {
+        imageWidget = FutureBuilder<Uint8List?>(
+          future: VideoThumbnail.thumbnailData(
+            video: url,
+            imageFormat: ImageFormat.JPEG,
+            maxWidth:
+                250, // 🔥 Reduced resolution to save massive amounts of RAM
+            quality: 35,
+          ),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return Container(color: Colors.grey[850]);
+            }
+            if (snapshot.hasData && snapshot.data != null) {
+              _videoThumbCache[url] = snapshot.data!;
+              return Image.memory(snapshot.data!, fit: BoxFit.cover);
+            }
+            return Icon(Icons.videocam, color: Colors.white24, size: 40);
+          },
+        );
+      }
+    } else if (url.isNotEmpty) {
+      imageWidget = CachedNetworkImage(
+        imageUrl: url,
+        fit: BoxFit.cover,
+        memCacheWidth:
+            250, // 🔥 Forces flutter to discard huge raw images from RAM
+        placeholder: (ctx, url) => Container(color: Colors.grey[850]),
+        errorWidget: (ctx, url, err) =>
+            Icon(fallbackIcon, color: Colors.white24, size: 40),
+      );
+    } else {
+      imageWidget = Icon(fallbackIcon, color: Colors.white24, size: 40);
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        imageWidget,
+        Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.bottomCenter,
+              end: Alignment.topCenter,
+              colors: [Colors.black87, Colors.transparent],
+            ),
+          ),
+        ),
+        if (isVideo)
+          const Center(
+              child: Icon(Icons.play_circle_filled,
+                  color: Colors.white70, size: 36)),
+        Positioned(
+          bottom: 12,
+          left: 12,
+          right: 12,
+          child: Text(
+            text,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
     );
   }
 
@@ -1304,87 +1390,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
           ],
         ),
       ),
-    );
-  }
-
-  // --- VIDEO THUMBNAIL CACHE & BUILDER ---
-  // --- VIDEO THUMBNAIL CACHE & BUILDER ---
-  Widget _buildMediaThumb(String url, String text, IconData fallbackIcon,
-      {bool isVideo = false}) {
-    Widget imageWidget;
-
-    if (isVideo && url.isNotEmpty) {
-      if (kIsWeb) {
-        // FIX: Web fallback since video_thumbnail package crashes on web browsers
-        imageWidget = Container(
-            color: Colors.grey[850],
-            child: const Center(
-                child: Icon(Icons.videocam, color: Colors.white24, size: 50)));
-      } else if (_videoThumbCache.containsKey(url)) {
-        imageWidget = Image.memory(_videoThumbCache[url]!, fit: BoxFit.cover);
-      } else {
-        imageWidget = FutureBuilder<Uint8List?>(
-          future: VideoThumbnail.thumbnailData(
-            video: url,
-            imageFormat: ImageFormat.JPEG,
-            maxWidth: 350,
-            quality: 50,
-          ),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return Container(color: Colors.grey[850]);
-            }
-            if (snapshot.hasData && snapshot.data != null) {
-              _videoThumbCache[url] = snapshot.data!;
-              return Image.memory(snapshot.data!, fit: BoxFit.cover);
-            }
-            return Icon(Icons.videocam, color: Colors.white24, size: 40);
-          },
-        );
-      }
-    } else if (url.isNotEmpty) {
-      imageWidget = CachedNetworkImage(
-        imageUrl: url,
-        fit: BoxFit.cover,
-        memCacheWidth: 350,
-        placeholder: (ctx, url) => Container(color: Colors.grey[850]),
-        errorWidget: (ctx, url, err) =>
-            Icon(fallbackIcon, color: Colors.white24, size: 40),
-      );
-    } else {
-      imageWidget = Icon(fallbackIcon, color: Colors.white24, size: 40);
-    }
-
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        imageWidget,
-        Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.bottomCenter,
-              end: Alignment.topCenter,
-              colors: [Colors.black87, Colors.transparent],
-            ),
-          ),
-        ),
-        if (isVideo)
-          const Center(
-              child: Icon(Icons.play_circle_filled,
-                  color: Colors.white70, size: 36)),
-        Positioned(
-          bottom: 12,
-          left: 12,
-          right: 12,
-          child: Text(
-            text,
-            style: const TextStyle(
-                color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-      ],
     );
   }
 

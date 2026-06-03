@@ -10,6 +10,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -50,6 +51,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _memberSearchController = TextEditingController();
   final FocusNode _focusNode = FocusNode(); // <--- KEEPS KEYBOARD STABLE
+  final Map<String, Uint8List> _chatVideoThumbCache = {};
 
   bool _isTyping = false;
   bool _remoteUserIsTyping = false;
@@ -242,7 +244,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     if (myId == null || (text.isEmpty && mediaUrl == null)) return;
 
     final replyId = _replyMessage?['id'];
-
     String replySummary = 'Original message';
     if (_replyMessage != null) {
       if (_replyMessage!['content']?.toString().isNotEmpty == true &&
@@ -261,7 +262,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     _focusNode.requestFocus();
     setState(() => _replyMessage = null);
 
-    // --- OPTIMISTIC UI: INSTANT SPEED OVERRIDE ---
     setState(() {
       _messages.insert(0, {
         'id': DateTime.now().millisecondsSinceEpoch,
@@ -278,7 +278,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         if (replyId != null) 'reply_content': replySummary,
       });
     });
-    // ---------------------------------------------
 
     try {
       final Map<String, dynamic> payload = {
@@ -302,6 +301,39 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         'updated_at': DateTime.now().toUtc().toIso8601String(),
         'last_message': text.isNotEmpty ? text : 'New message',
       }).eq('id', widget.chatId);
+
+      // 🔥 THE FIX: TAGGING / MENTIONS LOGIC (Dart Syntax Fixed)
+      if (text.contains('@') && widget.isGroup) {
+        final RegExp mentionRegex = RegExp(r'@([a-zA-Z0-9_]+)');
+        final Iterable<RegExpMatch> matches = mentionRegex.allMatches(text);
+        final List<String> mentionedUsernames =
+            matches.map((m) => m.group(1) ?? '').toList();
+
+        for (var username in mentionedUsernames) {
+          if (username.isEmpty) continue;
+          final targetProfile = _memberProfiles.firstWhere(
+            (p) =>
+                p['username']?.toString().toLowerCase() ==
+                username.toLowerCase(),
+            orElse: () => <String, dynamic>{},
+          );
+
+          if (targetProfile.isNotEmpty && targetProfile['id'] != myId) {
+            await supabase.from('notifications').insert({
+              'user_id': targetProfile['id'],
+              'title': 'You were mentioned!',
+              'body':
+                  '@${widget.userPreferences.username} mentioned you in ${widget.chatTitle}: "$text"',
+              'data': {
+                'type': 'chat',
+                'chat_id': widget.chatId,
+                'sender_id': myId
+              },
+              'sent_at': DateTime.now().toUtc().toIso8601String()
+            });
+          }
+        }
+      }
     } catch (e) {
       debugPrint('Send error: $e');
       if (mounted) setState(() => _replyMessage = currentReply);
@@ -656,6 +688,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final rules = _chatMeta?['rules'] as Map<String, dynamic>? ?? {};
     final bool allowShareLink = rules['share_link'] ?? false;
 
+    final myId = supabase.auth.currentUser?.id;
+    final amICreator = myId == _creatorId;
+    final amIAdmin = _participants
+        .any((p) => p['user_id']?.toString() == myId && p['role'] == 'admin');
+
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -667,7 +704,14 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           children: [
             const SizedBox(height: 8),
             if (widget.isGroup) ...[
-              if (_isGroupCreator)
+              // 🔥 THE FIX: Allows Admins & Creators to ADD members
+              if (amICreator || amIAdmin)
+                _menuTile(Icons.person_add, 'Add Members', () {
+                  Navigator.pop(ctx);
+                  _showAddMemberSheet();
+                }, color: const Color(0xFF4CAF50)),
+
+              if (amICreator)
                 _menuTile(Icons.edit, 'Edit Group', () async {
                   Navigator.pop(ctx);
                   await _editGroup();
@@ -684,28 +728,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   }
                 }),
 
-              _menuTile(
-                Icons.logout,
-                'Leave Group',
-                () {
-                  Navigator.pop(ctx); // Close menu
-                  _confirmLeaveGroup(); // Show confirmation
-                },
-                color: Colors
-                    .orangeAccent, // Changed to orange so Delete stands out
-              ),
+              _menuTile(Icons.logout, 'Leave Group', () {
+                Navigator.pop(ctx);
+                _confirmLeaveGroup();
+              }, color: Colors.orangeAccent),
 
-              // --- NEW: DELETE GROUP (Creator Only) ---
-              if (_isGroupCreator)
-                _menuTile(
-                  Icons.delete_forever,
-                  'Delete Group',
-                  () {
-                    Navigator.pop(ctx);
-                    _confirmDeleteGroup();
-                  },
-                  color: Colors.redAccent,
-                ),
+              if (amICreator)
+                _menuTile(Icons.delete_forever, 'Delete Group', () {
+                  Navigator.pop(ctx);
+                  _confirmDeleteGroup();
+                }, color: Colors.redAccent),
             ],
             StatefulBuilder(
               builder: (context, setModalState) => ListTile(
@@ -730,6 +762,122 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               ),
             ),
             const SizedBox(height: 12),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 🔥 THE FIX: Opens a list of users to add to the group
+  void _showAddMemberSheet() async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.9,
+        expand: false,
+        builder: (_, scrollController) => Column(
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Text('Add Members',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
+            ),
+            const Divider(color: Colors.white24),
+            Expanded(
+              child: FutureBuilder<List<dynamic>>(
+                // Fetch people the user follows
+                future: supabase
+                    .from('followers')
+                    .select('profiles!following_id(id, username, avatar_url)')
+                    .eq('follower_id', myId),
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.waiting)
+                    return const Center(
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF4CAF50)));
+                  final friends = snapshot.data ?? [];
+                  if (friends.isEmpty)
+                    return const Center(
+                        child: Text("Follow people to add them",
+                            style: TextStyle(color: Colors.white54)));
+
+                  return ListView.builder(
+                    controller: scrollController,
+                    itemCount: friends.length,
+                    itemBuilder: (context, index) {
+                      final profile = friends[index]['profiles'];
+                      if (profile == null) return const SizedBox.shrink();
+
+                      final isAlreadyInGroup = _participants
+                          .any((p) => p['user_id'] == profile['id']);
+
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.grey[800],
+                          backgroundImage: profile['avatar_url'] != null
+                              ? NetworkImage(profile['avatar_url'])
+                              : null,
+                          child: profile['avatar_url'] == null
+                              ? const Icon(Icons.person, color: Colors.white54)
+                              : null,
+                        ),
+                        title: Text(profile['username'] ?? 'Unknown',
+                            style: const TextStyle(color: Colors.white)),
+                        trailing: isAlreadyInGroup
+                            ? const Text('Added',
+                                style: TextStyle(color: Colors.white38))
+                            : ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF4CAF50),
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(12))),
+                                onPressed: () async {
+                                  try {
+                                    await supabase
+                                        .from('chat_participants')
+                                        .insert({
+                                      'chat_id': widget.chatId,
+                                      'user_id': profile['id']
+                                    });
+                                    await _sendSystemMessage(
+                                        'Admin added @${profile['username']}');
+                                    await _loadChatMeta(); // Refresh list behind the scenes
+                                    if (mounted) Navigator.pop(ctx);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                            content: Text(
+                                                'Added @${profile['username']}!')));
+                                  } catch (e) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                            content:
+                                                Text('Failed to add user.')));
+                                  }
+                                },
+                                child: const Text('Add',
+                                    style: TextStyle(
+                                        color: Colors.black,
+                                        fontWeight: FontWeight.bold)),
+                              ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
           ],
         ),
       ),
@@ -1385,7 +1533,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     );
   }
 
-  Widget _buildBubble(List<Map<String, dynamic>> messages, int index) {
+  Widget _buildBubble(
+      List<Map<String, dynamic>> messages, int index, double maxWidth) {
     final message = messages[index];
     final messageId = message['id'].toString();
 
@@ -1458,14 +1607,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         content.trim() != '';
     final bool isHighlighted = _highlightedMessageId == messageId;
 
-    // Read physical dimensions directly from the platform view.
-    final view = View.of(context);
-    final hardwareWidth = view.physicalSize.width / view.devicePixelRatio;
+    // 🔥 THE CULPRIT IS GONE: Removed `View.of(context)` entirely.
 
     return RepaintBoundary(
       // GPU repaint caching
       child: Container(
-        // Swapped AnimatedContainer for standard Container
         padding: const EdgeInsets.symmetric(vertical: 2),
         decoration: BoxDecoration(
           color: isHighlighted
@@ -1520,9 +1666,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                       key: ValueKey(messageId),
                       margin: const EdgeInsets.symmetric(
                           vertical: 4, horizontal: 8),
-                      constraints: BoxConstraints(
-                          maxWidth:
-                              hardwareWidth * 0.75), // Hardware safe-width
+                      // 🔥 FIX 5: We now use the passed-in maxWidth, preventing the 60fps layout recalculation!
+                      constraints: BoxConstraints(maxWidth: maxWidth),
                       decoration: BoxDecoration(
                         color: bubbleColor,
                         borderRadius: BorderRadius.circular(16).copyWith(
@@ -1589,8 +1734,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                                 child: Container(
                                   margin: const EdgeInsets.symmetric(
                                       vertical: 4, horizontal: 8),
-                                  constraints: BoxConstraints(
-                                      maxWidth: hardwareWidth * 0.75),
+                                  // 🔥 FIX 6: Also use maxWidth here for files!
+                                  constraints:
+                                      BoxConstraints(maxWidth: maxWidth),
                                   decoration: BoxDecoration(
                                       color: Colors.black26,
                                       borderRadius: BorderRadius.circular(8)),
@@ -1806,9 +1952,48 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
     final bool isVideo = mediaType == 'video';
 
-    // FIX: Robust logic to ensure we always have a string to pass to the image loader
-    // If it's a video, we MUST use thumbUrl. If thumbUrl is missing, we check url.
-    final String? effectiveImageUrl = isVideo ? (thumbUrl ?? '') : url;
+    Widget mediaWidget;
+
+    // 🔥 THE FIX: Generates video thumbnails automatically!
+    if (isVideo) {
+      if (thumbUrl != null && thumbUrl.isNotEmpty) {
+        mediaWidget = CachedNetworkImage(
+            imageUrl: thumbUrl,
+            fit: BoxFit.cover,
+            errorWidget: (c, u, e) => _buildErrorPlaceholder(true));
+      } else if (kIsWeb) {
+        // 🔥 WEB FIX: Shows a cool video container instead of an error!
+        mediaWidget = Container(
+          color: Colors.black87,
+          child: const Center(
+            child:
+                Icon(Icons.play_circle_fill, size: 50, color: Colors.white70),
+          ),
+        );
+      } else if (_chatVideoThumbCache.containsKey(url)) {
+        mediaWidget =
+            Image.memory(_chatVideoThumbCache[url]!, fit: BoxFit.cover);
+      } else {
+        mediaWidget = FutureBuilder<Uint8List?>(
+            future: VideoThumbnail.thumbnailData(
+                video: url,
+                imageFormat: ImageFormat.JPEG,
+                maxWidth: 250,
+                quality: 50),
+            builder: (context, snapshot) {
+              if (snapshot.hasData && snapshot.data != null) {
+                _chatVideoThumbCache[url] = snapshot.data!;
+                return Image.memory(snapshot.data!, fit: BoxFit.cover);
+              }
+              return _buildErrorPlaceholder(true);
+            });
+      }
+    } else {
+      mediaWidget = CachedNetworkImage(
+          imageUrl: url,
+          fit: BoxFit.cover,
+          errorWidget: (c, u, e) => _buildErrorPlaceholder(false));
+    }
 
     return GestureDetector(
       onTap: () => _openFullScreen(allUrls, mediaType, index),
@@ -1819,40 +2004,26 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
             constraints: BoxConstraints(maxHeight: height ?? 180),
             width: double.infinity,
             decoration: BoxDecoration(
-              color: Colors.grey[900],
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: (effectiveImageUrl != null && effectiveImageUrl.isNotEmpty)
-                ? CachedNetworkImage(
-                    imageUrl: effectiveImageUrl,
-                    fit: BoxFit.cover,
-                    placeholder: (context, url) => const Center(
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Color(0xFF4CAF50)),
-                    ),
-                    errorWidget: (context, url, error) =>
-                        _buildErrorPlaceholder(isVideo),
-                  )
-                : _buildErrorPlaceholder(isVideo),
+                color: Colors.grey[900],
+                borderRadius: BorderRadius.circular(8)),
+            child: mediaWidget,
           ),
           if (isVideo)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(20),
-              ),
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(20)),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Icon(Icons.play_arrow, color: Colors.white, size: 18),
                   if (sizeLabel.isNotEmpty)
                     Padding(
-                      padding: const EdgeInsets.only(left: 4),
-                      child: Text(sizeLabel,
-                          style: const TextStyle(
-                              color: Colors.white, fontSize: 12)),
-                    ),
+                        padding: const EdgeInsets.only(left: 4),
+                        child: Text(sizeLabel,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 12))),
                 ],
               ),
             ),
@@ -1899,6 +2070,52 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   // --- UPDATED: Text colors dynamically change based on isMe ---
   Widget _buildTextAndTimestamp(
       String content, String timeStr, bool isMe, bool isRead) {
+    final String myUsername =
+        widget.userPreferences.username?.toLowerCase() ?? '';
+
+    // Custom Parser for URLs and Mentions
+    final List<InlineSpan> spans = [];
+    final regex = RegExp(r'(https?:\/\/[^\s]+)|(@[a-zA-Z0-9_]+)');
+    final matches = regex.allMatches(content);
+
+    int lastMatchEnd = 0;
+    for (final match in matches) {
+      if (match.start > lastMatchEnd) {
+        spans.add(TextSpan(text: content.substring(lastMatchEnd, match.start)));
+      }
+      final matchText = match.group(0)!;
+      if (matchText.startsWith('@')) {
+        final isMyMention = matchText.toLowerCase() == '@$myUsername';
+        spans.add(TextSpan(
+          text: matchText,
+          style: TextStyle(
+            color: isMyMention
+                ? Colors.redAccent
+                : (isMe ? Colors.black87 : Colors.amberAccent),
+            fontWeight: FontWeight.bold,
+          ),
+        ));
+      } else {
+        // It's a URL
+        spans.add(TextSpan(
+            text: matchText,
+            style: TextStyle(
+              color: isMe ? Colors.black87 : const Color(0xFF53BDEB),
+              decoration: TextDecoration.underline,
+            ),
+            recognizer: TapGestureRecognizer()
+              ..onTap = () async {
+                final uri = Uri.parse(matchText);
+                if (await canLaunchUrl(uri))
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }));
+      }
+      lastMatchEnd = match.end;
+    }
+    if (lastMatchEnd < content.length) {
+      spans.add(TextSpan(text: content.substring(lastMatchEnd)));
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: Wrap(
@@ -1906,53 +2123,28 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         crossAxisAlignment: WrapCrossAlignment.end,
         spacing: 8,
         children: [
-          CachedLinkify(
-            // <-- SWAPPED FOR HIGH-SPEED RENDERER
-            onOpen: (link) async {
-              final String urlString = link.url;
-
-              if (urlString.contains('allowanceapp.org/gist/')) {
-                final gistId = urlString.split('/').last;
-                Navigator.pushNamed(context, '/gist',
-                    arguments: {'id': gistId});
-                return;
-              }
-
-              final Uri url = Uri.parse(urlString);
-              if (await canLaunchUrl(url)) {
-                await launchUrl(url, mode: LaunchMode.externalApplication);
-              }
-            },
-            text: content,
-            style: TextStyle(
-              color: isMe ? Colors.black : Colors.white,
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
-            ),
-            linkStyle: TextStyle(
-              color: isMe ? Colors.black87 : const Color(0xFF53BDEB),
-              decoration: TextDecoration.underline,
-              fontWeight: FontWeight.w500,
+          RichText(
+            text: TextSpan(
+              style: TextStyle(
+                color: isMe ? Colors.black : Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+              children: spans,
             ),
           ),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                timeStr,
-                style: TextStyle(
-                  color: isMe ? Colors.black54 : Colors.white60,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
+              Text(timeStr,
+                  style: TextStyle(
+                      color: isMe ? Colors.black54 : Colors.white60,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500)),
               if (isMe) ...[
                 const SizedBox(width: 4),
-                Icon(
-                  isRead ? Icons.done_all : Icons.done,
-                  size: 14,
-                  color: isRead ? Colors.blue : Colors.black54,
-                ),
+                Icon(isRead ? Icons.done_all : Icons.done,
+                    size: 14, color: isRead ? Colors.blue : Colors.black54),
               ],
             ],
           ),
@@ -2166,10 +2358,20 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     if (activeChatId == widget.chatId) {
       activeChatId = null;
     }
-    _msgSub?.cancel(); // <--- Stop stream listener
+    _msgSub?.cancel();
     _scrollController.removeListener(_scrollListener);
     _memberSearchController.dispose();
     _typingTimer?.cancel();
+    _remoteTypingTimer?.cancel();
+
+    // 🔥 THE FIX: Tell the database we stopped typing when we leave the chat!
+    final myId = supabase.auth.currentUser?.id;
+    if (myId != null && _isTyping) {
+      supabase.from('chat_participants').update({
+        'is_typing': false,
+      }).match({'chat_id': widget.chatId, 'user_id': myId});
+    }
+
     _messageController.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
@@ -2179,6 +2381,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   // --- REPLACE YOUR BUILD METHOD WITH THIS (Uses cached _messages) ---
   @override
   Widget build(BuildContext context) {
+    // 🔥 FIX 1: Calculate max width exactly ONCE per screen build, protecting the chat bubbles from keyboard resizes!
+    final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: _buildAppBar(),
@@ -2198,7 +2403,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                       : ListView.builder(
                           controller: _scrollController,
                           reverse: true,
-                          cacheExtent: 2000,
+                          // 🔥 FIX 2: Removed cacheExtent to stop the RAM explosion leak!
                           addRepaintBoundaries:
                               true, // Cache render layer compilations on GPU
                           addAutomaticKeepAlives: true, // Retain state memory
@@ -2236,7 +2441,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                                               fontSize: 12)),
                                     ),
                                   ),
-                                _buildBubble(_messages, index),
+                                // 🔥 FIX 3: Pass the pre-calculated width down!
+                                _buildBubble(_messages, index, maxBubbleWidth),
                               ],
                             );
                           },

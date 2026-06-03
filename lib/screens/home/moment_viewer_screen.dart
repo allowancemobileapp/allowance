@@ -94,6 +94,7 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
   int _likesCount = 0;
   int _commentsCount = 0;
   bool _isMuted = false;
+  bool _authorIsPlus = false; // NEW: Track if the moment creator is Plus
 
   @override
   void initState() {
@@ -102,10 +103,28 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     _commentsCount = widget.moment['comments_count'] ?? 0;
 
     _fetchLikeAndCommentData();
+    _checkIfAuthorIsPlus(); // <-- Call the new Star checker
 
     if (widget.moment['media_type'] == 'video') {
       _initializeAndPreloadVideo(widget.moment['media_url']);
     }
+  }
+
+  // 🔥 THE FIX: Separated the Star checking logic so it doesn't break your Like/Comment logic!
+  Future<void> _checkIfAuthorIsPlus() async {
+    final authorId = widget.moment['user_id'];
+    if (authorId == null) return;
+    try {
+      final res = await supabase
+          .from('profiles')
+          .select('subscription_tier')
+          .eq('id', authorId)
+          .maybeSingle();
+      if (res != null && mounted) {
+        setState(
+            () => _authorIsPlus = res['subscription_tier'] == 'Membership');
+      }
+    } catch (_) {}
   }
 
   // --- NEW: PRELOAD & CACHE LOGIC ---
@@ -321,7 +340,7 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
 
     final String caption = widget.moment['caption'] ?? 'A memory shared';
     final String momentLink =
-        'https://www.allowanceapp.org/moment/${widget.moment['id']}';
+        'https://www.allowanceapp.org/share?type=moment&id=${widget.moment['id']}';
     final friendsFuture = _fetchFriends(myId);
 
     showModalBottomSheet(
@@ -478,6 +497,7 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
         (_) => _fetchLikeAndCommentData()); // Refresh counts when sheet closes
   }
 
+  // 2. REPLACE THIS METHOD
   @override
   Widget build(BuildContext context) {
     final isVideo = widget.moment['media_type'] == 'video';
@@ -487,6 +507,10 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     final schoolName = profile['school_name'];
     final caption = widget.moment['caption'] ?? '';
     final isMe = supabase.auth.currentUser?.id == widget.moment['user_id'];
+
+    // 🔥 THE FIX: Uses our new variable so the Star ALWAYS shows!
+    final isPlus =
+        _authorIsPlus || profile['subscription_tier'] == 'Membership';
 
     return Stack(
       fit: StackFit.expand,
@@ -533,16 +557,13 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
           right: 0,
           child: SafeArea(
             child: SizedBox(
-              height:
-                  90, // <-- Set to 90 to comfortably fit the big logo and align buttons
+              height: 90,
               child: Stack(
-                alignment: Alignment
-                    .center, // <-- THIS ALIGNS EVERYTHING ON THE SAME LINE
+                alignment: Alignment.center,
                 children: [
-                  // Center Title
                   Image.asset(
                     'assets/images/moments.png',
-                    height: 90, // Massive logo
+                    height: 90,
                     fit: BoxFit.contain,
                     errorBuilder: (ctx, err, stack) => const Text('Moments',
                         style: TextStyle(
@@ -553,7 +574,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                               Shadow(color: Colors.black87, blurRadius: 4)
                             ])),
                   ),
-                  // Left Back Button
                   Positioned(
                     left: 8,
                     child: IconButton(
@@ -565,7 +585,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                       onPressed: () => Navigator.pop(context),
                     ),
                   ),
-                  // Right Action Buttons
                   Positioned(
                     right: 8,
                     child: Row(
@@ -619,14 +638,27 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('@$username',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                            shadows: [
-                              Shadow(color: Colors.black87, blurRadius: 4)
-                            ])),
+                    Row(
+                      children: [
+                        Text('@$username',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                shadows: [
+                                  Shadow(color: Colors.black87, blurRadius: 4)
+                                ])),
+                        if (isPlus) ...[
+                          const SizedBox(width: 4),
+                          const Icon(Icons.star,
+                              color: Colors.amber,
+                              size: 16,
+                              shadows: [
+                                Shadow(color: Colors.black87, blurRadius: 4)
+                              ]),
+                        ],
+                      ],
+                    ),
                     if (schoolName != null && schoolName.toString().isNotEmpty)
                       Text(schoolName,
                           style: const TextStyle(
@@ -873,11 +905,16 @@ class _MomentCommentsSheetState extends State<MomentCommentsSheet> {
                       return FutureBuilder<Map<String, dynamic>?>(
                         future: supabase
                             .from('profiles')
-                            .select('username, avatar_url')
+                            // 🔥 NEW: Added subscription_tier to the select query
+                            .select('username, avatar_url, subscription_tier')
                             .eq('id', userId)
                             .maybeSingle(),
                         builder: (ctx, profileSnap) {
                           final profile = profileSnap.data;
+                          // 🔥 NEW: Check if the commenter is a Plus member
+                          final isCommenterPlus =
+                              profile?['subscription_tier'] == 'Membership';
+
                           return ListTile(
                             leading: CircleAvatar(
                               backgroundColor: Colors.grey[800],
@@ -890,11 +927,20 @@ class _MomentCommentsSheetState extends State<MomentCommentsSheet> {
                                       color: Colors.white54, size: 20)
                                   : null,
                             ),
-                            title: Text('@${profile?['username'] ?? 'User'}',
-                                style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.bold)),
+                            title: Row(
+                              children: [
+                                Text('@${profile?['username'] ?? 'User'}',
+                                    style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.bold)),
+                                if (isCommenterPlus) ...[
+                                  const SizedBox(width: 4),
+                                  const Icon(Icons.star,
+                                      color: Colors.amber, size: 12),
+                                ],
+                              ],
+                            ),
                             subtitle: Padding(
                                 padding: const EdgeInsets.only(top: 4.0),
                                 child: Text(comment['content'] ?? '',

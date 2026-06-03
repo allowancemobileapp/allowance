@@ -750,7 +750,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           ),
                         ),
                       ),
-                      // <--- FIX: Removed the Positioned widget with the Plus button here!
                     ],
                   ),
                 ),
@@ -760,9 +759,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         color: Colors.white,
                         fontSize: 24,
                         fontWeight: FontWeight.bold)),
-                Text('@${up.username ?? 'nouser'}',
-                    style: const TextStyle(
-                        color: _accent, fontWeight: FontWeight.w500)),
+
+                // 🔥 THE FIX: Added a Row here to display the Plus Star beside the username!
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text('@${up.username ?? 'nouser'}',
+                        style: const TextStyle(
+                            color: _accent, fontWeight: FontWeight.w500)),
+                    if (isPlus) ...[
+                      const SizedBox(width: 4),
+                      const Icon(Icons.star, color: Colors.amber, size: 16),
+                    ],
+                  ],
+                ),
                 const SizedBox(height: 16),
                 Text(
                   up.bio?.trim().isNotEmpty == true
@@ -1070,36 +1080,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
 // --- PASTE AT THE VERY BOTTOM OF profile_screen.dart ---
 
-class VerticalMomentFeed extends StatelessWidget {
-  // Renamed from VerticalMemoryFeed
-  final List<dynamic> moments;
-  final int initialIndex;
-
-  const VerticalMomentFeed({
-    super.key,
-    required this.moments,
-    required this.initialIndex,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final PageController pageController =
-        PageController(initialPage: initialIndex);
-
-    return Scaffold(
-      backgroundColor: Color(0xFF121212),
-      body: PageView.builder(
-        controller: pageController,
-        scrollDirection: Axis.vertical,
-        itemCount: moments.length,
-        itemBuilder: (context, index) {
-          return EnlargedMomentScreen(moment: moments[index]); // Updated class
-        },
-      ),
-    );
-  }
-}
-
+// --- LIGHTWEIGHT GRID ITEM WITH STAGGERED VIDEO THUMBNAILS ---
 class MomentGridItem extends StatefulWidget {
   final List<Map<String, dynamic>> moments;
   final int index;
@@ -1122,11 +1103,21 @@ class _MomentGridItemState extends State<MomentGridItem> {
     _isVideo = moment['media_type'] == 'video';
 
     if (_isVideo) {
-      _videoController =
-          VideoPlayerController.networkUrl(Uri.parse(moment['media_url']))
-            ..initialize().then((_) {
+      final url = moment['media_url'] ?? '';
+      if (url.isNotEmpty) {
+        _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
+
+        // 🔥 THE FIX: Stagger the video loading so the app doesn't freeze!
+        // Instead of loading all videos at the exact same millisecond,
+        // we delay each one slightly based on its index.
+        Future.delayed(Duration(milliseconds: widget.index * 150), () {
+          if (mounted) {
+            _videoController!.initialize().then((_) {
               if (mounted) setState(() {});
             });
+          }
+        });
+      }
     }
   }
 
@@ -1144,21 +1135,19 @@ class _MomentGridItemState extends State<MomentGridItem> {
           context,
           MaterialPageRoute(
             builder: (context) => MomentViewerScreen(
-              // <-- Uses the new global screen
               moments: widget.moments,
               initialIndex: widget.index,
-              userPreferences:
-                  UserPreferences(), // Create empty/default if required
+              userPreferences: UserPreferences(),
             ),
           ),
         );
       },
-// ...
       child: ClipRRect(
         borderRadius: BorderRadius.circular(4),
         child: Stack(
           fit: StackFit.expand,
           children: [
+            // 1. VIDEO THUMBNAIL (First frame)
             if (_isVideo)
               _videoController != null && _videoController!.value.isInitialized
                   ? FittedBox(
@@ -1169,12 +1158,14 @@ class _MomentGridItemState extends State<MomentGridItem> {
                         child: VideoPlayer(_videoController!),
                       ),
                     )
-                  : Container(color: Colors.black)
+                  : Container(color: const Color(0xFF1E1E1E))
+
+            // 2. IMAGE
             else
               CachedNetworkImage(
-                imageUrl: moment['media_url'],
+                imageUrl: moment['media_url'] ?? '',
                 fit: BoxFit.cover,
-                memCacheWidth: 400, // <--- FAST GPU THUMBNAIL CACHING
+                memCacheWidth: 400,
                 placeholder: (context, url) =>
                     Container(color: const Color(0xFF1E1E1E)),
                 errorWidget: (context, url, error) => Container(
@@ -1182,6 +1173,8 @@ class _MomentGridItemState extends State<MomentGridItem> {
                   child: const Icon(Icons.broken_image, color: Colors.white10),
                 ),
               ),
+
+            // 3. VIDEO PLAY ICON
             if (_isVideo)
               const Positioned(
                 top: 5,
@@ -1191,177 +1184,6 @@ class _MomentGridItemState extends State<MomentGridItem> {
               ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class EnlargedMomentScreen extends StatefulWidget {
-  // Renamed from EnlargedMemoryScreen
-  final Map<String, dynamic> moment;
-  const EnlargedMomentScreen({super.key, required this.moment});
-
-  @override
-  State<EnlargedMomentScreen> createState() => _EnlargedMomentScreenState();
-}
-
-class _EnlargedMomentScreenState extends State<EnlargedMomentScreen> {
-  VideoPlayerController? _videoController;
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.moment['media_type'] == 'video') {
-      _videoController = VideoPlayerController.networkUrl(
-          Uri.parse(widget.moment['media_url']))
-        ..initialize().then((_) {
-          if (mounted) setState(() {});
-          _videoController!.setLooping(true);
-          _videoController!.play();
-        });
-    }
-  }
-
-  @override
-  void dispose() {
-    _videoController?.dispose();
-    super.dispose();
-  }
-
-  void _showMomentOptions(BuildContext context, dynamic momentId) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Color(0xFF1E1E1E),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading:
-                  const Icon(Icons.delete_outline, color: Colors.redAccent),
-              title: const Text('Delete Moment',
-                  style: TextStyle(color: Colors.redAccent, fontSize: 16)),
-              onTap: () {
-                Navigator.pop(ctx);
-                _deleteMoment(momentId);
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _deleteMoment(dynamic momentId) async {
-    try {
-      await Supabase.instance.client
-          .from('moments') // Changed query target to moments
-          .delete()
-          .eq('id', momentId);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Moment deleted successfully')),
-        );
-        Navigator.pop(context);
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to delete moment: $e')),
-        );
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isVideo = widget.moment['media_type'] == 'video';
-
-    return Scaffold(
-      backgroundColor: Color(0xFF121212),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          Center(
-            child: isVideo
-                ? (_videoController != null &&
-                        _videoController!.value.isInitialized
-                    ? AspectRatio(
-                        aspectRatio: _videoController!.value.aspectRatio,
-                        child: VideoPlayer(_videoController!),
-                      )
-                    : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
-                : CachedNetworkImage(
-                    imageUrl: widget.moment['media_url'],
-                    fit: BoxFit.contain,
-                    placeholder: (context, url) =>
-                        const CircularProgressIndicator(
-                            color: Color(0xFF4CAF50)),
-                  ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
-                    onPressed: () => Navigator.pop(context),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.more_vert, color: Colors.white),
-                    onPressed: () =>
-                        _showMomentOptions(context, widget.moment['id']),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: 20,
-            left: 20,
-            right: 20,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (widget.moment['caption'] != null &&
-                    widget.moment['caption'].toString().isNotEmpty)
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Color(0xFF121212).withOpacity(0.6),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      widget.moment['caption'],
-                      style: const TextStyle(color: Colors.white, fontSize: 16),
-                    ),
-                  ),
-                if (isVideo &&
-                    _videoController != null &&
-                    _videoController!.value.isInitialized) ...[
-                  const SizedBox(height: 12),
-                  VideoProgressIndicator(
-                    _videoController!,
-                    allowScrubbing: true,
-                    colors: const VideoProgressColors(
-                      playedColor: Color(0xFF4CAF50),
-                      bufferedColor: Colors.white24,
-                      backgroundColor: Colors.white10,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }

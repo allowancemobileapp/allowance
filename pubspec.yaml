@@ -2,7 +2,7 @@ name: allowance
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 1.0.4+6
+version: 1.0.6+7
 
 environment:
   sdk: ">=3.5.3 <4.0.0"
@@ -51,6 +51,7 @@ dependencies:
   app_links: ^7.0.0
   file_picker: ^8.1.2
   video_compress: ^3.1.4
+  flutter_local_notifications: ^17.0.0
 
 dev_dependencies:
   flutter_test:

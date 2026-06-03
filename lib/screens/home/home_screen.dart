@@ -2991,7 +2991,7 @@ class _GistItemCardState extends State<_GistItemCard>
     final String truncatedTitle =
         title.length > 50 ? '${title.substring(0, 50)}...' : title;
     final String gistLink =
-        'https://www.allowanceapp.org/gist/${widget.gistId}';
+        'https://www.allowanceapp.org/share?type=gist&id=${widget.gistId}';
 
     final friendsFuture = _fetchFriends(myId);
 
