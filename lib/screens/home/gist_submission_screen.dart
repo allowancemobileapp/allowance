@@ -55,6 +55,9 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   final _titleController = TextEditingController();
   final _durationController = TextEditingController();
   final _urlController = TextEditingController();
+  final _couponController = TextEditingController();
+  Map<String, dynamic>? _appliedCoupon;
+  bool _isVerifyingCoupon = false;
 
   late Future<List<Map<String, dynamic>>> _schoolsFuture;
   bool _isSubmitting = false;
@@ -89,6 +92,142 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     }
   }
 
+  double get _basePrice {
+    final days = int.tryParse(_durationController.text) ?? 0;
+    return _pricePerDay * days;
+  }
+
+  // --- UPDATED: Calculates discount dynamically ---
+  double get _estimatedPrice {
+    double base = _basePrice;
+    if (_appliedCoupon != null) {
+      int discount = _appliedCoupon!['discount_percentage'] as int? ?? 0;
+      return base * (1 - (discount / 100));
+    }
+    return base;
+  }
+
+  // --- NEW: COUPON LOGIC ---
+  Future<void> _verifyAndApplyCoupon(String code) async {
+    if (code.isEmpty) {
+      setState(() => _appliedCoupon = null);
+      return;
+    }
+
+    setState(() => _isVerifyingCoupon = true);
+
+    try {
+      final data = await Supabase.instance.client
+          .from('allowance_coupons')
+          .select('*')
+          .eq('code', code.trim())
+          .maybeSingle();
+
+      if (data == null) throw 'Invalid coupon code';
+      if (data['is_active'] == false) throw 'This coupon is disabled';
+
+      final expiry = DateTime.parse(data['expires_at']).toLocal();
+      if (DateTime.now().isAfter(expiry)) throw 'This coupon has expired';
+
+      final limit = data['claim_limit'] as int;
+      final claimed = data['claimed_count'] as int;
+      if (limit != -1 && claimed >= limit) throw 'Coupon supply exhausted';
+
+      // Valid! Apply it.
+      setState(() {
+        _appliedCoupon = data;
+        _isVerifyingCoupon = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('${data['discount_percentage']}% Discount Applied! 🎉'),
+          backgroundColor: Colors.green));
+    } catch (e) {
+      setState(() {
+        _appliedCoupon = null;
+        _isVerifyingCoupon = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
+    }
+  }
+
+  void _showCouponInfoSheet() {
+    if (_appliedCoupon == null) return;
+
+    final expiry = DateTime.parse(_appliedCoupon!['expires_at']).toLocal();
+    final expiryString = '${expiry.day}/${expiry.month}/${expiry.year}';
+    final limit = _appliedCoupon!['claim_limit'] as int;
+    final claimed = _appliedCoupon!['claimed_count'] as int;
+    final supplyLeft =
+        limit == -1 ? 'Unlimited' : '${limit - claimed} remaining';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Coupon Details 🎟️',
+                  style: TextStyle(
+                      color: widget.themeColor,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              _buildCouponDetailRow('Code:', _appliedCoupon!['code']),
+              _buildCouponDetailRow('Discount:',
+                  '${_appliedCoupon!['discount_percentage']}% OFF'),
+              _buildCouponDetailRow('Supply Left:', supplyLeft),
+              _buildCouponDetailRow('Expires:', expiryString),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: widget.themeColor),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Close',
+                      style: TextStyle(
+                          color: Colors.black, fontWeight: FontWeight.bold)),
+                ),
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCouponDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: const TextStyle(color: Colors.white70, fontSize: 16)),
+          Text(value,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _couponController.dispose();
+    super.dispose();
+  }
+
   double get _pricePerDay {
     final dbType = _typeMap[_selectedGistType];
     switch (dbType) {
@@ -99,11 +238,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       default:
         return 500;
     }
-  }
-
-  double get _estimatedPrice {
-    final days = int.tryParse(_durationController.text) ?? 0;
-    return _pricePerDay * days;
   }
 
   Future<void> _pickImages() async {
@@ -217,11 +351,10 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
     setState(() => _isSubmitting = true);
     int? draftGistId;
-    bool paymentLaunched =
-        false; // 🔥 CRITICAL FIX: Locks the draft from being deleted
+    bool paymentLaunched = false;
 
     try {
-      // 1. UPLOAD MEDIA
+      // 1. UPLOAD MEDIA (Your existing upload code here...)
       const bucket = 'gist-images';
       final List<String> uploadedUrls = [];
       final List<String> uploadedPaths = [];
@@ -263,13 +396,15 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         }
       }
 
-      // 2. CREATE DRAFT GIST
+      // 2. CREATE DRAFT GIST (Modified for Coupons)
       final numDays = int.tryParse(_durationController.text) ?? 0;
       final pricePerDay = _pricePerDay;
-      final totalNaira = (pricePerDay * numDays).toInt();
+      final totalNaira =
+          _estimatedPrice.toInt(); // This uses the discounted price!
 
-      // 🔥 FIX 1: Generate the reference FIRST!
       final reference = 'gist_${const Uuid().v4()}';
+      final bool is100PercentFree = _appliedCoupon != null &&
+          _appliedCoupon!['discount_percentage'] == 100;
 
       final draftPayload = {
         'user_id': user.id,
@@ -281,12 +416,12 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'media_type': mediaType,
         'number_of_days': numDays,
         'price_per_day': pricePerDay,
-        'paid': false,
-        'status': 'draft',
+        'paid': is100PercentFree, // Instantly paid if 100% discount
+        'status': is100PercentFree ? 'active' : 'draft',
         'start_date': DateTime.now().toUtc().toIso8601String().split('T').first,
         'category': _selectedCategory,
         'payment_reference':
-            reference, // 🔥 FIX 2: SAVE IT TO THE DATABASE HERE!
+            is100PercentFree ? 'coupon_${_appliedCoupon!['code']}' : reference,
       };
 
       if (dbType == 'local' &&
@@ -305,24 +440,40 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           .single();
       draftGistId = insertResp['id'] as int;
 
+      // INCREMENT COUPON COUNT IF APPLIED
+      if (_appliedCoupon != null) {
+        await supabase.rpc('increment_coupon',
+            params: {'p_code': _appliedCoupon!['code']});
+      }
+
+      // --- 100% DISCOUNT BYPASS ---
+      if (is100PercentFree) {
+        if (mounted) {
+          setState(() => _isSubmitting = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: const Text('✅ Gist published automatically via Coupon!'),
+              backgroundColor: widget.themeColor));
+          Navigator.of(context).pop();
+        }
+        return; // Stop execution, no payment gateway needed!
+      }
+
+      // Safeguard for 0 days input
       if (totalNaira <= 0) {
         await supabase.from('gists').delete().eq('id', draftGistId);
         return;
       }
 
       // 3. INITIALIZE PAYMENT (Flutterwave Primary, Paystack Backup)
-      // (Remove the `final reference = ...` line from here since we moved it up)
       String gateway = 'flutterwave';
       String? authUrlString;
-
-      // ... rest of your payment initialization code remains the exact same ...
 
       try {
         final flwResp = await supabase.functions.invoke(
           'flutterwave-init',
           body: {
             'tx_ref': reference,
-            'amount': totalNaira.toString(),
+            'amount': totalNaira.toString(), // Passes the reduced amount!
             'currency': 'NGN',
             'redirect_url': 'https://allowanceapp.org',
             'customer': {'email': user.email ?? 'user@allowance.com'},
@@ -346,7 +497,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           final payResp = await supabase.functions.invoke(
             'paystack-init',
             body: {
-              'amount': totalNaira * 100,
+              'amount': totalNaira * 100, // Paystack is Kobo
               'email': user.email ?? 'user@allowance.com',
               'reference': reference,
               'metadata': {'gist_id': draftGistId.toString()}
@@ -370,8 +521,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         }
       }
 
-      // 4. SAVE PREFS AND LAUNCH URL
-      paymentLaunched = true; // 🔥 Locks the draft from deletion!
+      // 4. SAVE PREFS AND LAUNCH URL (Exactly the same)
+      paymentLaunched = true;
 
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
@@ -386,7 +537,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       if (authUrlString != null) {
         final uri = Uri.parse(authUrlString);
         if (await canLaunchUrl(uri)) {
-          // 🔥 THE FIX: If on Web, open a NEW tab so the app doesn't die!
           await launchUrl(uri,
               mode: kIsWeb
                   ? LaunchMode.externalApplication
@@ -401,30 +551,24 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         }
       }
 
-      // 5. FIRE AND FORGET
       _pollAndVerifyGistPayment(reference, gateway, draftGistId, numDays)
           .then((success) async {
-        if (success) {
-          await prefs.remove('pending_gist_payment');
-        }
+        if (success) await prefs.remove('pending_gist_payment');
       });
 
-      // 6. CLOSE PAGE IMMEDIATELY
       if (mounted) {
         setState(() => _isSubmitting = false);
         Navigator.of(context).pop();
       }
     } catch (e) {
-      // 🔥 CRITICAL FIX: Only delete the draft if the payment process never launched
       if (draftGistId != null && !paymentLaunched) {
         try {
           await supabase.from('gists').delete().eq('id', draftGistId);
         } catch (_) {}
       }
-      if (mounted) {
+      if (mounted)
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('Error: $e')));
-      }
     } finally {
       if (mounted) setState(() => _isSubmitting = false);
     }
@@ -653,8 +797,9 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   validator: (v) {
                     if (v == null || v.trim().isEmpty) return null;
                     final uri = Uri.tryParse(v.trim());
-                    if (uri == null || (!uri.hasScheme))
+                    if (uri == null || (!uri.hasScheme)) {
                       return 'Enter a valid URL (include https://)';
+                    }
                     return null;
                   },
                 ),
@@ -677,6 +822,53 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   validator: (v) {
                     final n = int.tryParse(v ?? '');
                     return (n == null || n <= 0) ? 'Enter valid days' : null;
+                  },
+                ),
+                const SizedBox(height: 12),
+
+                // --- NEW: COUPON INPUT ---
+                TextFormField(
+                  controller: _couponController,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: 'Coupon Code (Optional)',
+                    labelStyle: const TextStyle(color: Colors.white70),
+                    filled: true,
+                    fillColor: fieldFill,
+                    border: OutlineInputBorder(
+                        borderSide: BorderSide(color: widget.themeColor)),
+                    suffixIcon: _isVerifyingCoupon
+                        ? const Padding(
+                            padding: EdgeInsets.all(12.0),
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : IconButton(
+                            icon: Icon(
+                                _appliedCoupon != null
+                                    ? Icons.check_circle
+                                    : Icons.info_outline,
+                                color: _appliedCoupon != null
+                                    ? widget.themeColor
+                                    : Colors.white54),
+                            onPressed: () {
+                              if (_appliedCoupon != null) {
+                                _showCouponInfoSheet();
+                              } else if (_couponController.text.trim().length >=
+                                  6) {
+                                _verifyAndApplyCoupon(_couponController.text);
+                              }
+                            },
+                          ),
+                  ),
+                  onChanged: (val) {
+                    // Auto-verify if they type exactly 6 chars
+                    if (val.trim().length == 6) {
+                      _verifyAndApplyCoupon(val);
+                    } else if (_appliedCoupon != null &&
+                        val.trim().length != 6) {
+                      // Remove coupon if they start deleting the code
+                      setState(() => _appliedCoupon = null);
+                    }
                   },
                 ),
                 const SizedBox(height: 20),
@@ -809,7 +1001,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
                 const SizedBox(height: 24),
 
-                // Estimated Price
+                // --- UPDATED: Estimated Price (Shows Discount Slash) ---
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -818,11 +1010,22 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
                             color: Colors.white)),
-                    Text('₦${_estimatedPrice.toStringAsFixed(0)}',
-                        style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                            color: widget.themeColor)),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        if (_appliedCoupon != null && _basePrice > 0)
+                          Text('₦${_basePrice.toStringAsFixed(0)}',
+                              style: const TextStyle(
+                                  fontSize: 14,
+                                  decoration: TextDecoration.lineThrough,
+                                  color: Colors.redAccent)),
+                        Text('₦${_estimatedPrice.toStringAsFixed(0)}',
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: widget.themeColor)),
+                      ],
+                    ),
                   ],
                 ),
                 const SizedBox(height: 20),
@@ -830,13 +1033,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 // Submit Button
                 SizedBox(
                   width: double.infinity,
-                  height:
-                      56, // Fixed height keeps the button stable during state changes
+                  height: 56,
                   child: ElevatedButton(
                     onPressed: _isSubmitting ? null : _submitGist,
                     style: ElevatedButton.styleFrom(
                         backgroundColor: widget.themeColor,
-                        // Darkens the button background while the progress bar runs
                         disabledBackgroundColor: Colors.grey[850],
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(10)),
@@ -854,11 +1055,9 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(4),
                                 child: const SizedBox(
-                                  width:
-                                      140, // Keeps the progress bar "small" and centered
+                                  width: 140,
                                   child: LinearProgressIndicator(
-                                    color: Color(
-                                        0xFF4CAF50), // Small Green Progress Bar
+                                    color: Color(0xFF4CAF50),
                                     backgroundColor: Colors.black45,
                                     minHeight: 4,
                                   ),
