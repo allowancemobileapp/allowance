@@ -65,6 +65,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   final List<Uint8List> _pickedImageBytes = [];
   List<XFile> _pickedVideos = []; // ← NEW
   bool _isVideoMode = false;
+  bool _isPlusMember = false;
 
   String? _selectedCategory;
   final categories = ['Sports', 'Entertainment', 'Official', 'Religion'];
@@ -75,6 +76,25 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     _selectedSchoolId = widget.schoolId;
     _schoolsFuture = _fetchSchools();
     _recoverPendingGistPayment();
+    _checkPlusStatus();
+  }
+
+  Future<void> _checkPlusStatus() async {
+    final user = Supabase.instance.client.auth.currentUser;
+    if (user != null) {
+      try {
+        final data = await Supabase.instance.client
+            .from('profiles')
+            .select('subscription_tier')
+            .eq('id', user.id)
+            .maybeSingle();
+        if (mounted && data != null) {
+          setState(() {
+            _isPlusMember = data['subscription_tier'] == 'Membership';
+          });
+        }
+      } catch (_) {}
+    }
   }
 
   Future<List<Map<String, dynamic>>> _fetchSchools() async {
@@ -826,41 +846,63 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 ),
                 const SizedBox(height: 12),
 
-                // --- NEW: COUPON INPUT ---
+                // --- NEW: COUPON INPUT (LOCKED FOR FREE USERS) ---
                 TextFormField(
                   controller: _couponController,
-                  style: const TextStyle(color: Colors.white),
+                  style: TextStyle(
+                      color: _isPlusMember ? Colors.white : Colors.white38),
+                  readOnly:
+                      !_isPlusMember, // <-- Locks keyboard from opening if free
+                  onTap: () {
+                    if (!_isPlusMember) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text(
+                            '🔒 Only Allowance Plus ✨ members can use promo codes.'),
+                        backgroundColor: Colors.orange,
+                      ));
+                    }
+                  },
                   decoration: InputDecoration(
-                    labelText: 'Coupon Code (Optional)',
+                    labelText: _isPlusMember
+                        ? 'Coupon Code (Optional)'
+                        : 'Coupon Code (Plus Members Only 🔒)',
                     labelStyle: const TextStyle(color: Colors.white70),
                     filled: true,
                     fillColor: fieldFill,
                     border: OutlineInputBorder(
                         borderSide: BorderSide(color: widget.themeColor)),
-                    suffixIcon: _isVerifyingCoupon
-                        ? const Padding(
-                            padding: EdgeInsets.all(12.0),
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : IconButton(
-                            icon: Icon(
-                                _appliedCoupon != null
-                                    ? Icons.check_circle
-                                    : Icons.info_outline,
-                                color: _appliedCoupon != null
-                                    ? widget.themeColor
-                                    : Colors.white54),
-                            onPressed: () {
-                              if (_appliedCoupon != null) {
-                                _showCouponInfoSheet();
-                              } else if (_couponController.text.trim().length >=
-                                  6) {
-                                _verifyAndApplyCoupon(_couponController.text);
-                              }
-                            },
-                          ),
+                    suffixIcon: !_isPlusMember
+                        ? const Icon(Icons.lock,
+                            color: Colors.white38) // Show lock icon
+                        : _isVerifyingCoupon
+                            ? const Padding(
+                                padding: EdgeInsets.all(12.0),
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : IconButton(
+                                icon: Icon(
+                                    _appliedCoupon != null
+                                        ? Icons.check_circle
+                                        : Icons.info_outline,
+                                    color: _appliedCoupon != null
+                                        ? widget.themeColor
+                                        : Colors.white54),
+                                onPressed: () {
+                                  if (_appliedCoupon != null) {
+                                    _showCouponInfoSheet();
+                                  } else if (_couponController.text
+                                          .trim()
+                                          .length >=
+                                      6) {
+                                    _verifyAndApplyCoupon(
+                                        _couponController.text);
+                                  }
+                                },
+                              ),
                   ),
                   onChanged: (val) {
+                    if (!_isPlusMember) return;
                     // Auto-verify if they type exactly 6 chars
                     if (val.trim().length == 6) {
                       _verifyAndApplyCoupon(val);

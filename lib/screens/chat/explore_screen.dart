@@ -1641,7 +1641,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
 // =========================================================================
 // TIKTOK-STYLE MOMENT VIEWER FOR EXPLORE SCREEN
 // =========================================================================
-class ExploreVerticalMomentFeed extends StatelessWidget {
+class ExploreVerticalMomentFeed extends StatefulWidget {
   final List<dynamic> moments;
   final int initialIndex;
   final UserPreferences userPreferences;
@@ -1654,18 +1654,44 @@ class ExploreVerticalMomentFeed extends StatelessWidget {
   });
 
   @override
+  State<ExploreVerticalMomentFeed> createState() =>
+      _ExploreVerticalMomentFeedState();
+}
+
+class _ExploreVerticalMomentFeedState extends State<ExploreVerticalMomentFeed> {
+  late PageController _pageController;
+  late int _currentIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentIndex = widget.initialIndex;
+    _pageController = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final PageController pageController =
-        PageController(initialPage: initialIndex);
     return Scaffold(
       backgroundColor: Colors.black,
       body: PageView.builder(
-        controller: pageController,
+        controller: _pageController,
         scrollDirection: Axis.vertical,
-        itemCount: moments.length,
+        allowImplicitScrolling: true,
+        onPageChanged: (index) => setState(() => _currentIndex = index),
+        itemCount: widget.moments.length,
         itemBuilder: (context, index) {
           return ExploreMomentViewerItem(
-              moment: moments[index], userPreferences: userPreferences);
+            moment: widget.moments[index],
+            userPreferences: widget.userPreferences,
+            isCurrentPage: index ==
+                _currentIndex, // 🔥 FIX: Passed down for Garbage Collection
+          );
         },
       ),
     );
@@ -1675,8 +1701,14 @@ class ExploreVerticalMomentFeed extends StatelessWidget {
 class ExploreMomentViewerItem extends StatefulWidget {
   final Map<String, dynamic> moment;
   final UserPreferences userPreferences;
-  const ExploreMomentViewerItem(
-      {super.key, required this.moment, required this.userPreferences});
+  final bool isCurrentPage;
+
+  const ExploreMomentViewerItem({
+    super.key,
+    required this.moment,
+    required this.userPreferences,
+    required this.isCurrentPage,
+  });
 
   @override
   State<ExploreMomentViewerItem> createState() =>
@@ -1686,18 +1718,43 @@ class ExploreMomentViewerItem extends StatefulWidget {
 class _ExploreMomentViewerItemState extends State<ExploreMomentViewerItem> {
   VideoPlayerController? _videoController;
   bool _isLiked = false;
+  bool _isHighQuality = false;
 
   @override
   void initState() {
     super.initState();
-    if (widget.moment['media_type'] == 'video') {
-      _videoController = VideoPlayerController.networkUrl(
-          Uri.parse(widget.moment['media_url']))
-        ..initialize().then((_) {
-          if (mounted) setState(() {});
-          _videoController!.setLooping(true);
+    if (widget.moment['media_type'] == 'video' && widget.isCurrentPage) {
+      _initVideo();
+    }
+  }
+
+  void _initVideo() {
+    _videoController =
+        VideoPlayerController.networkUrl(Uri.parse(widget.moment['media_url']))
+          ..initialize().then((_) {
+            if (mounted && widget.isCurrentPage) {
+              setState(() {});
+              _videoController!.setLooping(true);
+              _videoController!.play();
+            }
+          });
+  }
+
+  // 🔥 THE FIX: DESTROY OFF-SCREEN VIDEOS
+  @override
+  void didUpdateWidget(ExploreMomentViewerItem oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isCurrentPage && !oldWidget.isCurrentPage) {
+      if (widget.moment['media_type'] == 'video') {
+        if (_videoController == null)
+          _initVideo();
+        else
           _videoController!.play();
-        });
+      }
+    } else if (!widget.isCurrentPage && oldWidget.isCurrentPage) {
+      _videoController?.pause();
+      _videoController?.dispose();
+      _videoController = null;
     }
   }
 
@@ -1705,6 +1762,34 @@ class _ExploreMomentViewerItemState extends State<ExploreMomentViewerItem> {
   void dispose() {
     _videoController?.dispose();
     super.dispose();
+  }
+
+  void _showMomentOptions() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.moment['media_type'] != 'video')
+              ListTile(
+                leading: const Icon(Icons.hd, color: Colors.blueAccent),
+                title: const Text('View Full Quality',
+                    style: TextStyle(color: Colors.blueAccent, fontSize: 16)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  setState(() => _isHighQuality = true);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Loading High Quality...')));
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -1723,28 +1808,48 @@ class _ExploreMomentViewerItemState extends State<ExploreMomentViewerItem> {
           child: isVideo
               ? (_videoController != null &&
                       _videoController!.value.isInitialized
-                  ? AspectRatio(
-                      aspectRatio: _videoController!.value.aspectRatio,
-                      child: VideoPlayer(_videoController!))
+                  ? GestureDetector(
+                      onTap: () {
+                        _videoController!.value.isPlaying
+                            ? _videoController!.pause()
+                            : _videoController!.play();
+                        setState(() {});
+                      },
+                      child: AspectRatio(
+                          aspectRatio: _videoController!.value.aspectRatio,
+                          child: VideoPlayer(_videoController!)),
+                    )
                   : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
               : CachedNetworkImage(
                   imageUrl: widget.moment['media_url'],
                   fit: BoxFit.contain,
+                  memCacheWidth:
+                      _isHighQuality ? null : 600, // 🔥 FIX: RAM Compression
                   placeholder: (context, url) =>
                       const CircularProgressIndicator(color: Color(0xFF4CAF50)),
                 ),
         ),
         SafeArea(
-          child: Align(
-            alignment: Alignment.topLeft,
-            child: IconButton(
-              icon: const Icon(Icons.arrow_back_ios,
-                  color: Colors.white,
-                  shadows: [Shadow(color: Colors.black, blurRadius: 4)]),
-              onPressed: () => Navigator.pop(context),
-            ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios,
+                    color: Colors.white,
+                    shadows: [Shadow(color: Colors.black, blurRadius: 4)]),
+                onPressed: () => Navigator.pop(context),
+              ),
+              IconButton(
+                icon: const Icon(Icons.more_vert,
+                    color: Colors.white,
+                    shadows: [Shadow(color: Colors.black, blurRadius: 4)]),
+                onPressed: _showMomentOptions,
+              ),
+            ],
           ),
         ),
+
+        // ... Keep the rest of your original Stack UI (Caption & Right Buttons) exactly the same ...
         Positioned(
           bottom: 20,
           left: 16,

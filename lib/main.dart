@@ -215,14 +215,18 @@ class _AllowanceAppState extends State<AllowanceApp> {
           return;
         }
 
-        // ignore: unnecessary_null_comparison
-        if (session != null && session.user != null) {
-          await _userPreferences.loadPreferences();
-          await _setupFcmAndListeners();
-        } else {
-          await _userPreferences.clearLocal();
+        // 🔥 THE FIX: ONLY rebuild the app on major auth changes!
+        if (event == AuthChangeEvent.initialSession ||
+            event == AuthChangeEvent.signedIn ||
+            event == AuthChangeEvent.signedOut) {
+          if (session != null) {
+            await _userPreferences.loadPreferences();
+            await _setupFcmAndListeners();
+          } else {
+            await _userPreferences.clearLocal();
+          }
+          if (mounted) setState(() {});
         }
-        if (mounted) setState(() {});
       });
     } catch (e) {
       developer.log('App initialization error: $e', name: 'main');

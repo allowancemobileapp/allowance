@@ -1,8 +1,6 @@
 // lib/screens/home/media_editor_screen.dart
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:typed_data';
-import 'dart:typed_data';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/video_trimmer_screen.dart'; // Ensure this exists
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -12,7 +10,6 @@ import 'package:video_player/video_player.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:video_compress/video_compress.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 
 class MediaEditorScreen extends StatefulWidget {
   final XFile file;

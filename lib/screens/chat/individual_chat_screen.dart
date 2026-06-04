@@ -9,6 +9,7 @@ import 'package:allowance/shared/services/fcm_service.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_linkify/flutter_linkify.dart';
@@ -20,6 +21,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
 import '../../widgets/universal_profile_card.dart';
+import '../../shared/services/chat_local_db.dart';
+import 'package:record/record.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:http/http.dart' as http;
 
 class IndividualChatScreen extends StatefulWidget {
   final String chatId;
@@ -53,10 +58,19 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
   // For file/media logic
   final Map<String, Color> _userColors = {};
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  bool _isRecording = false;
+  String _recordDuration = "00:00";
+  Timer? _recordTimer;
+  int _recordSeconds = 0;
   String? _highlightedMessageId;
   Map<String, dynamic>? _pendingOrder;
   List<Map<String, dynamic>> _messages = [];
-  StreamSubscription? _msgSub;
+  RealtimeChannel? _realtimeChannel;
+
+  // 🔥 FIX: Added the missing Video Cache and removed the duplicate colors map
+  final Map<String, Uint8List> _chatVideoThumbCache = {};
+  final Map<String, List<InlineSpan>> _regexCache = {};
 
   // (Deleted the unused _messageStream entirely)
 
@@ -65,22 +79,43 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     super.initState();
     activeChatId = widget.chatId;
 
-    // --- NEW: Catch Pending Orders ---
-    // --- FIX: Catch Pending Orders cleanly on Web ---
     final po = widget.recipientProfile['pending_order'];
     if (po != null) {
       try {
-        // On web, it might already be parsed into a map by Flutter!
         _pendingOrder = po is String ? jsonDecode(po) : po;
       } catch (e) {
         debugPrint('Error parsing order: $e');
       }
     }
 
+    // 🔥 FIX: Check Local Cache FIRST to stop the "Follow" button from flashing!
+    SharedPreferences.getInstance().then((prefs) {
+      final cachedFolls =
+          prefs.getString('cached_folls_${supabase.auth.currentUser!.id}');
+      if (cachedFolls != null) {
+        final followingList = List<String>.from(jsonDecode(cachedFolls));
+        if (followingList.contains(widget.recipientProfile['id'].toString()) &&
+            mounted) {
+          setState(() => _isFollowing = true);
+        }
+      }
+    });
+
     _setupMessageStream();
     _setupTypingListener();
-    _checkFollowStatus();
+    _checkFollowStatus(); // Silent network update
     _markMessagesAsRead();
+  }
+
+  Future<void> _checkFollowStatus() async {
+    final res = await supabase
+        .from('followers')
+        .select()
+        .eq('follower_id', supabase.auth.currentUser!.id)
+        .eq('following_id', widget.recipientProfile['id'])
+        .maybeSingle();
+
+    if (mounted) setState(() => _isFollowing = res != null);
   }
 
   // --- NEW: Order Preview Attachment ---
@@ -121,13 +156,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
-  // --- NEW: Stunnning Green Order Card in Chat ---
-  // --- UPDATED: Stunnning Green Order Card with Timestamps ---
   Widget _buildOrderCard(
       String jsonStr, String timeStr, bool isMe, bool isRead) {
     try {
-      // --- FIX: Safely decode strings vs maps for Web ---
-      final data = jsonStr is String ? jsonDecode(jsonStr) : jsonStr;
+      // 🔥 FIX: Cleaned up the JSON decode to remove the warning
+      final data = jsonDecode(jsonStr);
       final vendor = data['vendor'] ?? 'Vendor';
       final items = data['items'] as List<dynamic>? ?? [];
       final total = data['total'] ?? '0';
@@ -209,7 +242,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  // --- NEW: TIME AND READ RECEIPT FOR ORDER CARD ---
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
@@ -243,29 +275,87 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   Future<void> _setupMessageStream() async {
-    final prefs = await SharedPreferences.getInstance();
-    final cachedMsgs = prefs.getString('msgs_${widget.chatId}');
-
-    if (cachedMsgs != null && mounted) {
-      // SPEED FIX: Only load the first 100 into UI to prevent 5-minute freezes
-      final List<dynamic> decoded = jsonDecode(cachedMsgs);
-      setState(() {
-        _messages = List<Map<String, dynamic>>.from(decoded.take(100));
-      });
+    // ⚡ 1. BASTARD SPEED: Instant local load
+    final localMessages = await ChatLocalDB.instance
+        .getMessagesForChat(widget.chatId, limit: 100);
+    if (localMessages.isNotEmpty && mounted) {
+      setState(() => _messages = localMessages);
     }
 
-    _msgSub = supabase
-        .from('messages')
-        .stream(primaryKey: ['id'])
-        .eq('chat_id', widget.chatId)
-        .order('created_at', ascending: false)
-        .limit(100) // SPEED FIX: Stop fetching 10,000 messages at once
-        .listen((data) {
-          if (mounted) {
-            setState(() => _messages = data);
-          }
-          prefs.setString('msgs_${widget.chatId}', jsonEncode(data));
-        });
+    // 🌐 2. FAST HTTP FETCH: Catch up on missed messages instantly
+    try {
+      final serverMessages = await supabase
+          .from('messages')
+          .select()
+          .eq('chat_id', widget.chatId)
+          .order('created_at', ascending: false)
+          .limit(100);
+
+      if (mounted) setState(() => _messages = serverMessages);
+      await ChatLocalDB.instance.cacheMessages(widget.chatId, serverMessages);
+    } catch (e) {
+      debugPrint("HTTP fetch error: $e");
+    }
+
+    // 🚀 3. WHATSAPP-SPEED WEBSOCKETS: Listen for instant live updates
+    _realtimeChannel = supabase
+        .channel('public:messages:${widget.chatId}')
+        .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'messages',
+            filter: PostgresChangeFilter(
+                type: PostgresChangeFilterType.eq,
+                column: 'chat_id',
+                value: widget.chatId),
+            callback: (payload) {
+              if (!mounted) return;
+
+              if (payload.eventType == PostgresChangeEvent.insert) {
+                final newMsg = payload.newRecord;
+                setState(() {
+                  // 🔥 FIX 4: OPTIMISTIC UI DUPLICATE KILLER
+                  final myId = supabase.auth.currentUser?.id;
+                  final isMe = newMsg['sender_id'] == myId;
+
+                  int existingIdx = -1;
+                  if (isMe) {
+                    // Look for the "fake" message we inserted when we tapped send
+                    existingIdx = _messages.indexWhere((m) =>
+                        m['sender_id'] == myId &&
+                        m['content'] == newMsg['content'] &&
+                        (m['id'].toString() == newMsg['id'].toString() ||
+                            m['id'].toString().length > 10));
+                  } else {
+                    existingIdx = _messages.indexWhere(
+                        (m) => m['id'].toString() == newMsg['id'].toString());
+                  }
+
+                  if (existingIdx != -1) {
+                    // Swap the fake message for the real one
+                    _messages[existingIdx] = newMsg;
+                  } else {
+                    // It's a completely new message from someone else
+                    _messages.insert(0, newMsg);
+                  }
+                });
+                ChatLocalDB.instance.cacheMessages(widget.chatId, [newMsg]);
+              } else if (payload.eventType == PostgresChangeEvent.update) {
+                final updatedMsg = payload.newRecord;
+                setState(() {
+                  final idx = _messages.indexWhere(
+                      (m) => m['id'].toString() == updatedMsg['id'].toString());
+                  if (idx != -1) _messages[idx] = updatedMsg;
+                });
+                ChatLocalDB.instance.cacheMessages(widget.chatId, [updatedMsg]);
+              } else if (payload.eventType == PostgresChangeEvent.delete) {
+                final deletedId = payload.oldRecord['id'].toString();
+                setState(() {
+                  _messages.removeWhere((m) => m['id'].toString() == deletedId);
+                });
+              }
+            })
+        .subscribe();
   }
 
   Future<void> _markMessagesAsRead() async {
@@ -285,17 +375,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     }
   }
 
-  Future<void> _checkFollowStatus() async {
-    final res = await supabase
-        .from('followers')
-        .select()
-        .eq('follower_id', supabase.auth.currentUser!.id)
-        .eq('following_id', widget.recipientProfile['id'])
-        .maybeSingle();
-
-    if (mounted) setState(() => _isFollowing = res != null);
-  }
-
   void _setupTypingListener() {
     supabase
         .from('chat_participants')
@@ -309,10 +388,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
           setState(() => _remoteUserIsTyping = remoteTyping);
 
-          // BUG FIX: Auto-clear stuck typing indicators after 4 seconds
+          // 🔥 THE FIX: Auto-kill the typing indicator after 5 seconds!
+          // If their app crashes or loses internet, this cures the "Ghost Typing"
           if (remoteTyping) {
             _remoteTypingTimer?.cancel();
-            _remoteTypingTimer = Timer(const Duration(seconds: 4), () {
+            _remoteTypingTimer = Timer(const Duration(seconds: 5), () {
               if (mounted) setState(() => _remoteUserIsTyping = false);
             });
           }
@@ -327,16 +407,23 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   Future<void> _setTypingStatus(bool status) async {
-    if (_isTyping == status) return;
-    setState(() => _isTyping = status);
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null || _isTyping == status) return;
+
+    // 🔥 FIX 1: Removed setState()! The UI doesn't need to rebuild
+    // just because we are telling the database we are typing.
+    _isTyping = status;
+
     try {
       await supabase
           .from('chat_participants')
           .update({'is_typing': status}).match({
         'chat_id': widget.chatId,
-        'user_id': supabase.auth.currentUser!.id,
+        'user_id': myId,
       });
-    } catch (_) {}
+    } catch (e) {
+      debugPrint("Typing update failed: $e");
+    }
   }
 
   Future<void> _toggleFollow() async {
@@ -385,9 +472,114 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     return DateFormat('MMMM d, y').format(date);
   }
 
-  String _formatTime(String createdAt) {
-    final date = DateTime.parse(createdAt).toLocal();
-    return DateFormat('h:mm a').format(date);
+  String _formatTime(String? timestamp) {
+    if (timestamp == null || timestamp.isEmpty) return "";
+    try {
+      DateTime date = DateTime.parse(timestamp).toLocal();
+      if (DateTime.now().difference(date).inDays == 0) {
+        return DateFormat('h:mm a').format(date);
+      } else {
+        return DateFormat('MMM d').format(date);
+      }
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // =========================================================================
+  // VOICE NOTE LOGIC (WEB & MOBILE SAFE)
+  // =========================================================================
+  Future<void> _startRecording() async {
+    try {
+      if (await _audioRecorder.hasPermission()) {
+        String? filePath;
+
+        // 🔥 FIX: Web doesn't use file paths. Mobile does.
+        if (!kIsWeb) {
+          final dir = await getApplicationDocumentsDirectory();
+          filePath =
+              '${dir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
+        }
+
+        // Passing empty string for path on web triggers the browser blob memory
+        await _audioRecorder.start(
+            const RecordConfig(encoder: AudioEncoder.aacLc),
+            path: filePath ?? '');
+
+        setState(() {
+          _isRecording = true;
+          _recordSeconds = 0;
+          _recordDuration = "00:00";
+        });
+
+        _recordTimer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
+          if (!mounted) return;
+          setState(() {
+            _recordSeconds++;
+            final minutes =
+                (_recordSeconds / 60).floor().toString().padLeft(2, '0');
+            final seconds = (_recordSeconds % 60).toString().padLeft(2, '0');
+            _recordDuration = "$minutes:$seconds";
+          });
+        });
+      }
+    } catch (e) {
+      debugPrint("Recording error: $e");
+    }
+  }
+
+  Future<void> _stopAndSendRecording() async {
+    _recordTimer?.cancel();
+    if (!mounted) return;
+    setState(() => _isRecording = false);
+
+    final path = await _audioRecorder.stop();
+    if (path != null && _recordSeconds >= 1) {
+      // Prevents accidental 0-second taps
+      _uploadAndSendAudio(path);
+    }
+  }
+
+  Future<void> _uploadAndSendAudio(String filePath) async {
+    try {
+      Uint8List bytes;
+
+      // 🔥 FIX: Fetch bytes from browser blob on Web, or read file on Mobile
+      if (kIsWeb) {
+        final response = await http.get(Uri.parse(filePath));
+        bytes = response.bodyBytes;
+      } else {
+        bytes = await File(filePath).readAsBytes();
+      }
+
+      final fileName = 'vn_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      final storagePath = 'chat_media/${widget.chatId}/$fileName';
+
+      await supabase.storage.from('chat_media').uploadBinary(storagePath, bytes,
+          fileOptions: const FileOptions(contentType: 'audio/m4a'));
+
+      final publicUrl =
+          supabase.storage.from('chat_media').getPublicUrl(storagePath);
+
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return;
+
+      await supabase.from('messages').insert({
+        'chat_id': widget.chatId,
+        'sender_id': myId,
+        'content': '🎤 Voice Note',
+        'media_url': publicUrl,
+        'media_type': 'audio',
+        'file_size_bytes': bytes.length,
+        'is_read': false,
+      });
+    } catch (e) {
+      debugPrint("Voice note upload error: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to send voice note')));
+      }
+    }
   }
 
   Future<void> _sendMessage(
@@ -527,28 +719,41 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     if (activeChatId == widget.chatId) {
       activeChatId = null;
     }
+    _realtimeChannel?.unsubscribe();
     _scrollController.removeListener(_scrollListener);
-    _msgSub?.cancel();
     _typingTimer?.cancel();
+    _remoteTypingTimer?.cancel();
+
+    // 🔥 THE FIX: Tell the database we stopped typing when we leave the chat!
+    final myId = supabase.auth.currentUser?.id;
+    if (myId != null && _isTyping) {
+      supabase.from('chat_participants').update({
+        'is_typing': false,
+      }).match({'chat_id': widget.chatId, 'user_id': myId});
+    }
+
     _messageController.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
+    _audioRecorder.dispose();
+    _recordTimer?.cancel();
     super.dispose();
   }
 
-  // --- REPLACE YOUR BUILD METHOD WITH THIS (Uses cached _messages) ---
   @override
   Widget build(BuildContext context) {
-    // 🔥 FIX: Calculate max width exactly ONCE per screen build, protecting the chat bubbles from keyboard resizes!
     final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: _buildAppBar(),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
+      // 🔥 FIX: Removed SafeArea from body. Scaffold automatically avoids the keyboard.
+      body: Column(
+        children: [
+          Expanded(
+            child: GestureDetector(
+              // 🔥 FIX: Tapping the chat background instantly closes the keyboard smoothly
+              onTap: () => FocusScope.of(context).unfocus(),
               child: Stack(
                 children: [
                   _messages.isEmpty
@@ -561,9 +766,10 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                       : ListView.builder(
                           controller: _scrollController,
                           reverse: true,
-                          // Removed cacheExtent here to save RAM as well
-                          addRepaintBoundaries: true,
-                          addAutomaticKeepAlives: true,
+                          // 🔥 FIX: TURNED OFF REPAINT BOUNDARIES to free up massive GPU memory
+                          addRepaintBoundaries: false,
+                          addAutomaticKeepAlives: false,
+                          // 🔥 FIX: Let Flutter handle dismissing naturally when you swipe down
                           keyboardDismissBehavior:
                               ScrollViewKeyboardDismissBehavior.onDrag,
                           padding: const EdgeInsets.all(12),
@@ -598,7 +804,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                                               fontSize: 12)),
                                     ),
                                   ),
-                                // 🔥 FIX: Pass the pre-calculated width down!
                                 _buildBubble(_messages, index, maxBubbleWidth),
                               ],
                             );
@@ -620,9 +825,10 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                 ],
               ),
             ),
-            _buildInputBar(),
-          ],
-        ),
+          ),
+          // 🔥 FIX: We only put the SafeArea around the input bar to protect it from the iPhone Home bar!
+          _buildInputBar(),
+        ],
       ),
     );
   }
@@ -710,48 +916,125 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              IconButton(
-                icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
-                onPressed: _showPlusOptions,
-              ),
-              Expanded(
-                child: TextField(
-                  controller: _messageController,
-                  focusNode: _focusNode,
-                  style: const TextStyle(color: Colors.white),
-                  maxLines: 5,
-                  minLines: 1,
-                  textInputAction: TextInputAction.newline,
-                  keyboardType: TextInputType.multiline,
-                  // --- FIX: Using the proper _handleTyping method! ---
-                  onChanged: _handleTyping,
-                  decoration: InputDecoration(
-                    hintText: 'Message...',
-                    hintStyle: const TextStyle(color: Colors.white54),
-                    filled: true,
-                    fillColor: const Color(0xFF1C1C1E),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                  ),
+              // Hide the '+' button while recording to save space
+              if (!_isRecording)
+                IconButton(
+                  icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
+                  onPressed: _showPlusOptions,
                 ),
+
+              Expanded(
+                child: _isRecording
+                    ? Container(
+                        height: 48,
+                        margin: const EdgeInsets.only(bottom: 2),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1C1C1E),
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: Row(
+                          children: [
+                            // 🔴 CANCEL BUTTON
+                            GestureDetector(
+                              onTap: () {
+                                _recordTimer?.cancel();
+                                _audioRecorder.stop();
+                                setState(() => _isRecording = false);
+                                HapticFeedback.vibrate();
+                              },
+                              child: const Icon(Icons.delete,
+                                  color: Colors.redAccent, size: 26),
+                            ),
+                            const SizedBox(width: 12),
+                            Text("Recording: $_recordDuration",
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold)),
+                            const Spacer(),
+                            const Text("Tap to send ->",
+                                style: TextStyle(
+                                    color: Colors.white38, fontSize: 12)),
+                          ],
+                        ),
+                      )
+                    : TextField(
+                        controller: _messageController,
+                        focusNode: _focusNode,
+                        style: const TextStyle(color: Colors.white),
+                        maxLines: 5,
+                        minLines: 1,
+                        textInputAction: TextInputAction.newline,
+                        keyboardType: TextInputType.multiline,
+                        onChanged: _handleTyping,
+                        decoration: InputDecoration(
+                          hintText: 'Message...',
+                          hintStyle: const TextStyle(color: Colors.white54),
+                          filled: true,
+                          fillColor: const Color(0xFF1C1C1E),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                        ),
+                      ),
               ),
-              ValueListenableBuilder<TextEditingValue>(
+
+              // THE MAGIC BUTTON (Swaps between Send and Mic)
+              if (_isRecording)
+                // 🟢 EXPLICIT SEND BUTTON FOR VOICE NOTES
+                GestureDetector(
+                  onTap: () {
+                    HapticFeedback.lightImpact();
+                    _stopAndSendRecording();
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.only(left: 8, bottom: 4),
+                    padding: const EdgeInsets.all(10),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF4CAF50),
+                      shape: BoxShape.circle,
+                    ),
+                    child:
+                        const Icon(Icons.send, color: Colors.black, size: 24),
+                  ),
+                )
+              else
+                ValueListenableBuilder<TextEditingValue>(
                   valueListenable: _messageController,
                   builder: (context, value, child) {
-                    return IconButton(
-                      icon: Icon(Icons.send,
-                          color: value.text.trim().isNotEmpty
-                              ? const Color(0xFF4CAF50)
-                              : Colors.grey),
-                      onPressed: value.text.trim().isNotEmpty
-                          ? () => _sendMessage()
-                          : null,
-                    );
-                  }),
+                    final hasText = value.text.trim().isNotEmpty;
+
+                    if (hasText) {
+                      // SHOW SEND TEXT BUTTON
+                      return IconButton(
+                        icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
+                        onPressed: () => _sendMessage(),
+                      );
+                    } else {
+                      // 🎤 TAP TO RECORD BUTTON (Web Safe)
+                      return GestureDetector(
+                        onTap: () {
+                          HapticFeedback.heavyImpact();
+                          _startRecording();
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(left: 8, bottom: 4),
+                          padding: const EdgeInsets.all(10),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF4CAF50),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.mic,
+                              color: Colors.black, size: 24),
+                        ),
+                      );
+                    }
+                  },
+                ),
             ],
           ),
         ],
@@ -952,13 +1235,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     final message = messages[index];
     final messageId = message['id'].toString();
 
-    // NOTE FOR CHAT_ROOM_SCREEN:
-    // In Chat_Room_Screen, the isMe logic is: final myId = supabase.auth.currentUser?.id; final isMe = message['sender_id']?.toString() == myId;
-    // In Individual_Chat_Screen, the isMe logic is: final isMe = message['sender_id'] == supabase.auth.currentUser!.id;
-    // Ensure you keep your respective screen's `isMe` and rendering logic inside this block, just make sure to REMOVE View.of(context) and use `maxWidth` in the constraints!
-
-    final isMe =
-        message['sender_id']?.toString() == supabase.auth.currentUser?.id;
+    final isMe = message['sender_id'] == supabase.auth.currentUser!.id;
     final content = (message['content'] ?? '').toString();
     final timeStr =
         _formatTime(message['created_at']?.toString() ?? message['created_at']);
@@ -966,10 +1243,14 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
     final hasMedia = message['media_url'] != null;
     final mediaType = message['media_type']?.toString() ?? 'text';
-    final isFile = mediaType == 'file';
+    final String? mediaUrlStr = message['media_url']?.toString();
+    final List<String> mediaUrls = mediaUrlStr != null && mediaUrlStr.isNotEmpty
+        ? mediaUrlStr.split(',')
+        : [];
 
-    // (If pasting this in IndividualChatScreen, leave the isOrder logic here)
+    final isFile = mediaType == 'file';
     final isOrder = mediaType == 'order';
+    final isAudio = mediaType == 'audio';
 
     final bool isHighlighted = _highlightedMessageId == messageId;
 
@@ -986,7 +1267,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
           direction: DismissDirection.startToEnd,
           confirmDismiss: (_) {
             HapticFeedback.lightImpact();
-            // Call _onSwipeToReply(message) if in ChatRoomScreen
             setState(() => _replyMessage = message);
             return Future.value(false);
           },
@@ -1002,7 +1282,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
               child: Container(
                 key: ValueKey(messageId),
                 margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                // 🔥 FIX: We now use the passed-in maxWidth, preventing the 60fps layout recalculation!
                 constraints: BoxConstraints(maxWidth: maxWidth),
                 decoration: BoxDecoration(
                   color: isMe ? const Color(0xFF4CAF50) : Colors.grey[800],
@@ -1016,9 +1295,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // *Keep your existing rendering logic for _buildOrderCard, _buildReplyInsideBubble, _buildMediaSection, etc. here depending on which screen you are pasting this into!*
-
-                      if (isOrder) // Individual Chat Only
+                      if (isOrder)
                         _buildOrderCard(content, timeStr, isMe, isRead),
 
                       if (message['reply_to_id'] != null ||
@@ -1026,14 +1303,28 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                               false))
                         _buildReplyInsideBubble(message),
 
-                      if (hasMedia) // In chat_room it's called _buildMediaWithOverlay or _buildMediaSection depending on file. Use whatever was already there!
+                      // 🔥 NEW: AUDIO PLAYER
+                      if (isAudio && mediaUrls.isNotEmpty)
+                        AudioPlayerBubble(
+                          url: mediaUrls.first,
+                          isMe: isMe,
+                          themeColor: const Color(0xFF121212),
+                          timeStr: timeStr,
+                          isRead: isRead,
+                        ),
+
+                      // 🔥 STANDARD MEDIA (Files, Images, Videos - Ignored if Audio)
+                      if (hasMedia && !isAudio)
                         _buildMediaSection(message, isMe, isRead, timeStr),
 
+                      // TEXT (IGNORED if Media or Order)
                       if (!isOrder &&
                           !isFile &&
+                          !isAudio &&
                           content.isNotEmpty &&
                           content != '📸 Photo' &&
-                          content != '🎥 Video')
+                          content != '🎥 Video' &&
+                          content != '🎤 Voice Note')
                         _buildTextAndTimestamp(content, timeStr, isMe, isRead),
                     ],
                   ),
@@ -1285,8 +1576,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
-  // --- UPDATED: Text colors dynamically change based on isMe ---
-  // --- UPDATED: Handles VERY LONG TEXT to prevent GPU vanishing bug ---
   Widget _buildTextAndTimestamp(
       String content, String timeStr, bool isMe, bool isRead) {
     return ExpandableMessageText(
@@ -1295,6 +1584,10 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       isMe: isMe,
       isRead: isRead,
       parentContext: context,
+      regexCache: _regexCache, // <-- Pass the cache in!
+      videoCache:
+          _chatVideoThumbCache, // <-- Pass video cache for garbage control!
+      username: widget.userPreferences.username ?? '',
     );
   }
 
@@ -1640,7 +1933,7 @@ class _CachedLinkifyState extends State<CachedLinkify> {
 }
 
 // =========================================================================
-// EXPANDABLE TEXT WIDGET (Fixes disappearing long messages)
+// EXPANDABLE TEXT WIDGET (With Bastard Speed Caching & Garbage Control)
 // =========================================================================
 class ExpandableMessageText extends StatefulWidget {
   final String text;
@@ -1648,6 +1941,9 @@ class ExpandableMessageText extends StatefulWidget {
   final bool isMe;
   final bool isRead;
   final BuildContext parentContext;
+  final Map<String, List<InlineSpan>> regexCache;
+  final Map<String, Uint8List> videoCache;
+  final String username;
 
   const ExpandableMessageText({
     super.key,
@@ -1656,6 +1952,9 @@ class ExpandableMessageText extends StatefulWidget {
     required this.isMe,
     required this.isRead,
     required this.parentContext,
+    required this.regexCache,
+    required this.videoCache,
+    required this.username,
   });
 
   @override
@@ -1673,6 +1972,68 @@ class _ExpandableMessageTextState extends State<ExpandableMessageText> {
         ? '${widget.text.substring(0, limit)}...'
         : widget.text;
 
+    // --- ⚡ BASTARD SPEED CACHE LOGIC ---
+    final cacheKey = "${widget.isMe}_$displayText";
+    List<InlineSpan> spans;
+
+    if (widget.regexCache.containsKey(cacheKey)) {
+      spans = widget.regexCache[cacheKey]!;
+    } else {
+      spans = [];
+      final regex = RegExp(r'(https?:\/\/[^\s]+)|(@[a-zA-Z0-9_]+)');
+      final matches = regex.allMatches(displayText);
+
+      int lastMatchEnd = 0;
+      for (final match in matches) {
+        if (match.start > lastMatchEnd) {
+          spans.add(
+              TextSpan(text: displayText.substring(lastMatchEnd, match.start)));
+        }
+        final matchText = match.group(0)!;
+        if (matchText.startsWith('@')) {
+          final isMyMention =
+              matchText.toLowerCase() == '@${widget.username.toLowerCase()}';
+          spans.add(TextSpan(
+            text: matchText,
+            style: TextStyle(
+              color: isMyMention
+                  ? Colors.redAccent
+                  : (widget.isMe ? Colors.black87 : Colors.amberAccent),
+              fontWeight: FontWeight.bold,
+            ),
+          ));
+        } else {
+          spans.add(TextSpan(
+              text: matchText,
+              style: TextStyle(
+                color: widget.isMe ? Colors.black87 : const Color(0xFF53BDEB),
+                decoration: TextDecoration.underline,
+              ),
+              recognizer: TapGestureRecognizer()
+                ..onTap = () async {
+                  final uri = Uri.parse(matchText);
+                  if (matchText.contains('allowanceapp.org/gist/')) {
+                    final gistId = uri.pathSegments.last;
+                    Navigator.pushNamed(widget.parentContext, '/gist',
+                        arguments: {'id': gistId});
+                  } else if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
+                }));
+        }
+        lastMatchEnd = match.end;
+      }
+      if (lastMatchEnd < displayText.length) {
+        spans.add(TextSpan(text: displayText.substring(lastMatchEnd)));
+      }
+
+      widget.regexCache[cacheKey] = spans;
+
+      // 🧹 GARBAGE CONTROL: Prevents RAM explosion
+      if (widget.regexCache.length > 200) widget.regexCache.clear();
+      if (widget.videoCache.length > 30) widget.videoCache.clear();
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: Wrap(
@@ -1684,30 +2045,15 @@ class _ExpandableMessageTextState extends State<ExpandableMessageText> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min, // Keeps it inline if text is short
             children: [
-              Linkify(
-                onOpen: (link) async {
-                  final String urlString = link.url;
-                  if (urlString.contains('allowanceapp.org/gist/')) {
-                    final gistId = urlString.split('/').last;
-                    Navigator.pushNamed(widget.parentContext, '/gist',
-                        arguments: {'id': gistId});
-                    return;
-                  }
-                  final Uri url = Uri.parse(urlString);
-                  if (await canLaunchUrl(url)) {
-                    await launchUrl(url, mode: LaunchMode.externalApplication);
-                  }
-                },
-                text: displayText,
-                style: TextStyle(
-                  color: widget.isMe ? Colors.black : Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                ),
-                linkStyle: TextStyle(
-                  color: widget.isMe ? Colors.black87 : const Color(0xFF53BDEB),
-                  decoration: TextDecoration.underline,
-                  fontWeight: FontWeight.w500,
+              // 🔥 NO MORE LINKIFY. IT JUST RENDERS THE CACHE INSTANTLY.
+              RichText(
+                text: TextSpan(
+                  style: TextStyle(
+                    color: widget.isMe ? Colors.black : Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  children: spans,
                 ),
               ),
               if (isLong && !_isExpanded)
@@ -1750,6 +2096,207 @@ class _ExpandableMessageTextState extends State<ExpandableMessageText> {
               ],
             ],
           ),
+        ],
+      ),
+    );
+  }
+}
+
+// =========================================================================
+// LAZY-LOADED WHATSAPP-STYLE AUDIO PLAYER (Zero Lag)
+// =========================================================================
+class AudioPlayerBubble extends StatefulWidget {
+  final String url;
+  final bool isMe;
+  final Color themeColor;
+  final String timeStr;
+  final bool isRead;
+
+  const AudioPlayerBubble({
+    super.key,
+    required this.url,
+    required this.isMe,
+    required this.themeColor,
+    required this.timeStr,
+    required this.isRead,
+  });
+
+  @override
+  State<AudioPlayerBubble> createState() => _AudioPlayerBubbleState();
+}
+
+class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isPlaying = false;
+  bool _isLoaded = false;
+  bool _isLoading = false;
+  Duration _duration = Duration.zero;
+  Duration _position = Duration.zero;
+
+  @override
+  void dispose() {
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
+  // 🔥 THE FIX: Only connect to the audio file if the user actually taps Play!
+  Future<void> _togglePlay() async {
+    if (_isPlaying) {
+      await _audioPlayer.pause();
+      return;
+    }
+
+    if (!_isLoaded) {
+      setState(() => _isLoading = true);
+      try {
+        await _audioPlayer.setUrl(widget.url);
+        _audioPlayer.playerStateStream.listen((state) {
+          if (mounted) {
+            setState(() {
+              _isPlaying = state.playing;
+              if (state.processingState == ProcessingState.completed) {
+                _isPlaying = false;
+                _audioPlayer.seek(Duration.zero);
+                _audioPlayer.pause();
+              }
+            });
+          }
+        });
+        _audioPlayer.durationStream.listen((d) {
+          if (mounted && d != null) setState(() => _duration = d);
+        });
+        _audioPlayer.positionStream.listen((p) {
+          if (mounted) setState(() => _position = p);
+        });
+        _isLoaded = true;
+      } catch (e) {
+        debugPrint("Audio load error: $e");
+      }
+      if (mounted) setState(() => _isLoading = false);
+    }
+
+    await _audioPlayer.play();
+  }
+
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return "$minutes:$seconds";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 250,
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              GestureDetector(
+                onTap: _isLoading ? null : _togglePlay,
+                child: _isLoading
+                    ? SizedBox(
+                        width: 38,
+                        height: 38,
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: CircularProgressIndicator(
+                              color: widget.isMe
+                                  ? Colors.black
+                                  : widget.themeColor,
+                              strokeWidth: 2),
+                        ))
+                    : Icon(
+                        _isPlaying
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_fill,
+                        color: widget.isMe ? Colors.black87 : widget.themeColor,
+                        size: 38,
+                      ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SliderTheme(
+                  data: SliderThemeData(
+                    trackHeight: 3,
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 6),
+                    overlayShape:
+                        const RoundSliderOverlayShape(overlayRadius: 10),
+                    activeTrackColor:
+                        widget.isMe ? Colors.black87 : widget.themeColor,
+                    inactiveTrackColor:
+                        widget.isMe ? Colors.black26 : Colors.white24,
+                    thumbColor: widget.isMe ? Colors.black : widget.themeColor,
+                  ),
+                  child: Slider(
+                    min: 0,
+                    max: _duration.inMilliseconds > 0
+                        ? _duration.inMilliseconds.toDouble()
+                        : 1.0,
+                    value: _position.inMilliseconds.toDouble().clamp(
+                        0.0,
+                        _duration.inMilliseconds > 0
+                            ? _duration.inMilliseconds.toDouble()
+                            : 1.0),
+                    onChanged: (val) {
+                      if (_isLoaded)
+                        _audioPlayer.seek(Duration(milliseconds: val.toInt()));
+                    },
+                  ),
+                ),
+              ),
+              CircleAvatar(
+                radius: 16,
+                backgroundColor:
+                    widget.isMe ? Colors.black12 : Colors.grey[800],
+                child: Icon(Icons.mic,
+                    size: 16,
+                    color: widget.isMe ? Colors.black54 : Colors.white54),
+              )
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(left: 48),
+                child: Text(
+                  _isLoaded
+                      ? _formatDuration(
+                          _position.inSeconds > 0 ? _position : _duration)
+                      : "Voice Note",
+                  style: TextStyle(
+                    color: widget.isMe ? Colors.black54 : Colors.white60,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Text(
+                    widget.timeStr,
+                    style: TextStyle(
+                      color: widget.isMe ? Colors.black54 : Colors.white60,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (widget.isMe) ...[
+                    const SizedBox(width: 4),
+                    Icon(
+                      widget.isRead ? Icons.done_all : Icons.done,
+                      size: 14,
+                      color: widget.isRead ? Colors.blue : Colors.black54,
+                    ),
+                  ],
+                ],
+              )
+            ],
+          )
         ],
       ),
     );

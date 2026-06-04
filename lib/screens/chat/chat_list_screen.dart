@@ -28,11 +28,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   final supabase = Supabase.instance.client;
 
   // --- Highly Optimized State Variables ---
-  StreamSubscription? _participantsSub;
-  StreamSubscription? _chatsSub;
-  StreamSubscription? _followersSub;
-  StreamSubscription? _allParticipantsSub;
-  StreamSubscription? _unreadSub;
+  RealtimeChannel? _listChannel;
 
   List<Map<String, dynamic>> _chats = [];
   Set<String> _followingIds = {};
@@ -106,89 +102,94 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   // Set up streams ONCE so the app doesn't freeze when typing in search
+  // --- 🚀 FAST WEBSOCKET CHANNEL ---
   void _setupStreams() {
+    // 1. Fetch everything instantly in parallel
+    _fetchLatestData();
+
+    // 2. Open ONE single WebSocket tunnel for real-time bumps
+    _listChannel?.unsubscribe();
+    _listChannel = supabase
+        .channel('global_chat_list_updates')
+        .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'messages',
+            callback: (payload) {
+              // A message was sent, read, or deleted anywhere.
+              // Just quickly refresh our data in the background to bump the chat and update unread counts!
+              _fetchLatestData();
+            })
+        .subscribe();
+  }
+
+  // --- ⚡ LIGHTNING FAST PARALLEL FETCH ---
+  Future<void> _fetchLatestData() async {
     final myId = _myId!;
+    try {
+      // 1. Get my chat IDs
+      final myParts = await supabase
+          .from('chat_participants')
+          .select('chat_id')
+          .eq('user_id', myId);
+      final myChatIds = (myParts as List).map((p) => p['chat_id']).toList();
 
-    _participantsSub?.cancel();
-    _participantsSub = supabase
-        .from('chat_participants')
-        .stream(primaryKey: ['chat_id', 'user_id'])
-        .eq('user_id', myId)
-        .listen((records) {
-          final myChatIds = records.map((p) => p['chat_id'] as Object).toList();
+      if (myChatIds.isEmpty) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
 
-          if (myChatIds.isEmpty) {
-            if (mounted) setState(() => _isLoading = false);
-            return;
-          }
+      // 2. Fetch everything else AT THE EXACT SAME TIME (Massive Speed Boost)
+      final futures = await Future.wait([
+        supabase.from('chats').select().inFilter('id', myChatIds),
+        supabase
+            .from('chat_participants')
+            .select()
+            .inFilter('chat_id', myChatIds),
+        supabase
+            .from('followers')
+            .select('following_id')
+            .eq('follower_id', myId),
+        // Instantly grab all unread messages meant for me
+        supabase
+            .from('messages')
+            .select()
+            .eq('is_read', false)
+            .neq('sender_id', myId),
+      ]);
 
-          _chatsSub?.cancel();
-          _chatsSub = supabase
-              .from('chats')
-              .stream(primaryKey: ['id'])
-              .inFilter('id', myChatIds)
-              .listen((chats) async {
-                if (mounted) {
-                  setState(() {
-                    _chats = chats;
-                    _isLoading = false;
-                  });
-                }
-                // Save to offline storage
-                final prefs = await SharedPreferences.getInstance();
-                prefs.setString('cached_chats_$myId', jsonEncode(chats));
-              });
+      if (mounted) {
+        setState(() {
+          _chats = List<Map<String, dynamic>>.from(futures[0]);
+          _allParticipants = List<Map<String, dynamic>>.from(futures[1]);
+          _followingIds = (futures[2] as List)
+              .map((f) => f['following_id'].toString())
+              .toSet();
 
-          _allParticipantsSub?.cancel();
-          _allParticipantsSub = supabase
-              .from('chat_participants')
-              .stream(primaryKey: ['chat_id', 'user_id'])
-              .inFilter('chat_id', myChatIds)
-              .listen((parts) async {
-                if (mounted) setState(() => _allParticipants = parts);
-                // Save to offline storage
-                final prefs = await SharedPreferences.getInstance();
-                prefs.setString('cached_parts_$myId', jsonEncode(parts));
-              });
+          // Filter unread messages to only include those in my active chats
+          final allUnread = List<Map<String, dynamic>>.from(futures[3]);
+          _unreadMessages =
+              allUnread.where((m) => myChatIds.contains(m['chat_id'])).toList();
+
+          _isLoading = false;
         });
+      }
 
-    _followersSub?.cancel();
-    _followersSub = supabase
-        .from('followers')
-        .stream(primaryKey: ['follower_id', 'following_id'])
-        .eq('follower_id', myId)
-        .listen((folls) async {
-          if (mounted) {
-            setState(() {
-              _followingIds =
-                  folls.map((f) => f['following_id'].toString()).toSet();
-            });
-          }
-          final prefs = await SharedPreferences.getInstance();
-          prefs.setString(
-              'cached_folls_$myId', jsonEncode(_followingIds.toList()));
-        });
-
-    _unreadSub?.cancel();
-    _unreadSub = supabase
-        .from('messages')
-        .stream(primaryKey: ['id'])
-        .eq('is_read', false)
-        .listen((msgs) async {
-          if (mounted) setState(() => _unreadMessages = msgs);
-          final prefs = await SharedPreferences.getInstance();
-          prefs.setString('cached_unread_$myId', jsonEncode(msgs));
-        });
+      // Cache them for instant offline loading
+      final prefs = await SharedPreferences.getInstance();
+      prefs.setString('cached_chats_$myId', jsonEncode(_chats));
+      prefs.setString('cached_parts_$myId', jsonEncode(_allParticipants));
+      prefs.setString('cached_folls_$myId', jsonEncode(_followingIds.toList()));
+      prefs.setString('cached_unread_$myId', jsonEncode(_unreadMessages));
+    } catch (e) {
+      debugPrint("Chat list fetch error: $e");
+    }
   }
 
   @override
   void dispose() {
-    _pageController.dispose(); // <--- DISPOSE IT
-    _participantsSub?.cancel();
-    _chatsSub?.cancel();
-    _followersSub?.cancel();
-    _allParticipantsSub?.cancel();
-    _unreadSub?.cancel();
+    _pageController.dispose();
+    _listChannel?.unsubscribe(); // <-- CHANGED THIS
     _searchController.dispose();
     super.dispose();
   }

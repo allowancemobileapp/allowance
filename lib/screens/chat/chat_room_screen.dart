@@ -22,6 +22,10 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 import 'package:flutter_linkify/flutter_linkify.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../shared/services/fcm_service.dart';
+import '../../shared/services/chat_local_db.dart';
+import 'package:record/record.dart';
+import 'package:just_audio/just_audio.dart';
+import 'package:http/http.dart' as http;
 
 class ChatRoomScreen extends StatefulWidget {
   final String chatId;
@@ -52,12 +56,17 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final TextEditingController _memberSearchController = TextEditingController();
   final FocusNode _focusNode = FocusNode(); // <--- KEEPS KEYBOARD STABLE
   final Map<String, Uint8List> _chatVideoThumbCache = {};
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  bool _isRecording = false;
+  String _recordDuration = "00:00";
+  Timer? _recordTimer;
+  int _recordSeconds = 0;
 
   bool _isTyping = false;
   bool _remoteUserIsTyping = false;
   Timer? _typingTimer;
   List<Map<String, dynamic>> _messages = [];
-  StreamSubscription? _msgSub;
+  RealtimeChannel? _realtimeChannel;
   Timer? _remoteTypingTimer;
 
   Map<String, dynamic>? _chatMeta;
@@ -70,15 +79,22 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
   // For colored usernames
   final Map<String, Color> _userColors = {};
-
+  final Map<String, List<InlineSpan>> _regexCache = {};
   String _memberSearchQuery = '';
   String? _highlightedMessageId;
 
   @override
   void initState() {
     super.initState();
-    activeChatId = widget
-        .chatId; // <--- TELLS THE APP WE ARE IN THIS CHAT (Triggers Vibration/Silence!)
+    activeChatId = widget.chatId;
+
+    // 🔥 FIX: Instantly populate the UI with the data we already know!
+    _chatMeta = {
+      'group_name': widget.chatTitle,
+      'group_avatar': null, // Will update when network loads
+      'group_description': 'Loading group info...',
+    };
+
     _scrollController.addListener(_scrollListener);
     _setupMessageStream();
     _loadChatMeta();
@@ -88,6 +104,22 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
   Future<void> _loadChatMeta() async {
     try {
+      // 1. Instantly load from cache to stop jitter
+      final prefs = await SharedPreferences.getInstance();
+      final cachedParticipants =
+          prefs.getString('cached_parts_${supabase.auth.currentUser!.id}');
+      if (cachedParticipants != null && mounted) {
+        final allParts =
+            List<Map<String, dynamic>>.from(jsonDecode(cachedParticipants));
+        final myGroupParts = allParts
+            .where((p) => p['chat_id'].toString() == widget.chatId)
+            .toList();
+        if (myGroupParts.isNotEmpty) {
+          setState(() => _participants = myGroupParts);
+        }
+      }
+
+      // 2. Fetch fresh data silently
       final chatResp = await supabase
           .from('chats')
           .select('*, chat_participants!inner(*)')
@@ -104,13 +136,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       final participants =
           List<Map<String, dynamic>>.from(chatResp['chat_participants'] ?? []);
 
-      // Get active members
       final Set<String> userIdsToFetch = participants
           .map((p) => p['user_id']?.toString() ?? '')
           .where((id) => id.isNotEmpty)
           .toSet();
 
-      // ALSO fetch users who sent messages previously (so removed users still have names)
       final msgResp = await supabase
           .from('messages')
           .select('sender_id')
@@ -203,10 +233,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
           setState(() => _remoteUserIsTyping = remoteTyping);
 
-          // BUG FIX: Auto-clear stuck typing indicators after 4 seconds
+          // 🔥 THE FIX: Auto-kill the typing indicator after 5 seconds!
+          // If their app crashes or loses internet, this cures the "Ghost Typing"
           if (remoteTyping) {
             _remoteTypingTimer?.cancel();
-            _remoteTypingTimer = Timer(const Duration(seconds: 4), () {
+            _remoteTypingTimer = Timer(const Duration(seconds: 5), () {
               if (mounted) setState(() => _remoteUserIsTyping = false);
             });
           }
@@ -223,7 +254,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   Future<void> _setTypingStatus(bool status) async {
     final myId = supabase.auth.currentUser?.id;
     if (myId == null || _isTyping == status) return;
-    setState(() => _isTyping = status);
+
+    // 🔥 FIX 1: Removed setState()! The UI doesn't need to rebuild
+    // just because we are telling the database we are typing.
+    _isTyping = status;
+
     try {
       await supabase
           .from('chat_participants')
@@ -233,6 +268,102 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       });
     } catch (e) {
       debugPrint("Typing update failed: $e");
+    }
+  }
+
+  // =========================================================================
+  // VOICE NOTE LOGIC (WEB & MOBILE SAFE)
+  // =========================================================================
+  Future<void> _startRecording() async {
+    try {
+      if (await _audioRecorder.hasPermission()) {
+        String? filePath;
+
+        // 🔥 FIX: Web doesn't use file paths. Mobile does.
+        if (!kIsWeb) {
+          final dir = await getApplicationDocumentsDirectory();
+          filePath =
+              '${dir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
+        }
+
+        // Passing empty string for path on web triggers the browser blob memory
+        await _audioRecorder.start(
+            const RecordConfig(encoder: AudioEncoder.aacLc),
+            path: filePath ?? '');
+
+        setState(() {
+          _isRecording = true;
+          _recordSeconds = 0;
+          _recordDuration = "00:00";
+        });
+
+        _recordTimer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
+          if (!mounted) return;
+          setState(() {
+            _recordSeconds++;
+            final minutes =
+                (_recordSeconds / 60).floor().toString().padLeft(2, '0');
+            final seconds = (_recordSeconds % 60).toString().padLeft(2, '0');
+            _recordDuration = "$minutes:$seconds";
+          });
+        });
+      }
+    } catch (e) {
+      debugPrint("Recording error: $e");
+    }
+  }
+
+  Future<void> _stopAndSendRecording() async {
+    _recordTimer?.cancel();
+    if (!mounted) return;
+    setState(() => _isRecording = false);
+
+    final path = await _audioRecorder.stop();
+    if (path != null && _recordSeconds >= 1) {
+      // Prevents accidental 0-second taps
+      _uploadAndSendAudio(path);
+    }
+  }
+
+  Future<void> _uploadAndSendAudio(String filePath) async {
+    try {
+      Uint8List bytes;
+
+      // 🔥 FIX: Fetch bytes from browser blob on Web, or read file on Mobile
+      if (kIsWeb) {
+        final response = await http.get(Uri.parse(filePath));
+        bytes = response.bodyBytes;
+      } else {
+        bytes = await File(filePath).readAsBytes();
+      }
+
+      final fileName = 'vn_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      final storagePath = 'chat_media/${widget.chatId}/$fileName';
+
+      await supabase.storage.from('chat_media').uploadBinary(storagePath, bytes,
+          fileOptions: const FileOptions(contentType: 'audio/m4a'));
+
+      final publicUrl =
+          supabase.storage.from('chat_media').getPublicUrl(storagePath);
+
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return;
+
+      await supabase.from('messages').insert({
+        'chat_id': widget.chatId,
+        'sender_id': myId,
+        'content': '🎤 Voice Note',
+        'media_url': publicUrl,
+        'media_type': 'audio',
+        'file_size_bytes': bytes.length,
+        'is_read': false,
+      });
+    } catch (e) {
+      debugPrint("Voice note upload error: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to send voice note')));
+      }
     }
   }
 
@@ -1544,6 +1675,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final timeStr = _formatTime(message['created_at']?.toString());
     final isRead = message['is_read'] == true;
     final mediaType = message['media_type']?.toString() ?? 'text';
+    final isAudio = mediaType == 'audio';
 
     // --- SYSTEM MESSAGE RENDERER ---
     if (mediaType == 'system') {
@@ -1579,7 +1711,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
     final bubbleColor =
         isMe ? const Color(0xFF4CAF50) : const Color(0xFF202C33);
-
     final Color nameColor =
         isStillInGroup ? _getUserColor(senderId) : Colors.grey;
 
@@ -1604,192 +1735,196 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final bool hasCaption = content.isNotEmpty &&
         content != '📸 Photo' &&
         content != '🎥 Video' &&
+        content != '🎤 Voice Note' &&
         content.trim() != '';
     final bool isHighlighted = _highlightedMessageId == messageId;
 
-    // 🔥 THE CULPRIT IS GONE: Removed `View.of(context)` entirely.
-
-    return RepaintBoundary(
-      // GPU repaint caching
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        decoration: BoxDecoration(
-          color: isHighlighted
-              ? const Color(0xFF4CAF50).withOpacity(0.3)
-              : Colors.transparent,
+    // 🔥 FIX: RepaintBoundary completely removed here for keyboard performance
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      decoration: BoxDecoration(
+        color: isHighlighted
+            ? const Color(0xFF4CAF50).withOpacity(0.3)
+            : Colors.transparent,
+      ),
+      child: Dismissible(
+        key: Key('dismiss_$messageId'),
+        direction: DismissDirection.startToEnd,
+        confirmDismiss: (direction) {
+          _onSwipeToReply(message);
+          return Future.value(false);
+        },
+        background: Container(
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.only(left: 20),
+          child: const Icon(Icons.reply, color: Color(0xFF4CAF50), size: 24),
         ),
-        child: Dismissible(
-          key: Key('dismiss_$messageId'),
-          direction: DismissDirection.startToEnd,
-          confirmDismiss: (direction) {
-            _onSwipeToReply(message);
-            return Future.value(false);
-          },
-          background: Container(
-            alignment: Alignment.centerLeft,
-            padding: const EdgeInsets.only(left: 20),
-            child: const Icon(Icons.reply, color: Color(0xFF4CAF50), size: 24),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-            child: Row(
-              mainAxisAlignment:
-                  isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (!isMe) ...[
-                  SizedBox(
-                    width: 30,
-                    child: showAvatar
-                        ? CircleAvatar(
-                            radius: 15,
-                            backgroundImage:
-                                (avatarUrl != null && avatarUrl.isNotEmpty)
-                                    ? NetworkImage(avatarUrl)
-                                    : null,
-                            backgroundColor: isStillInGroup
-                                ? Colors.grey[800]
-                                : Colors.grey[900],
-                            child: (avatarUrl == null || avatarUrl.isEmpty)
-                                ? const Icon(Icons.person,
-                                    size: 18, color: Colors.white54)
-                                : null,
-                          )
-                        : const SizedBox.shrink(),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-                Flexible(
-                  child: GestureDetector(
-                    onLongPress: () => _showMessageOptions(message, isMe),
-                    child: Container(
-                      key: ValueKey(messageId),
-                      margin: const EdgeInsets.symmetric(
-                          vertical: 4, horizontal: 8),
-                      // 🔥 FIX 5: We now use the passed-in maxWidth, preventing the 60fps layout recalculation!
-                      constraints: BoxConstraints(maxWidth: maxWidth),
-                      decoration: BoxDecoration(
-                        color: bubbleColor,
-                        borderRadius: BorderRadius.circular(16).copyWith(
-                          bottomRight: const Radius.circular(16),
-                          topLeft: !isMe && showAvatar
-                              ? const Radius.circular(2)
-                              : const Radius.circular(16),
-                          topRight: isMe
-                              ? const Radius.circular(2)
-                              : const Radius.circular(16),
-                        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          child: Row(
+            mainAxisAlignment:
+                isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (!isMe) ...[
+                SizedBox(
+                  width: 30,
+                  child: showAvatar
+                      ? CircleAvatar(
+                          radius: 15,
+                          backgroundImage:
+                              (avatarUrl != null && avatarUrl.isNotEmpty)
+                                  ? NetworkImage(avatarUrl)
+                                  : null,
+                          backgroundColor: isStillInGroup
+                              ? Colors.grey[800]
+                              : Colors.grey[900],
+                          child: (avatarUrl == null || avatarUrl.isEmpty)
+                              ? const Icon(Icons.person,
+                                  size: 18, color: Colors.white54)
+                              : null,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: GestureDetector(
+                  onLongPress: () => _showMessageOptions(message, isMe),
+                  child: Container(
+                    key: ValueKey(messageId),
+                    margin:
+                        const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                    // 🔥 FIX: We now use the passed-in maxWidth parameter
+                    constraints: BoxConstraints(maxWidth: maxWidth),
+                    decoration: BoxDecoration(
+                      color: bubbleColor,
+                      borderRadius: BorderRadius.circular(16).copyWith(
+                        bottomRight: const Radius.circular(16),
+                        topLeft: !isMe && showAvatar
+                            ? const Radius.circular(2)
+                            : const Radius.circular(16),
+                        topRight: isMe
+                            ? const Radius.circular(2)
+                            : const Radius.circular(16),
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(16).copyWith(
-                          bottomRight: const Radius.circular(16),
-                          topLeft: !isMe && showAvatar
-                              ? const Radius.circular(2)
-                              : const Radius.circular(16),
-                          topRight: isMe
-                              ? const Radius.circular(2)
-                              : const Radius.circular(16),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (message['reply_to_id'] != null ||
-                                (message['reply_content']
-                                        ?.startsWith('Story_') ??
-                                    false))
-                              _buildReplyInsideBubble(message),
-                            if (widget.isGroup && !isMe && showAvatar)
-                              Padding(
-                                padding:
-                                    const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                                child: Text(
-                                    isStillInGroup
-                                        ? '@$senderName'
-                                        : senderName,
-                                    style: TextStyle(
-                                        color: nameColor,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                        fontStyle: isStillInGroup
-                                            ? FontStyle.normal
-                                            : FontStyle.italic)),
-                              ),
-                            if (isFile)
-                              GestureDetector(
-                                onTap: () async {
-                                  if (mediaUrls.isNotEmpty) {
-                                    final uri = Uri.parse(mediaUrls.first);
-                                    if (await canLaunchUrl(uri)) {
-                                      await launchUrl(uri,
-                                          mode: LaunchMode.externalApplication);
-                                    } else {
-                                      if (mounted)
-                                        ScaffoldMessenger.of(context)
-                                            .showSnackBar(const SnackBar(
-                                                content: Text(
-                                                    'Could not open file')));
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(16).copyWith(
+                        bottomRight: const Radius.circular(16),
+                        topLeft: !isMe && showAvatar
+                            ? const Radius.circular(2)
+                            : const Radius.circular(16),
+                        topRight: isMe
+                            ? const Radius.circular(2)
+                            : const Radius.circular(16),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (message['reply_to_id'] != null ||
+                              (message['reply_content']?.startsWith('Story_') ??
+                                  false))
+                            _buildReplyInsideBubble(message),
+                          if (widget.isGroup && !isMe && showAvatar)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                              child: Text(
+                                  isStillInGroup ? '@$senderName' : senderName,
+                                  style: TextStyle(
+                                      color: nameColor,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      fontStyle: isStillInGroup
+                                          ? FontStyle.normal
+                                          : FontStyle.italic)),
+                            ),
+                          if (isFile)
+                            GestureDetector(
+                              onTap: () async {
+                                if (mediaUrls.isNotEmpty) {
+                                  final uri = Uri.parse(mediaUrls.first);
+                                  if (await canLaunchUrl(uri)) {
+                                    await launchUrl(uri,
+                                        mode: LaunchMode.externalApplication);
+                                  } else {
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(const SnackBar(
+                                              content:
+                                                  Text('Could not open file')));
                                     }
                                   }
-                                },
-                                child: Container(
-                                  margin: const EdgeInsets.symmetric(
-                                      vertical: 4, horizontal: 8),
-                                  // 🔥 FIX 6: Also use maxWidth here for files!
-                                  constraints:
-                                      BoxConstraints(maxWidth: maxWidth),
-                                  decoration: BoxDecoration(
-                                      color: Colors.black26,
-                                      borderRadius: BorderRadius.circular(8)),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.insert_drive_file,
-                                          color: Colors.blueAccent, size: 30),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Text(
-                                          content.isNotEmpty
-                                              ? content
-                                              : 'Document',
-                                          style: const TextStyle(
-                                              color: Colors.blueAccent,
-                                              fontWeight: FontWeight.bold,
-                                              decoration:
-                                                  TextDecoration.underline),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            if (hasMedia && !isFile)
-                              Container(
+                                }
+                              },
+                              child: Container(
+                                margin: const EdgeInsets.symmetric(
+                                    vertical: 4, horizontal: 8),
+                                constraints: BoxConstraints(maxWidth: maxWidth),
                                 decoration: BoxDecoration(
-                                  border: hasCaption
-                                      ? Border(
-                                          bottom: BorderSide(
-                                              color: isMe
-                                                  ? const Color(0xFF388E3C)
-                                                  : const Color(0xFF182025),
-                                              width: 1.5))
-                                      : null,
+                                    color: Colors.black26,
+                                    borderRadius: BorderRadius.circular(8)),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.insert_drive_file,
+                                        color: Colors.blueAccent, size: 30),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        content.isNotEmpty
+                                            ? content
+                                            : 'Document',
+                                        style: const TextStyle(
+                                          color: Colors.blueAccent,
+                                          fontWeight: FontWeight.bold,
+                                          decoration: TextDecoration.underline,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                child: _buildMediaWithOverlay(mediaUrls,
-                                    mediaType, timeStr, isMe, isRead, message),
                               ),
-                            if (hasCaption || (!hasMedia && content.isNotEmpty))
-                              _buildTextAndTimestamp(
-                                  content, timeStr, isMe, isRead),
-                          ],
-                        ),
+                            ),
+                          if (isAudio && mediaUrls.isNotEmpty)
+                            AudioPlayerBubble(
+                              url: mediaUrls.first,
+                              isMe: isMe,
+                              themeColor: const Color(0xFF4CAF50),
+                              timeStr: timeStr,
+                              isRead: isRead,
+                            ),
+                          if (hasMedia && !isFile && !isAudio)
+                            Container(
+                              decoration: BoxDecoration(
+                                border: hasCaption
+                                    ? Border(
+                                        bottom: BorderSide(
+                                            color: isMe
+                                                ? const Color(0xFF388E3C)
+                                                : const Color(0xFF182025),
+                                            width: 1.5))
+                                    : null,
+                              ),
+                              child: _buildMediaWithOverlay(mediaUrls,
+                                  mediaType, timeStr, isMe, isRead, message),
+                            ),
+                          if (!isFile &&
+                              !isAudio &&
+                              (hasCaption ||
+                                  (!hasMedia && content.isNotEmpty)) &&
+                              content != '🎤 Voice Note')
+                            _buildTextAndTimestamp(
+                                content, timeStr, isMe, isRead),
+                        ],
                       ),
                     ),
                   ),
                 ),
-              ],
-            ),
+              )
+            ],
           ),
         ),
       ),
@@ -2067,89 +2202,18 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
 // --- SUB-WIDGET: TEXT & TIME (For standard bubbles) ---
-  // --- UPDATED: Text colors dynamically change based on isMe ---
   Widget _buildTextAndTimestamp(
       String content, String timeStr, bool isMe, bool isRead) {
-    final String myUsername =
-        widget.userPreferences.username?.toLowerCase() ?? '';
-
-    // Custom Parser for URLs and Mentions
-    final List<InlineSpan> spans = [];
-    final regex = RegExp(r'(https?:\/\/[^\s]+)|(@[a-zA-Z0-9_]+)');
-    final matches = regex.allMatches(content);
-
-    int lastMatchEnd = 0;
-    for (final match in matches) {
-      if (match.start > lastMatchEnd) {
-        spans.add(TextSpan(text: content.substring(lastMatchEnd, match.start)));
-      }
-      final matchText = match.group(0)!;
-      if (matchText.startsWith('@')) {
-        final isMyMention = matchText.toLowerCase() == '@$myUsername';
-        spans.add(TextSpan(
-          text: matchText,
-          style: TextStyle(
-            color: isMyMention
-                ? Colors.redAccent
-                : (isMe ? Colors.black87 : Colors.amberAccent),
-            fontWeight: FontWeight.bold,
-          ),
-        ));
-      } else {
-        // It's a URL
-        spans.add(TextSpan(
-            text: matchText,
-            style: TextStyle(
-              color: isMe ? Colors.black87 : const Color(0xFF53BDEB),
-              decoration: TextDecoration.underline,
-            ),
-            recognizer: TapGestureRecognizer()
-              ..onTap = () async {
-                final uri = Uri.parse(matchText);
-                if (await canLaunchUrl(uri))
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-              }));
-      }
-      lastMatchEnd = match.end;
-    }
-    if (lastMatchEnd < content.length) {
-      spans.add(TextSpan(text: content.substring(lastMatchEnd)));
-    }
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      child: Wrap(
-        alignment: WrapAlignment.end,
-        crossAxisAlignment: WrapCrossAlignment.end,
-        spacing: 8,
-        children: [
-          RichText(
-            text: TextSpan(
-              style: TextStyle(
-                color: isMe ? Colors.black : Colors.white,
-                fontSize: 16,
-                fontWeight: FontWeight.w500,
-              ),
-              children: spans,
-            ),
-          ),
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(timeStr,
-                  style: TextStyle(
-                      color: isMe ? Colors.black54 : Colors.white60,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w500)),
-              if (isMe) ...[
-                const SizedBox(width: 4),
-                Icon(isRead ? Icons.done_all : Icons.done,
-                    size: 14, color: isRead ? Colors.blue : Colors.black54),
-              ],
-            ],
-          ),
-        ],
-      ),
+    return ExpandableMessageText(
+      text: content,
+      timeStr: timeStr,
+      isMe: isMe,
+      isRead: isRead,
+      parentContext: context,
+      regexCache: _regexCache, // <-- Pass the cache in!
+      videoCache:
+          _chatVideoThumbCache, // <-- Pass video cache for garbage control!
+      username: widget.userPreferences.username ?? '',
     );
   }
 
@@ -2328,29 +2392,87 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   // NEW: Jumps back to the present chat
 
   Future<void> _setupMessageStream() async {
-    final prefs = await SharedPreferences.getInstance();
-    final cachedMsgs = prefs.getString('msgs_${widget.chatId}');
-
-    if (cachedMsgs != null && mounted) {
-      // SPEED FIX: Only load the first 100 into UI to prevent 5-minute freezes
-      final List<dynamic> decoded = jsonDecode(cachedMsgs);
-      setState(() {
-        _messages = List<Map<String, dynamic>>.from(decoded.take(100));
-      });
+    // ⚡ 1. BASTARD SPEED: Instant local load
+    final localMessages = await ChatLocalDB.instance
+        .getMessagesForChat(widget.chatId, limit: 100);
+    if (localMessages.isNotEmpty && mounted) {
+      setState(() => _messages = localMessages);
     }
 
-    _msgSub = supabase
-        .from('messages')
-        .stream(primaryKey: ['id'])
-        .eq('chat_id', widget.chatId)
-        .order('created_at', ascending: false)
-        .limit(100) // SPEED FIX: Stop fetching 10,000 messages at once
-        .listen((data) {
-          if (mounted) {
-            setState(() => _messages = data);
-          }
-          prefs.setString('msgs_${widget.chatId}', jsonEncode(data));
-        });
+    // 🌐 2. FAST HTTP FETCH: Catch up on missed messages instantly
+    try {
+      final serverMessages = await supabase
+          .from('messages')
+          .select()
+          .eq('chat_id', widget.chatId)
+          .order('created_at', ascending: false)
+          .limit(100);
+
+      if (mounted) setState(() => _messages = serverMessages);
+      await ChatLocalDB.instance.cacheMessages(widget.chatId, serverMessages);
+    } catch (e) {
+      debugPrint("HTTP fetch error: $e");
+    }
+
+    // 🚀 3. WHATSAPP-SPEED WEBSOCKETS: Listen for instant live updates
+    _realtimeChannel = supabase
+        .channel('public:messages:${widget.chatId}')
+        .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'messages',
+            filter: PostgresChangeFilter(
+                type: PostgresChangeFilterType.eq,
+                column: 'chat_id',
+                value: widget.chatId),
+            callback: (payload) {
+              if (!mounted) return;
+
+              if (payload.eventType == PostgresChangeEvent.insert) {
+                final newMsg = payload.newRecord;
+                setState(() {
+                  // 🔥 FIX 4: OPTIMISTIC UI DUPLICATE KILLER
+                  final myId = supabase.auth.currentUser?.id;
+                  final isMe = newMsg['sender_id'] == myId;
+
+                  int existingIdx = -1;
+                  if (isMe) {
+                    // Look for the "fake" message we inserted when we tapped send
+                    existingIdx = _messages.indexWhere((m) =>
+                        m['sender_id'] == myId &&
+                        m['content'] == newMsg['content'] &&
+                        (m['id'].toString() == newMsg['id'].toString() ||
+                            m['id'].toString().length > 10));
+                  } else {
+                    existingIdx = _messages.indexWhere(
+                        (m) => m['id'].toString() == newMsg['id'].toString());
+                  }
+
+                  if (existingIdx != -1) {
+                    // Swap the fake message for the real one
+                    _messages[existingIdx] = newMsg;
+                  } else {
+                    // It's a completely new message from someone else
+                    _messages.insert(0, newMsg);
+                  }
+                });
+                ChatLocalDB.instance.cacheMessages(widget.chatId, [newMsg]);
+              } else if (payload.eventType == PostgresChangeEvent.update) {
+                final updatedMsg = payload.newRecord;
+                setState(() {
+                  final idx = _messages.indexWhere(
+                      (m) => m['id'].toString() == updatedMsg['id'].toString());
+                  if (idx != -1) _messages[idx] = updatedMsg;
+                });
+                ChatLocalDB.instance.cacheMessages(widget.chatId, [updatedMsg]);
+              } else if (payload.eventType == PostgresChangeEvent.delete) {
+                final deletedId = payload.oldRecord['id'].toString();
+                setState(() {
+                  _messages.removeWhere((m) => m['id'].toString() == deletedId);
+                });
+              }
+            })
+        .subscribe();
   }
 
   @override
@@ -2358,9 +2480,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     if (activeChatId == widget.chatId) {
       activeChatId = null;
     }
-    _msgSub?.cancel();
+    _realtimeChannel?.unsubscribe();
     _scrollController.removeListener(_scrollListener);
-    _memberSearchController.dispose();
+    _memberSearchController.dispose(); // <-- Unique to ChatRoomScreen
     _typingTimer?.cancel();
     _remoteTypingTimer?.cancel();
 
@@ -2375,22 +2497,25 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     _messageController.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
+    _audioRecorder.dispose();
+    _recordTimer?.cancel();
     super.dispose();
   }
 
-  // --- REPLACE YOUR BUILD METHOD WITH THIS (Uses cached _messages) ---
   @override
   Widget build(BuildContext context) {
-    // 🔥 FIX 1: Calculate max width exactly ONCE per screen build, protecting the chat bubbles from keyboard resizes!
     final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: _buildAppBar(),
-      body: SafeArea(
-        child: Column(
-          children: [
-            Expanded(
+      // 🔥 FIX: Removed SafeArea from body. Scaffold automatically avoids the keyboard.
+      body: Column(
+        children: [
+          Expanded(
+            child: GestureDetector(
+              // 🔥 FIX: Tapping the chat background instantly closes the keyboard smoothly
+              onTap: () => FocusScope.of(context).unfocus(),
               child: Stack(
                 children: [
                   _messages.isEmpty
@@ -2403,10 +2528,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                       : ListView.builder(
                           controller: _scrollController,
                           reverse: true,
-                          // 🔥 FIX 2: Removed cacheExtent to stop the RAM explosion leak!
-                          addRepaintBoundaries:
-                              true, // Cache render layer compilations on GPU
-                          addAutomaticKeepAlives: true, // Retain state memory
+                          // 🔥 FIX: TURNED OFF REPAINT BOUNDARIES to free up massive GPU memory
+                          addRepaintBoundaries: false,
+                          addAutomaticKeepAlives: false,
+                          // 🔥 FIX: Let Flutter handle dismissing naturally when you swipe down
                           keyboardDismissBehavior:
                               ScrollViewKeyboardDismissBehavior.onDrag,
                           padding: const EdgeInsets.all(12),
@@ -2441,7 +2566,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                                               fontSize: 12)),
                                     ),
                                   ),
-                                // 🔥 FIX 3: Pass the pre-calculated width down!
                                 _buildBubble(_messages, index, maxBubbleWidth),
                               ],
                             );
@@ -2463,9 +2587,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                 ],
               ),
             ),
-            _buildInputBar(),
-          ],
-        ),
+          ),
+          // 🔥 FIX: We only put the SafeArea around the input bar to protect it from the iPhone Home bar!
+          _buildInputBar(),
+        ],
       ),
     );
   }
@@ -2484,48 +2609,125 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              IconButton(
-                icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
-                onPressed: _showPlusOptions,
-              ),
-              Expanded(
-                child: TextField(
-                  controller: _messageController,
-                  focusNode: _focusNode,
-                  style: const TextStyle(color: Colors.white),
-                  maxLines: 5,
-                  minLines: 1,
-                  textInputAction: TextInputAction.newline,
-                  keyboardType: TextInputType.multiline,
-                  // --- FIX: Using the proper _handleTyping method! ---
-                  onChanged: _handleTyping,
-                  decoration: InputDecoration(
-                    hintText: 'Message...',
-                    hintStyle: const TextStyle(color: Colors.white54),
-                    filled: true,
-                    fillColor: const Color(0xFF1C1C1E),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                  ),
+              // Hide the '+' button while recording to save space
+              if (!_isRecording)
+                IconButton(
+                  icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
+                  onPressed: _showPlusOptions,
                 ),
+
+              Expanded(
+                child: _isRecording
+                    ? Container(
+                        height: 48,
+                        margin: const EdgeInsets.only(bottom: 2),
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1C1C1E),
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: Row(
+                          children: [
+                            // 🔴 CANCEL BUTTON
+                            GestureDetector(
+                              onTap: () {
+                                _recordTimer?.cancel();
+                                _audioRecorder.stop();
+                                setState(() => _isRecording = false);
+                                HapticFeedback.vibrate();
+                              },
+                              child: const Icon(Icons.delete,
+                                  color: Colors.redAccent, size: 26),
+                            ),
+                            const SizedBox(width: 12),
+                            Text("Recording: $_recordDuration",
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold)),
+                            const Spacer(),
+                            const Text("Tap to send ->",
+                                style: TextStyle(
+                                    color: Colors.white38, fontSize: 12)),
+                          ],
+                        ),
+                      )
+                    : TextField(
+                        controller: _messageController,
+                        focusNode: _focusNode,
+                        style: const TextStyle(color: Colors.white),
+                        maxLines: 5,
+                        minLines: 1,
+                        textInputAction: TextInputAction.newline,
+                        keyboardType: TextInputType.multiline,
+                        onChanged: _handleTyping,
+                        decoration: InputDecoration(
+                          hintText: 'Message...',
+                          hintStyle: const TextStyle(color: Colors.white54),
+                          filled: true,
+                          fillColor: const Color(0xFF1C1C1E),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 10),
+                        ),
+                      ),
               ),
-              ValueListenableBuilder<TextEditingValue>(
+
+              // THE MAGIC BUTTON (Swaps between Send and Mic)
+              if (_isRecording)
+                // 🟢 EXPLICIT SEND BUTTON FOR VOICE NOTES
+                GestureDetector(
+                  onTap: () {
+                    HapticFeedback.lightImpact();
+                    _stopAndSendRecording();
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.only(left: 8, bottom: 4),
+                    padding: const EdgeInsets.all(10),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF4CAF50),
+                      shape: BoxShape.circle,
+                    ),
+                    child:
+                        const Icon(Icons.send, color: Colors.black, size: 24),
+                  ),
+                )
+              else
+                ValueListenableBuilder<TextEditingValue>(
                   valueListenable: _messageController,
                   builder: (context, value, child) {
-                    return IconButton(
-                      icon: Icon(Icons.send,
-                          color: value.text.trim().isNotEmpty
-                              ? const Color(0xFF4CAF50)
-                              : Colors.grey),
-                      onPressed: value.text.trim().isNotEmpty
-                          ? () => _sendMessage()
-                          : null,
-                    );
-                  }),
+                    final hasText = value.text.trim().isNotEmpty;
+
+                    if (hasText) {
+                      // SHOW SEND TEXT BUTTON
+                      return IconButton(
+                        icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
+                        onPressed: () => _sendMessage(),
+                      );
+                    } else {
+                      // 🎤 TAP TO RECORD BUTTON (Web Safe)
+                      return GestureDetector(
+                        onTap: () {
+                          HapticFeedback.heavyImpact();
+                          _startRecording();
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(left: 8, bottom: 4),
+                          padding: const EdgeInsets.all(10),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF4CAF50),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.mic,
+                              color: Colors.black, size: 24),
+                        ),
+                      );
+                    }
+                  },
+                ),
             ],
           ),
         ],
@@ -2685,5 +2887,376 @@ class _CachedLinkifyState extends State<CachedLinkify> {
   @override
   Widget build(BuildContext context) {
     return _cachedWidget;
+  }
+}
+
+// =========================================================================
+// EXPANDABLE TEXT WIDGET (With Bastard Speed Caching & Garbage Control)
+// =========================================================================
+class ExpandableMessageText extends StatefulWidget {
+  final String text;
+  final String timeStr;
+  final bool isMe;
+  final bool isRead;
+  final BuildContext parentContext;
+  final Map<String, List<InlineSpan>> regexCache;
+  final Map<String, Uint8List> videoCache;
+  final String username;
+
+  const ExpandableMessageText({
+    super.key,
+    required this.text,
+    required this.timeStr,
+    required this.isMe,
+    required this.isRead,
+    required this.parentContext,
+    required this.regexCache,
+    required this.videoCache,
+    required this.username,
+  });
+
+  @override
+  State<ExpandableMessageText> createState() => _ExpandableMessageTextState();
+}
+
+class _ExpandableMessageTextState extends State<ExpandableMessageText> {
+  bool _isExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    const int limit = 400; // Character limit before truncation
+    final bool isLong = widget.text.length > limit;
+    final String displayText = (isLong && !_isExpanded)
+        ? '${widget.text.substring(0, limit)}...'
+        : widget.text;
+
+    // --- ⚡ BASTARD SPEED CACHE LOGIC ---
+    final cacheKey = "${widget.isMe}_$displayText";
+    List<InlineSpan> spans;
+
+    if (widget.regexCache.containsKey(cacheKey)) {
+      spans = widget.regexCache[cacheKey]!;
+    } else {
+      spans = [];
+      final regex = RegExp(r'(https?:\/\/[^\s]+)|(@[a-zA-Z0-9_]+)');
+      final matches = regex.allMatches(displayText);
+
+      int lastMatchEnd = 0;
+      for (final match in matches) {
+        if (match.start > lastMatchEnd) {
+          spans.add(
+              TextSpan(text: displayText.substring(lastMatchEnd, match.start)));
+        }
+        final matchText = match.group(0)!;
+        if (matchText.startsWith('@')) {
+          final isMyMention =
+              matchText.toLowerCase() == '@${widget.username.toLowerCase()}';
+          spans.add(TextSpan(
+            text: matchText,
+            style: TextStyle(
+              color: isMyMention
+                  ? Colors.redAccent
+                  : (widget.isMe ? Colors.black87 : Colors.amberAccent),
+              fontWeight: FontWeight.bold,
+            ),
+          ));
+        } else {
+          spans.add(TextSpan(
+              text: matchText,
+              style: TextStyle(
+                color: widget.isMe ? Colors.black87 : const Color(0xFF53BDEB),
+                decoration: TextDecoration.underline,
+              ),
+              recognizer: TapGestureRecognizer()
+                ..onTap = () async {
+                  final uri = Uri.parse(matchText);
+                  if (matchText.contains('allowanceapp.org/gist/')) {
+                    final gistId = uri.pathSegments.last;
+                    Navigator.pushNamed(widget.parentContext, '/gist',
+                        arguments: {'id': gistId});
+                  } else if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
+                }));
+        }
+        lastMatchEnd = match.end;
+      }
+      if (lastMatchEnd < displayText.length) {
+        spans.add(TextSpan(text: displayText.substring(lastMatchEnd)));
+      }
+
+      widget.regexCache[cacheKey] = spans;
+
+      // 🧹 GARBAGE CONTROL: Prevents RAM explosion
+      if (widget.regexCache.length > 200) widget.regexCache.clear();
+      if (widget.videoCache.length > 30) widget.videoCache.clear();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Wrap(
+        alignment: WrapAlignment.end,
+        crossAxisAlignment: WrapCrossAlignment.end,
+        spacing: 8,
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min, // Keeps it inline if text is short
+            children: [
+              // 🔥 NO MORE LINKIFY. IT JUST RENDERS THE CACHE INSTANTLY.
+              RichText(
+                text: TextSpan(
+                  style: TextStyle(
+                    color: widget.isMe ? Colors.black : Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  children: spans,
+                ),
+              ),
+              if (isLong && !_isExpanded)
+                GestureDetector(
+                  onTap: () => setState(() => _isExpanded = true),
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 8.0, bottom: 2.0),
+                    child: Text(
+                      'Read more',
+                      style: TextStyle(
+                        color: widget.isMe
+                            ? Colors.black54
+                            : const Color(0xFF4CAF50),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                widget.timeStr,
+                style: TextStyle(
+                  color: widget.isMe ? Colors.black54 : Colors.white60,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              if (widget.isMe) ...[
+                const SizedBox(width: 4),
+                Icon(
+                  widget.isRead ? Icons.done_all : Icons.done,
+                  size: 14,
+                  color: widget.isRead ? Colors.blue : Colors.black54,
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =========================================================================
+// LAZY-LOADED WHATSAPP-STYLE AUDIO PLAYER (Zero Lag)
+// =========================================================================
+class AudioPlayerBubble extends StatefulWidget {
+  final String url;
+  final bool isMe;
+  final Color themeColor;
+  final String timeStr;
+  final bool isRead;
+
+  const AudioPlayerBubble({
+    super.key,
+    required this.url,
+    required this.isMe,
+    required this.themeColor,
+    required this.timeStr,
+    required this.isRead,
+  });
+
+  @override
+  State<AudioPlayerBubble> createState() => _AudioPlayerBubbleState();
+}
+
+class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isPlaying = false;
+  bool _isLoaded = false;
+  bool _isLoading = false;
+  Duration _duration = Duration.zero;
+  Duration _position = Duration.zero;
+
+  @override
+  void dispose() {
+    _audioPlayer.dispose();
+    super.dispose();
+  }
+
+  // 🔥 THE FIX: Only connect to the audio file if the user actually taps Play!
+  Future<void> _togglePlay() async {
+    if (_isPlaying) {
+      await _audioPlayer.pause();
+      return;
+    }
+
+    if (!_isLoaded) {
+      setState(() => _isLoading = true);
+      try {
+        await _audioPlayer.setUrl(widget.url);
+        _audioPlayer.playerStateStream.listen((state) {
+          if (mounted) {
+            setState(() {
+              _isPlaying = state.playing;
+              if (state.processingState == ProcessingState.completed) {
+                _isPlaying = false;
+                _audioPlayer.seek(Duration.zero);
+                _audioPlayer.pause();
+              }
+            });
+          }
+        });
+        _audioPlayer.durationStream.listen((d) {
+          if (mounted && d != null) setState(() => _duration = d);
+        });
+        _audioPlayer.positionStream.listen((p) {
+          if (mounted) setState(() => _position = p);
+        });
+        _isLoaded = true;
+      } catch (e) {
+        debugPrint("Audio load error: $e");
+      }
+      if (mounted) setState(() => _isLoading = false);
+    }
+
+    await _audioPlayer.play();
+  }
+
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return "$minutes:$seconds";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 250,
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              GestureDetector(
+                onTap: _isLoading ? null : _togglePlay,
+                child: _isLoading
+                    ? SizedBox(
+                        width: 38,
+                        height: 38,
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: CircularProgressIndicator(
+                              color: widget.isMe
+                                  ? Colors.black
+                                  : widget.themeColor,
+                              strokeWidth: 2),
+                        ))
+                    : Icon(
+                        _isPlaying
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_fill,
+                        color: widget.isMe ? Colors.black87 : widget.themeColor,
+                        size: 38,
+                      ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SliderTheme(
+                  data: SliderThemeData(
+                    trackHeight: 3,
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 6),
+                    overlayShape:
+                        const RoundSliderOverlayShape(overlayRadius: 10),
+                    activeTrackColor:
+                        widget.isMe ? Colors.black87 : widget.themeColor,
+                    inactiveTrackColor:
+                        widget.isMe ? Colors.black26 : Colors.white24,
+                    thumbColor: widget.isMe ? Colors.black : widget.themeColor,
+                  ),
+                  child: Slider(
+                    min: 0,
+                    max: _duration.inMilliseconds > 0
+                        ? _duration.inMilliseconds.toDouble()
+                        : 1.0,
+                    value: _position.inMilliseconds.toDouble().clamp(
+                        0.0,
+                        _duration.inMilliseconds > 0
+                            ? _duration.inMilliseconds.toDouble()
+                            : 1.0),
+                    onChanged: (val) {
+                      if (_isLoaded)
+                        _audioPlayer.seek(Duration(milliseconds: val.toInt()));
+                    },
+                  ),
+                ),
+              ),
+              CircleAvatar(
+                radius: 16,
+                backgroundColor:
+                    widget.isMe ? Colors.black12 : Colors.grey[800],
+                child: Icon(Icons.mic,
+                    size: 16,
+                    color: widget.isMe ? Colors.black54 : Colors.white54),
+              )
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(left: 48),
+                child: Text(
+                  _isLoaded
+                      ? _formatDuration(
+                          _position.inSeconds > 0 ? _position : _duration)
+                      : "Voice Note",
+                  style: TextStyle(
+                    color: widget.isMe ? Colors.black54 : Colors.white60,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Text(
+                    widget.timeStr,
+                    style: TextStyle(
+                      color: widget.isMe ? Colors.black54 : Colors.white60,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (widget.isMe) ...[
+                    const SizedBox(width: 4),
+                    Icon(
+                      widget.isRead ? Icons.done_all : Icons.done,
+                      size: 14,
+                      color: widget.isRead ? Colors.blue : Colors.black54,
+                    ),
+                  ],
+                ],
+              )
+            ],
+          )
+        ],
+      ),
+    );
   }
 }
