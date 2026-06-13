@@ -66,7 +66,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   String? _highlightedMessageId;
   Map<String, dynamic>? _pendingOrder;
   List<Map<String, dynamic>> _messages = [];
-  RealtimeChannel? _realtimeChannel;
+  StreamSubscription? _msgSub;
 
   // 🔥 FIX: Added the missing Video Cache and removed the duplicate colors map
   final Map<String, Uint8List> _chatVideoThumbCache = {};
@@ -275,87 +275,37 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   Future<void> _setupMessageStream() async {
-    // ⚡ 1. BASTARD SPEED: Instant local load
+    // ⚡ 1. BASTARD SPEED: Instant local load from phone storage
     final localMessages = await ChatLocalDB.instance
         .getMessagesForChat(widget.chatId, limit: 100);
     if (localMessages.isNotEmpty && mounted) {
       setState(() => _messages = localMessages);
     }
 
-    // 🌐 2. FAST HTTP FETCH: Catch up on missed messages instantly
-    try {
-      final serverMessages = await supabase
-          .from('messages')
-          .select()
-          .eq('chat_id', widget.chatId)
-          .order('created_at', ascending: false)
-          .limit(100);
+    // 🚀 2. NATIVE SUPABASE WEBSOCKETS (Flawless Real-Time)
+    _msgSub?.cancel();
+    _msgSub = supabase
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('chat_id', widget.chatId)
+        .order('created_at', ascending: false)
+        .limit(100)
+        .listen((data) async {
+          if (mounted) {
+            setState(() {
+              // Keep fake optimistic messages (which have huge millisecond IDs) until server confirms them
+              final pendingMsgs = _messages
+                  .where((m) =>
+                      m['id'].toString().length > 10 &&
+                      !data.any((d) => d['content'] == m['content']))
+                  .toList();
 
-      if (mounted) setState(() => _messages = serverMessages);
-      await ChatLocalDB.instance.cacheMessages(widget.chatId, serverMessages);
-    } catch (e) {
-      debugPrint("HTTP fetch error: $e");
-    }
-
-    // 🚀 3. WHATSAPP-SPEED WEBSOCKETS: Listen for instant live updates
-    _realtimeChannel = supabase
-        .channel('public:messages:${widget.chatId}')
-        .onPostgresChanges(
-            event: PostgresChangeEvent.all,
-            schema: 'public',
-            table: 'messages',
-            filter: PostgresChangeFilter(
-                type: PostgresChangeFilterType.eq,
-                column: 'chat_id',
-                value: widget.chatId),
-            callback: (payload) {
-              if (!mounted) return;
-
-              if (payload.eventType == PostgresChangeEvent.insert) {
-                final newMsg = payload.newRecord;
-                setState(() {
-                  // 🔥 FIX 4: OPTIMISTIC UI DUPLICATE KILLER
-                  final myId = supabase.auth.currentUser?.id;
-                  final isMe = newMsg['sender_id'] == myId;
-
-                  int existingIdx = -1;
-                  if (isMe) {
-                    // Look for the "fake" message we inserted when we tapped send
-                    existingIdx = _messages.indexWhere((m) =>
-                        m['sender_id'] == myId &&
-                        m['content'] == newMsg['content'] &&
-                        (m['id'].toString() == newMsg['id'].toString() ||
-                            m['id'].toString().length > 10));
-                  } else {
-                    existingIdx = _messages.indexWhere(
-                        (m) => m['id'].toString() == newMsg['id'].toString());
-                  }
-
-                  if (existingIdx != -1) {
-                    // Swap the fake message for the real one
-                    _messages[existingIdx] = newMsg;
-                  } else {
-                    // It's a completely new message from someone else
-                    _messages.insert(0, newMsg);
-                  }
-                });
-                ChatLocalDB.instance.cacheMessages(widget.chatId, [newMsg]);
-              } else if (payload.eventType == PostgresChangeEvent.update) {
-                final updatedMsg = payload.newRecord;
-                setState(() {
-                  final idx = _messages.indexWhere(
-                      (m) => m['id'].toString() == updatedMsg['id'].toString());
-                  if (idx != -1) _messages[idx] = updatedMsg;
-                });
-                ChatLocalDB.instance.cacheMessages(widget.chatId, [updatedMsg]);
-              } else if (payload.eventType == PostgresChangeEvent.delete) {
-                final deletedId = payload.oldRecord['id'].toString();
-                setState(() {
-                  _messages.removeWhere((m) => m['id'].toString() == deletedId);
-                });
-              }
-            })
-        .subscribe();
+              _messages = [...pendingMsgs, ...data];
+            });
+          }
+          // 💾 3. Save new messages back to local database off the main UI thread
+          await ChatLocalDB.instance.cacheMessages(widget.chatId, data);
+        });
   }
 
   Future<void> _markMessagesAsRead() async {
@@ -719,7 +669,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     if (activeChatId == widget.chatId) {
       activeChatId = null;
     }
-    _realtimeChannel?.unsubscribe();
+    _msgSub?.cancel();
     _scrollController.removeListener(_scrollListener);
     _typingTimer?.cancel();
     _remoteTypingTimer?.cancel();

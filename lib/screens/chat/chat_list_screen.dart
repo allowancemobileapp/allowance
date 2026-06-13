@@ -27,10 +27,14 @@ class _ChatListScreenState extends State<ChatListScreen>
   final TextEditingController _searchController = TextEditingController();
   final supabase = Supabase.instance.client;
 
-  // --- Highly Optimized State Variables ---
-  RealtimeChannel? _listChannel;
+  StreamSubscription? _participantsSub;
+  StreamSubscription? _chatsSub;
+  StreamSubscription? _followersSub;
+  StreamSubscription? _allParticipantsSub;
+  StreamSubscription? _unreadSub;
 
   List<Map<String, dynamic>> _chats = [];
+
   Set<String> _followingIds = {};
   List<Map<String, dynamic>> _allParticipants = [];
   List<Map<String, dynamic>> _unreadMessages = [];
@@ -102,25 +106,70 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   // Set up streams ONCE so the app doesn't freeze when typing in search
-  // --- 🚀 FAST WEBSOCKET CHANNEL ---
   void _setupStreams() {
-    // 1. Fetch everything instantly in parallel
+    // 1. Fetch initial data instantly
     _fetchLatestData();
 
-    // 2. Open ONE single WebSocket tunnel for real-time bumps
-    _listChannel?.unsubscribe();
-    _listChannel = supabase
-        .channel('global_chat_list_updates')
-        .onPostgresChanges(
-            event: PostgresChangeEvent.all,
-            schema: 'public',
-            table: 'messages',
-            callback: (payload) {
-              // A message was sent, read, or deleted anywhere.
-              // Just quickly refresh our data in the background to bump the chat and update unread counts!
-              _fetchLatestData();
-            })
-        .subscribe();
+    final myId = _myId!;
+
+    // 2. Real-time Unread Messages Stream (Fast & Native)
+    _unreadSub?.cancel();
+    _unreadSub = supabase
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('is_read', false)
+        .listen((msgs) {
+          if (mounted) setState(() => _unreadMessages = msgs);
+        });
+
+    // 3. Real-time Followers Stream (Fixes the unused variable warning!)
+    _followersSub?.cancel();
+    _followersSub = supabase
+        .from('followers')
+        .stream(primaryKey: ['follower_id', 'following_id'])
+        .eq('follower_id', myId)
+        .listen((folls) async {
+          if (mounted) {
+            setState(() {
+              _followingIds =
+                  folls.map((f) => f['following_id'].toString()).toSet();
+            });
+          }
+          final prefs = await SharedPreferences.getInstance();
+          prefs.setString(
+              'cached_folls_$myId', jsonEncode(_followingIds.toList()));
+        });
+
+    // 4. Real-time Chat & Participants Stream
+    _participantsSub?.cancel();
+    _participantsSub = supabase
+        .from('chat_participants')
+        .stream(primaryKey: ['chat_id', 'user_id'])
+        .eq('user_id', myId)
+        .listen((records) {
+          // 🔥 FIX: Cast to Object to satisfy Supabase strict typing
+          final myChatIds = records.map((p) => p['chat_id'] as Object).toList();
+
+          if (myChatIds.isEmpty) return;
+
+          _chatsSub?.cancel();
+          _chatsSub = supabase
+              .from('chats')
+              .stream(primaryKey: ['id'])
+              .inFilter('id', myChatIds)
+              .listen((chats) {
+                if (mounted) setState(() => _chats = chats);
+              });
+
+          _allParticipantsSub?.cancel();
+          _allParticipantsSub = supabase
+              .from('chat_participants')
+              .stream(primaryKey: ['chat_id', 'user_id'])
+              .inFilter('chat_id', myChatIds)
+              .listen((parts) {
+                if (mounted) setState(() => _allParticipants = parts);
+              });
+        });
   }
 
   // --- ⚡ LIGHTNING FAST PARALLEL FETCH ---
@@ -189,7 +238,11 @@ class _ChatListScreenState extends State<ChatListScreen>
   @override
   void dispose() {
     _pageController.dispose();
-    _listChannel?.unsubscribe(); // <-- CHANGED THIS
+    _participantsSub?.cancel();
+    _chatsSub?.cancel();
+    _followersSub?.cancel();
+    _allParticipantsSub?.cancel();
+    _unreadSub?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -800,11 +853,9 @@ class _ChatTileState extends State<_ChatTile> {
                   ],
                 ),
               ),
-              Text(_localIsTyping ? "typing..." : _cachedLastMessageTime,
-                  style: TextStyle(
-                      color:
-                          _localIsTyping ? widget.themeColor : Colors.white54,
-                      fontSize: 12)),
+              // 🔥 FIX: Time is ALWAYS the time. It never changes to "typing"
+              Text(_cachedLastMessageTime,
+                  style: const TextStyle(color: Colors.white54, fontSize: 12)),
             ],
           ),
           subtitle: Row(
@@ -819,6 +870,7 @@ class _ChatTileState extends State<_ChatTile> {
                           style: TextStyle(
                               color: widget.themeColor.withOpacity(0.7),
                               fontSize: 12)),
+                    // 🔥 FIX: "typing..." only shows up here in the subtitle!
                     Text(_localIsTyping ? "typing..." : _cachedLastMessage,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -826,6 +878,9 @@ class _ChatTileState extends State<_ChatTile> {
                             color: _localIsTyping
                                 ? widget.themeColor
                                 : Colors.white54,
+                            fontStyle: _localIsTyping
+                                ? FontStyle.italic
+                                : FontStyle.normal,
                             fontSize: 14)),
                   ],
                 ),
