@@ -1,8 +1,10 @@
 // lib/screens/home/media_editor_screen.dart
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/video_trimmer_screen.dart'; // Ensure this exists
+import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -31,6 +33,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   final TextEditingController _captionController = TextEditingController();
   late XFile _currentFile;
   late Color themeColor;
+  static bool cancelUploadFlag = false;
   VideoPlayerController? _videoController;
 
   @override
@@ -74,30 +77,41 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   // EDITING METHODS (Mobile Only)
   // =====================================
   Future<void> _cropImage() async {
-    if (kIsWeb) return; // Cropping requires complex web setup, disable for now
+    // 🔥 FIX: Enabled for Web! image_cropper_for_web will handle this safely.
+    try {
+      final croppedFile = await ImageCropper().cropImage(
+        sourcePath: _currentFile.path,
+        uiSettings: [
+          AndroidUiSettings(
+            toolbarTitle: 'Crop Image',
+            toolbarColor: const Color(0xFF121212),
+            toolbarWidgetColor: themeColor,
+            initAspectRatio: CropAspectRatioPreset.original,
+            lockAspectRatio: false,
+          ),
+          IOSUiSettings(title: 'Crop Image'),
+          WebUiSettings(
+            context: context,
+            presentStyle: WebPresentStyle.dialog,
+          ),
+        ],
+      );
 
-    final croppedFile = await ImageCropper().cropImage(
-      sourcePath: _currentFile.path,
-      uiSettings: [
-        AndroidUiSettings(
-          toolbarTitle: 'Crop Image',
-          toolbarColor: Color(0xFF121212),
-          toolbarWidgetColor: themeColor,
-          initAspectRatio: CropAspectRatioPreset.original,
-          lockAspectRatio: false,
-        ),
-        IOSUiSettings(title: 'Crop Image'),
-      ],
-    );
-
-    if (croppedFile != null) {
-      setState(() => _currentFile = XFile(croppedFile.path));
-      _prepareMedia();
+      if (croppedFile != null) {
+        setState(() => _currentFile = XFile(croppedFile.path));
+        _prepareMedia();
+      }
+    } catch (e) {
+      debugPrint("Crop error: $e");
     }
   }
 
   Future<void> _trimVideo() async {
-    if (kIsWeb) return; // video_trimmer package does not support web
+    if (kIsWeb) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Video trimming on Web is coming soon!')));
+      return;
+    }
 
     final String? trimmedPath = await Navigator.push(
       context,
@@ -113,61 +127,95 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   }
 
   // =====================================
-  // BACKGROUND POSTING WITH COMPRESSION
+  // GLOBAL BACKGROUND POSTING
   // =====================================
   void _startBackgroundUpload() async {
+    cancelUploadFlag = false;
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser!.id;
     final caption = _captionController.text.trim();
     final isVideo = widget.isVideo;
+    final currentPath = _currentFile.path;
 
-    // 1. Close the screen immediately so user isn't stuck waiting
+    ProfileScreen.pendingMomentUpload.value = {
+      'local_path': currentPath,
+      'is_video': isVideo,
+      'progress': 0.05,
+    };
+
     Navigator.pop(context);
 
-    // 2. Show loading snackbar
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Compressing and uploading... 🚀'),
-        duration: Duration(seconds: 4),
-      ),
-    );
+    final progressTimer =
+        Timer.periodic(const Duration(milliseconds: 400), (timer) {
+      if (cancelUploadFlag) {
+        timer.cancel();
+        return;
+      }
+      final current = ProfileScreen.pendingMomentUpload.value;
+      if (current != null && current['progress'] != null) {
+        double currentProg = current['progress'];
+        if (currentProg < 0.90) {
+          ProfileScreen.pendingMomentUpload.value = {
+            ...current,
+            'progress': currentProg + 0.05
+          };
+        }
+      }
+    });
 
     try {
       final extension = isVideo ? '.mp4' : '.jpg';
-      final fileName = '${DateTime.now().millisecondsSinceEpoch}$extension';
+      final baseFileName = '${DateTime.now().millisecondsSinceEpoch}';
+      final fileName = '$baseFileName$extension';
+      final hdFileName =
+          '${baseFileName}_hd$extension'; // 🔥 NEW: The secret HD file
 
-      Uint8List bytes;
+      Uint8List fastBytes;
 
+      // 🔥 YOUTUBE ARCHITECTURE: Compress a super fast SD video for instant loading
       if (isVideo && !kIsWeb) {
-        // --- WHATSAPP-STYLE AGGRESSIVE VIDEO COMPRESSION ---
         final info = await VideoCompress.compressVideo(
-          _currentFile.path,
-          quality:
-              VideoQuality.MediumQuality, // Drops 100MB to ~5MB (720p/480p)
+          currentPath,
+          quality: VideoQuality
+              .LowQuality, // Drops quality heavily for blazing fast loads!
           deleteOrigin: false,
           includeAudio: true,
         );
-
-        if (info != null && info.file != null) {
-          bytes = await info.file!.readAsBytes();
-        } else {
-          bytes =
-              await _currentFile.readAsBytes(); // Fallback if compression fails
-        }
+        fastBytes = (info != null && info.file != null)
+            ? await info.file!.readAsBytes()
+            : await _currentFile.readAsBytes();
       } else {
-        bytes = await _currentFile.readAsBytes();
+        fastBytes = await _currentFile.readAsBytes();
       }
 
+      if (cancelUploadFlag) throw 'Cancelled by user';
+
+      // 1. Upload the Fast SD version
       await supabase.storage.from('memories-bucket').uploadBinary(
             fileName,
-            bytes,
+            fastBytes,
             fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
           );
+
+      // 2. Silently upload the raw HD version in the background! (Won't delay the user)
+      if (isVideo) {
+        final hdBytes = await _currentFile.readAsBytes();
+        supabase.storage
+            .from('memories-bucket')
+            .uploadBinary(
+              hdFileName,
+              hdBytes,
+              fileOptions:
+                  const FileOptions(cacheControl: '3600', upsert: false),
+            )
+            .catchError((_) {}); // Ignore background errors for HD
+      }
+
+      if (cancelUploadFlag) throw 'Cancelled by user';
 
       final publicUrl =
           supabase.storage.from('memories-bucket').getPublicUrl(fileName);
 
-      // Save to 'moments' table (since you renamed it from memories)
       await supabase.from('moments').insert({
         'user_id': userId,
         'media_url': publicUrl,
@@ -176,32 +224,19 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
         'created_at': DateTime.now().toUtc().toIso8601String(),
       });
 
-      // 4. Show success message
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✅ Moment posted successfully!'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+      ProfileScreen.pendingMomentUpload.value = {
+        ...ProfileScreen.pendingMomentUpload.value!,
+        'progress': 1.0
+      };
     } catch (e) {
-      debugPrint('Background Upload error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content:
-                Text('❌ Could not post moment. Please check your connection.'),
-            backgroundColor: Colors.redAccent,
-            duration: Duration(seconds: 4),
-          ),
-        );
-      }
+      debugPrint('Upload Error/Cancelled: $e');
     } finally {
-      // Clear compressor cache to save user's phone storage!
-      if (isVideo && !kIsWeb) {
-        VideoCompress.deleteAllCache();
-      }
+      progressTimer.cancel();
+      if (isVideo && !kIsWeb) VideoCompress.deleteAllCache();
+
+      Future.delayed(const Duration(milliseconds: 500), () {
+        ProfileScreen.pendingMomentUpload.value = null;
+      });
     }
   }
 
@@ -226,28 +261,26 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Color(0xFF121212),
+      backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Color(0xFF121212),
+        backgroundColor: const Color(0xFF121212),
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.close, color: Colors.white),
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
-          // Show Crop icon for images, Scissor icon for videos (Mobile only)
-          if (!kIsWeb) ...[
-            if (!widget.isVideo)
-              IconButton(
-                icon: const Icon(Icons.crop, color: Colors.white),
-                onPressed: _cropImage,
-              )
-            else
-              IconButton(
-                icon: const Icon(Icons.content_cut, color: Colors.white),
-                onPressed: _trimVideo,
-              ),
-          ],
+          // 🔥 FIX: Removed `if (!kIsWeb)` so the buttons show everywhere!
+          if (!widget.isVideo)
+            IconButton(
+              icon: const Icon(Icons.crop, color: Colors.white),
+              onPressed: _cropImage,
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.content_cut, color: Colors.white),
+              onPressed: _trimVideo,
+            ),
         ],
       ),
       body: Stack(

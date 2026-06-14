@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/services/api_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:http/http.dart' as http;
 import 'package:icons_plus/icons_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';

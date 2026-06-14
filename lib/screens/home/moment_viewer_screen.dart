@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:video_player/video_player.dart';
@@ -74,7 +75,7 @@ class _MomentViewerScreenState extends State<MomentViewerScreen> {
 class MomentViewerItem extends StatefulWidget {
   final Map<String, dynamic> moment;
   final UserPreferences userPreferences;
-  final bool isCurrentPage; // <-- NEW
+  final bool isCurrentPage;
 
   const MomentViewerItem({
     super.key,
@@ -95,7 +96,9 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
   int _likesCount = 0;
   int _commentsCount = 0;
   bool _isMuted = false;
-  bool _authorIsPlus = false; // NEW: Track if the moment creator is Plus
+  bool _authorIsPlus = false;
+
+  // 🔥 NEW: Controls Image Loading Speed vs Quality to prevent crashes
   bool _isHighQuality = false;
 
   @override
@@ -113,7 +116,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     }
   }
 
-  // 🔥 THE FIX: Separated the Star checking logic so it doesn't break your Like/Comment logic!
   Future<void> _checkIfAuthorIsPlus() async {
     final authorId = widget.moment['user_id'];
     if (authorId == null) return;
@@ -130,26 +132,68 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     } catch (_) {}
   }
 
-  // --- NEW: PRELOAD & CACHE LOGIC ---
-  Future<void> _initializeAndPreloadVideo(String url) async {
+  // --- 🔥 NEW: WEB-SAFE PRELOAD & CACHE LOGIC ---
+  // --- 🔥 YOUTUBE STYLE RESOLUTION SWITCHER (Backward Compatible!) ---
+  Future<void> _initializeAndPreloadVideo(String url,
+      {Duration? startAt}) async {
     try {
+      String finalUrl = url;
+
+      // If user requested HD, smartly check if an HD file actually exists!
+      if (_isHighQuality && url.contains('.mp4')) {
+        final tempHdUrl = url.replaceAll('.mp4', '_hd.mp4');
+
+        try {
+          // Ping Supabase to see if the HD file exists (takes 0.05 seconds)
+          final response = await http.head(Uri.parse(tempHdUrl));
+
+          if (response.statusCode == 200) {
+            // It's a new video with dual-stream! Use the HD file.
+            finalUrl = tempHdUrl;
+          } else {
+            // It's an old video. The original URL is already the best quality available.
+            if (mounted && startAt != null) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                content:
+                    Text('This older video is already at maximum quality.'),
+                backgroundColor: Colors.black87,
+              ));
+            }
+          }
+        } catch (e) {
+          // If the network ping fails, default to the safe original URL
+          finalUrl = url;
+        }
+      }
+
       if (kIsWeb) {
-        _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
+        _videoController =
+            VideoPlayerController.networkUrl(Uri.parse(finalUrl));
       } else {
-        final fileInfo = await DefaultCacheManager().getFileFromCache(url);
+        final fileInfo = await DefaultCacheManager().getFileFromCache(finalUrl);
         if (fileInfo != null) {
           _videoController = VideoPlayerController.file(fileInfo.file);
         } else {
-          _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
-          DefaultCacheManager().downloadFile(url);
+          _videoController =
+              VideoPlayerController.networkUrl(Uri.parse(finalUrl));
+          DefaultCacheManager().downloadFile(finalUrl);
         }
       }
 
       await _videoController!.initialize();
       _videoController!.setLooping(true);
 
+      // Seamlessly resume from where the low-quality video left off!
+      if (startAt != null) {
+        await _videoController!.seekTo(startAt);
+      }
+
       if (mounted && widget.isCurrentPage) {
         setState(() {});
+        if (kIsWeb) {
+          _videoController!.setVolume(0.0);
+          _isMuted = true;
+        }
         _videoController!.play();
       }
     } catch (e) {
@@ -199,7 +243,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
           .maybeSingle();
       if (likeRes != null && mounted) setState(() => _isLiked = true);
 
-      // Fetch accurate counts in case they updated since the feed loaded
       final countRes = await supabase
           .from('moments')
           .select('likes_count, comments_count')
@@ -252,7 +295,9 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Moment deleted successfully'),
             backgroundColor: Colors.green));
-        Navigator.pop(context);
+
+        // 🔥 INSTANT UI UPDATE: Return the ID so the grid updates instantly
+        Navigator.pop(context, widget.moment['id']);
       }
     } catch (e) {
       if (mounted)
@@ -274,19 +319,30 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 🔥 NEW: Request Full Quality Option
-            if (widget.moment['media_type'] != 'video')
-              ListTile(
-                leading: const Icon(Icons.hd, color: Colors.blueAccent),
-                title: const Text('View Full Quality',
-                    style: TextStyle(color: Colors.blueAccent, fontSize: 16)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  setState(() => _isHighQuality = true);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Loading High Quality...')));
-                },
-              ),
+            // 🔥 HD OPTION: Now works for BOTH Photos and Videos!
+            ListTile(
+              leading: const Icon(Icons.hd, color: Colors.blueAccent),
+              title: const Text('View Full Quality',
+                  style: TextStyle(color: Colors.blueAccent, fontSize: 16)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                setState(() => _isHighQuality = true);
+
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('Switching to High Quality...')));
+
+                // If it's a video, pause it, save the timestamp, and reload the HD file!
+                if (widget.moment['media_type'] == 'video' &&
+                    _videoController != null) {
+                  final currentPosition = _videoController!.value.position;
+                  await _videoController!.pause();
+
+                  // Reloads using the new HD flag
+                  await _initializeAndPreloadVideo(widget.moment['media_url'],
+                      startAt: currentPosition);
+                }
+              },
+            ),
 
             if (isMe)
               ListTile(
@@ -305,7 +361,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     );
   }
 
-  // --- SHARE FUNCTIONALITY ---
   Future<List<dynamic>> _fetchFriends(String myId) async {
     try {
       final res = await supabase
@@ -343,7 +398,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
       });
     }
 
-    // --- NEW: NOTIFY THE MOMENT CREATOR THAT IT WAS SHARED ---
     if (creatorId != null && creatorId != myId) {
       try {
         await supabase.rpc('notify_share', params: {
@@ -517,11 +571,9 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
       builder: (context) => MomentCommentsSheet(
           momentId: widget.moment['id'].toString(),
           themeColor: const Color(0xFF4CAF50)),
-    ).then(
-        (_) => _fetchLikeAndCommentData()); // Refresh counts when sheet closes
+    ).then((_) => _fetchLikeAndCommentData());
   }
 
-  // 2. REPLACE THIS METHOD
   @override
   Widget build(BuildContext context) {
     final isVideo = widget.moment['media_type'] == 'video';
@@ -533,24 +585,37 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     final isPlus =
         _authorIsPlus || profile['subscription_tier'] == 'Membership';
 
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Center(
-          child: isVideo
-              ? (_videoController != null &&
-                      _videoController!.value.isInitialized
-                  ? GestureDetector(
-                      onTap: () {
-                        _videoController!.value.isPlaying
-                            ? _videoController!.pause()
-                            : _videoController!.play();
-                        setState(() {});
-                      },
-                      child: Stack(alignment: Alignment.center, children: [
-                        AspectRatio(
-                            aspectRatio: _videoController!.value.aspectRatio,
-                            child: VideoPlayer(_videoController!)),
+    // 🔥 FIX 1: Wrap in GestureDetector to catch the ID when deleted!
+    return GestureDetector(
+      onTap: () async {
+        if (!isVideo) return; // Only videos need tap-to-pause
+
+        // This stops the video from swallowing the tap on Web
+        if (_videoController != null && _videoController!.value.isInitialized) {
+          if (_videoController!.value.isPlaying) {
+            _videoController!.pause();
+          } else {
+            _videoController!.play();
+          }
+          setState(() {});
+        }
+      },
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Center(
+            child: isVideo
+                ? (_videoController != null &&
+                        _videoController!.value.isInitialized
+                    ? Stack(alignment: Alignment.bottomCenter, children: [
+                        Center(
+                          child: AspectRatio(
+                              aspectRatio: _videoController!.value.aspectRatio,
+                              // 🔥 FIX 2: IgnorePointer stops Web browsers from eating the tap
+                              child: IgnorePointer(
+                                  child: VideoPlayer(_videoController!))),
+                        ),
+
                         if (!_videoController!.value.isPlaying)
                           Container(
                               padding: const EdgeInsets.all(16),
@@ -559,233 +624,259 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                                   shape: BoxShape.circle),
                               child: const Icon(Icons.play_arrow_rounded,
                                   color: Colors.white, size: 54)),
-                      ]),
-                    )
-                  : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
-              : CachedNetworkImage(
-                  imageUrl: widget.moment['media_url'],
-                  fit: BoxFit.contain,
-                  // 🔥 FIX: Reduces RAM usage from ~30MB per image to ~2MB! Prevents OOM crashes.
-                  memCacheWidth: _isHighQuality ? null : 600,
-                  placeholder: (context, url) =>
-                      const CircularProgressIndicator(color: Color(0xFF4CAF50)),
-                ),
-        ),
 
-        // ... Keep the rest of your original Stack UI (AppBar, Caption, Interaction Buttons) exactly the same ...
-        // (Just ensure the "isMe" check in _showMomentOptions button is handled properly since it moved into the bottom sheet)
-        Positioned(
-          top: 0,
-          left: 0,
-          right: 0,
-          child: SafeArea(
-            child: SizedBox(
-              height: 90,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Image.asset('assets/images/moments.png',
-                      height: 90, fit: BoxFit.contain),
-                  Positioned(
+                        // 🔥 YOUTUBE STYLE PROGRESS BAR
+                        VideoProgressIndicator(
+                          _videoController!,
+                          allowScrubbing: true,
+                          colors: const VideoProgressColors(
+                              playedColor: Color(0xFF4CAF50),
+                              bufferedColor: Colors.white24,
+                              backgroundColor: Colors.transparent),
+                        ),
+                      ])
+                    : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
+                : CachedNetworkImage(
+                    imageUrl: widget.moment['media_url'],
+                    fit: BoxFit.contain,
+                    // High Quality toggle respects images!
+                    memCacheWidth: _isHighQuality ? null : 600,
+                    placeholder: (context, url) =>
+                        const CircularProgressIndicator(
+                            color: Color(0xFF4CAF50)),
+                  ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: SizedBox(
+                height: 90,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Image.asset(
+                      'assets/images/moments.png',
+                      height: 90,
+                      fit: BoxFit.contain,
+                      errorBuilder: (ctx, err, stack) => const Text('Moments',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              shadows: [
+                                Shadow(color: Colors.black87, blurRadius: 4)
+                              ])),
+                    ),
+                    Positioned(
                       left: 8,
                       child: IconButton(
-                          icon: const Icon(Icons.arrow_back_ios,
-                              color: Colors.white),
-                          onPressed: () => Navigator.pop(context))),
-                  Positioned(
-                    right: 8,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (isVideo)
+                        icon: const Icon(Icons.arrow_back_ios,
+                            color: Colors.white,
+                            shadows: [
+                              Shadow(color: Colors.black87, blurRadius: 4)
+                            ]),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ),
+                    Positioned(
+                      right: 8,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (isVideo)
+                            IconButton(
+                              icon: Icon(
+                                  _isMuted ? Icons.volume_off : Icons.volume_up,
+                                  color: Colors.white,
+                                  shadows: const [
+                                    Shadow(color: Colors.black, blurRadius: 4)
+                                  ]),
+                              onPressed: () {
+                                setState(() {
+                                  _isMuted = !_isMuted;
+                                  _videoController
+                                      ?.setVolume(_isMuted ? 0.0 : 1.0);
+                                });
+                              },
+                            ),
+                          // 🔥 FIX: "More" button is now visible to EVERYONE so they can tap HD.
                           IconButton(
-                            icon: Icon(
-                                _isMuted ? Icons.volume_off : Icons.volume_up,
-                                color: Colors.white),
-                            onPressed: () {
-                              setState(() {
-                                _isMuted = !_isMuted;
-                                _videoController
-                                    ?.setVolume(_isMuted ? 0.0 : 1.0);
-                              });
-                            },
+                            icon: const Icon(Icons.more_vert,
+                                color: Colors.white,
+                                shadows: [
+                                  Shadow(color: Colors.black, blurRadius: 4)
+                                ]),
+                            onPressed: _showMomentOptions,
                           ),
-                        // Changed to always show options (so users can select HD)
-                        IconButton(
-                          icon:
-                              const Icon(Icons.more_vert, color: Colors.white),
-                          onPressed: _showMomentOptions,
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 20,
+            left: 16,
+            right: 80,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                GestureDetector(
+                  onTap: () => UniversalProfileCard.show(context,
+                      widget.moment['user_id'], widget.userPreferences),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text('@$username',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  shadows: [
+                                    Shadow(color: Colors.black87, blurRadius: 4)
+                                  ])),
+                          if (isPlus) ...[
+                            const SizedBox(width: 4),
+                            const Icon(Icons.star,
+                                color: Colors.amber,
+                                size: 16,
+                                shadows: [
+                                  Shadow(color: Colors.black87, blurRadius: 4)
+                                ]),
+                          ],
+                        ],
+                      ),
+                      if (schoolName != null &&
+                          schoolName.toString().isNotEmpty)
+                        Text(schoolName,
+                            style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 13,
+                                shadows: [
+                                  Shadow(color: Colors.black87, blurRadius: 4)
+                                ])),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (caption.isNotEmpty)
+                  Text(caption,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          shadows: [
+                            Shadow(color: Colors.black87, blurRadius: 4)
+                          ])),
+              ],
+            ),
+          ),
+          Positioned(
+            bottom: 20,
+            right: 8,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                GestureDetector(
+                  onTap: () => UniversalProfileCard.show(context,
+                      widget.moment['user_id'], widget.userPreferences),
+                  child: SizedBox(
+                    height: 60,
+                    width: 50,
+                    child: Stack(
+                      children: [
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: Colors.grey[800],
+                          backgroundImage: avatarUrl != null
+                              ? CachedNetworkImageProvider(avatarUrl)
+                              : null,
+                          child: avatarUrl == null
+                              ? const Icon(Icons.person, color: Colors.white)
+                              : null,
                         ),
                       ],
                     ),
                   ),
-                ],
-              ),
-            ),
-          ),
-        ),
-
-        // 3. CAPTION AREA
-        Positioned(
-          bottom: 20,
-          left: 16,
-          right: 80,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              GestureDetector(
-                onTap: () => UniversalProfileCard.show(
-                    context, widget.moment['user_id'], widget.userPreferences),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text('@$username',
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                shadows: [
-                                  Shadow(color: Colors.black87, blurRadius: 4)
-                                ])),
-                        if (isPlus) ...[
-                          const SizedBox(width: 4),
-                          const Icon(Icons.star,
-                              color: Colors.amber,
-                              size: 16,
-                              shadows: [
-                                Shadow(color: Colors.black87, blurRadius: 4)
-                              ]),
-                        ],
-                      ],
-                    ),
-                    if (schoolName != null && schoolName.toString().isNotEmpty)
-                      Text(schoolName,
-                          style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 13,
-                              shadows: [
-                                Shadow(color: Colors.black87, blurRadius: 4)
-                              ])),
-                  ],
                 ),
-              ),
-              const SizedBox(height: 8),
-              if (caption.isNotEmpty)
-                Text(caption,
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        shadows: [
-                          Shadow(color: Colors.black87, blurRadius: 4)
-                        ])),
-            ],
-          ),
-        ),
-
-        // 4. RIGHT SIDE INTERACTION BUTTONS
-        Positioned(
-          bottom: 20,
-          right: 8,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              GestureDetector(
-                onTap: () => UniversalProfileCard.show(
-                    context, widget.moment['user_id'], widget.userPreferences),
-                child: SizedBox(
-                  height: 60,
-                  width: 50,
-                  child: Stack(
+                const SizedBox(height: 24),
+                GestureDetector(
+                  onTap: _toggleLike,
+                  child: Column(
                     children: [
-                      CircleAvatar(
-                        radius: 24,
-                        backgroundColor: Colors.grey[800],
-                        backgroundImage: avatarUrl != null
-                            ? CachedNetworkImageProvider(avatarUrl)
-                            : null,
-                        child: avatarUrl == null
-                            ? const Icon(Icons.person, color: Colors.white)
-                            : null,
-                      ),
+                      Icon(_isLiked ? Icons.favorite : Icons.favorite_border,
+                          color: _isLiked ? Colors.red : Colors.white,
+                          size: 36,
+                          shadows: const [
+                            Shadow(color: Colors.black54, blurRadius: 8)
+                          ]),
+                      const SizedBox(height: 4),
+                      Text('$_likesCount',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              shadows: [
+                                Shadow(color: Colors.black54, blurRadius: 4)
+                              ])),
                     ],
                   ),
                 ),
-              ),
-              const SizedBox(height: 24),
-              GestureDetector(
-                onTap: _toggleLike,
-                child: Column(
-                  children: [
-                    Icon(_isLiked ? Icons.favorite : Icons.favorite_border,
-                        color: _isLiked ? Colors.red : Colors.white,
-                        size: 36,
-                        shadows: const [
-                          Shadow(color: Colors.black54, blurRadius: 8)
-                        ]),
-                    const SizedBox(height: 4),
-                    Text('$_likesCount',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            shadows: [
-                              Shadow(color: Colors.black54, blurRadius: 4)
-                            ])),
-                  ],
+                const SizedBox(height: 24),
+                GestureDetector(
+                  onTap: _showCommentsSheet,
+                  child: Column(
+                    children: [
+                      const Icon(CupertinoIcons.chat_bubble,
+                          color: Colors.white,
+                          size: 34,
+                          shadows: [
+                            Shadow(color: Colors.black54, blurRadius: 8)
+                          ]),
+                      const SizedBox(height: 4),
+                      Text('$_commentsCount',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              shadows: [
+                                Shadow(color: Colors.black54, blurRadius: 4)
+                              ])),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 24),
-              GestureDetector(
-                onTap: _showCommentsSheet,
-                child: Column(
-                  children: [
-                    const Icon(CupertinoIcons.chat_bubble,
-                        color: Colors.white,
-                        size: 34,
-                        shadows: [
-                          Shadow(color: Colors.black54, blurRadius: 8)
-                        ]),
-                    const SizedBox(height: 4),
-                    Text('$_commentsCount',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            shadows: [
-                              Shadow(color: Colors.black54, blurRadius: 4)
-                            ])),
-                  ],
+                const SizedBox(height: 24),
+                GestureDetector(
+                  onTap: _showShipSheet,
+                  child: Column(
+                    children: const [
+                      Text('🚀',
+                          style: TextStyle(fontSize: 30, shadows: [
+                            Shadow(color: Colors.black54, blurRadius: 8)
+                          ])),
+                      SizedBox(height: 4),
+                      Text('Share',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              shadows: [
+                                Shadow(color: Colors.black54, blurRadius: 4)
+                              ])),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 24),
-              GestureDetector(
-                onTap: _showShipSheet,
-                child: Column(
-                  children: const [
-                    Text('🚀',
-                        style: TextStyle(fontSize: 30, shadows: [
-                          Shadow(color: Colors.black54, blurRadius: 8)
-                        ])),
-                    SizedBox(height: 4),
-                    Text('Share',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            shadows: [
-                              Shadow(color: Colors.black54, blurRadius: 4)
-                            ])),
-                  ],
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
 
-// --- MOMENT COMMENTS SHEET ---
 class MomentCommentsSheet extends StatefulWidget {
   final String momentId;
   final Color themeColor;
@@ -906,13 +997,11 @@ class _MomentCommentsSheetState extends State<MomentCommentsSheet> {
                       return FutureBuilder<Map<String, dynamic>?>(
                         future: supabase
                             .from('profiles')
-                            // 🔥 NEW: Added subscription_tier to the select query
                             .select('username, avatar_url, subscription_tier')
                             .eq('id', userId)
                             .maybeSingle(),
                         builder: (ctx, profileSnap) {
                           final profile = profileSnap.data;
-                          // 🔥 NEW: Check if the commenter is a Plus member
                           final isCommenterPlus =
                               profile?['subscription_tier'] == 'Membership';
 

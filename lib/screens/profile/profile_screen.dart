@@ -1,6 +1,7 @@
 // lib/screens/profile/profile_screen.dart
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:allowance/screens/home/home_screen.dart';
 import 'package:allowance/screens/home/moment_viewer_screen.dart';
@@ -8,6 +9,7 @@ import 'package:allowance/screens/home/story_viewer_screen.dart';
 import 'package:allowance/screens/settings/terms_screen.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -24,6 +26,10 @@ class ProfileScreen extends StatefulWidget {
   final UserPreferences userPreferences;
   final VoidCallback onSave;
 
+  // 🔥 NEW: Global state to track uploading moments from anywhere in the app!
+  static final ValueNotifier<Map<String, dynamic>?> pendingMomentUpload =
+      ValueNotifier(null);
+
   const ProfileScreen(
       {super.key, required this.userPreferences, required this.onSave});
 
@@ -38,6 +44,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Map<String, dynamic>? _cachedProfileData;
   List<Map<String, dynamic>> _moments = [];
   StreamSubscription? _momentsSub;
+  RealtimeChannel? _momentsChannel;
   bool _isLoadingProfile = true;
 
   @override
@@ -51,6 +58,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   void dispose() {
     _momentsSub?.cancel();
+    _momentsChannel?.unsubscribe();
     super.dispose();
   }
 
@@ -440,7 +448,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Future<void> _signOut(
       {bool keepSavedAccounts = false,
       bool removeCurrentFromSaved = false}) async {
-    final supabase = Supabase.instance.client; // <-- FIX ADDED HERE
+    final supabase = Supabase.instance.client;
     setState(() => _signingOut = true);
     try {
       final currentUser = supabase.auth.currentUser;
@@ -453,9 +461,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
         List<dynamic> savedAccounts = jsonDecode(savedStr);
         savedAccounts.removeWhere((acc) => acc['id'] == currentUser.id);
         await prefs.setString('saved_accounts', jsonEncode(savedAccounts));
+
+        // HARD LOGOUT: Destroys token on server
+        await supabase.auth.signOut();
+      } else {
+        // 🔥 THE FIX: LOCAL LOGOUT!
+        // This clears the app but keeps the token alive on Supabase so we can switch back!
+        await supabase.auth.signOut(scope: SignOutScope.local);
       }
 
-      await supabase.auth.signOut();
       await widget.userPreferences.clearLocal();
 
       if (mounted) {
@@ -480,10 +494,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
       if (mounted) setState(() => _signingOut = false);
     }
   }
-
-  // --- NEW: SWITCH ACCOUNT SHEET ---
-
-  // --- NEW: SWITCH TO ACCOUNT (PASSWORDLESS) ---
 
   // --- NEW: DELETE ACCOUNT DIALOG ---
   Future<void> _confirmDeleteAccount() async {
@@ -984,71 +994,133 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  void _setupMomentsStream() {
-    // Renamed from _setupMemoriesStream
+  void _setupMomentsStream() async {
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser?.id;
     if (userId == null) return;
 
-    _momentsSub = supabase
-        .from('moments') // Query moments table
-        .stream(primaryKey: ['id'])
-        .eq('user_id', userId)
-        .order('created_at', ascending: false)
-        .listen((data) async {
-          if (mounted) setState(() => _moments = data);
-          final prefs = await SharedPreferences.getInstance();
-          prefs.setString(
-              'cached_moments_$userId', jsonEncode(data)); // Updated cache key
-        });
+    // 1. Fast local load
+    final prefs = await SharedPreferences.getInstance();
+    final cached = prefs.getString('cached_moments_$userId');
+    if (cached != null && mounted) {
+      setState(
+          () => _moments = List<Map<String, dynamic>>.from(jsonDecode(cached)));
+    }
+
+    // 2. Fetch fresh from HTTP
+    try {
+      final res = await supabase
+          .from('moments')
+          .select()
+          .eq('user_id', userId)
+          .order('created_at', ascending: false);
+      if (mounted) setState(() => _moments = res);
+      prefs.setString('cached_moments_$userId', jsonEncode(res));
+    } catch (_) {}
+
+    // 🚀 3. True Real-time via WebSockets
+    _momentsChannel?.unsubscribe();
+    _momentsChannel = supabase
+        .channel('public:moments:$userId')
+        .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'moments',
+            filter: PostgresChangeFilter(
+                type: PostgresChangeFilterType.eq,
+                column: 'user_id',
+                value: userId),
+            callback: (payload) {
+              if (!mounted) return;
+              if (payload.eventType == PostgresChangeEvent.insert) {
+                // 🔥 INSTAGRAM FIX: Hide the "Posting..." block because it successfully uploaded!
+                ProfileScreen.pendingMomentUpload.value = null;
+
+                setState(() {
+                  if (!_moments.any((m) =>
+                      m['id'].toString() ==
+                      payload.newRecord['id'].toString())) {
+                    _moments.insert(0, payload.newRecord);
+                  }
+                });
+                prefs.setString('cached_moments_$userId', jsonEncode(_moments));
+              } else if (payload.eventType == PostgresChangeEvent.delete) {
+                setState(() => _moments.removeWhere((m) =>
+                    m['id'].toString() == payload.oldRecord['id'].toString()));
+                prefs.setString('cached_moments_$userId', jsonEncode(_moments));
+              }
+            })
+        .subscribe();
   }
 
   Widget _buildInstagramStyleGrid() {
-    if (_moments.isEmpty) {
-      return Container(
-        height: 200,
-        alignment: Alignment.center,
-        child: const Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.photo_library_outlined, color: Colors.white24, size: 40),
-            SizedBox(height: 8),
-            Text("No Moments yet", style: TextStyle(color: Colors.white38)),
-          ],
-        ),
-      );
-    }
-
-    // <-- FIX: Inject profile data manually since stream() doesn't support joins!
-    final List<Map<String, dynamic>> enrichedMoments = _moments.map((m) {
-      return {
-        ...m,
-        'profiles': {
-          'username': _cachedProfileData?['username'] ??
-              widget.userPreferences.username,
-          'avatar_url': _cachedProfileData?['avatar_url'] ??
-              widget.userPreferences.avatarUrl,
-          'school_name': _cachedProfileData?['school_name'] ??
-              widget.userPreferences.schoolName,
+    return ValueListenableBuilder<Map<String, dynamic>?>(
+      valueListenable: ProfileScreen.pendingMomentUpload,
+      builder: (context, pendingMoment, child) {
+        if (_moments.isEmpty && pendingMoment == null) {
+          return Container(
+            height: 200,
+            alignment: Alignment.center,
+            child: const Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.photo_library_outlined,
+                    color: Colors.white24, size: 40),
+                SizedBox(height: 8),
+                Text("No Moments yet", style: TextStyle(color: Colors.white38)),
+              ],
+            ),
+          );
         }
-      };
-    }).toList();
 
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 2,
-        mainAxisSpacing: 2,
-        childAspectRatio: 0.8,
-      ),
-      itemCount: enrichedMoments.length,
-      itemBuilder: (context, index) {
-        return MomentGridItem(
-            moments: enrichedMoments, index: index); // Pass enriched list
+        final List<Map<String, dynamic>> enrichedMoments = _moments.map((m) {
+          return {
+            ...m,
+            'profiles': {
+              'username': _cachedProfileData?['username'] ??
+                  widget.userPreferences.username,
+              'avatar_url': _cachedProfileData?['avatar_url'] ??
+                  widget.userPreferences.avatarUrl,
+              'school_name': _cachedProfileData?['school_name'] ??
+                  widget.userPreferences.schoolName,
+            }
+          };
+        }).toList();
+
+        // Inject pending moment at index 0 if it exists
+        final int itemCount =
+            enrichedMoments.length + (pendingMoment != null ? 1 : 0);
+
+        return GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 2,
+            mainAxisSpacing: 2,
+            childAspectRatio: 0.8,
+          ),
+          itemCount: itemCount,
+          itemBuilder: (context, index) {
+            // 🔥 SHOW THE INSTAGRAM-STYLE GREY "POSTING" THUMBNAIL
+            if (pendingMoment != null && index == 0) {
+              return _buildPendingMomentItem(pendingMoment);
+            }
+
+            final momentIndex = pendingMoment != null ? index - 1 : index;
+            return MomentGridItem(
+              moments: enrichedMoments,
+              index: momentIndex,
+            );
+          },
+        );
       },
     );
+  }
+
+  // 🔥 THE NEW TELEGRAM-STYLE UPLOAD UI
+  Widget _buildPendingMomentItem(Map<String, dynamic> moment) {
+    return PendingMomentUI(moment: moment);
   }
 
   Widget _buildSegmentItem(String title, int index) {
@@ -1130,6 +1202,8 @@ class _MomentGridItemState extends State<MomentGridItem> {
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
+      // 🔥 FIX 1: Opaque forces Flutter Web to register the tap on the entire square instantly!
+      behavior: HitTestBehavior.opaque,
       onTap: () {
         Navigator.push(
           context,
@@ -1155,7 +1229,9 @@ class _MomentGridItemState extends State<MomentGridItem> {
                       child: SizedBox(
                         width: _videoController!.value.size.width,
                         height: _videoController!.value.size.height,
-                        child: VideoPlayer(_videoController!),
+                        child: IgnorePointer(
+                          child: VideoPlayer(_videoController!),
+                        ),
                       ),
                     )
                   : Container(color: const Color(0xFF1E1E1E))
@@ -1184,6 +1260,140 @@ class _MomentGridItemState extends State<MomentGridItem> {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// =========================================================================
+// SMART PENDING MOMENT UI (Handles Video & Image Thumbnails during Upload)
+// =========================================================================
+class PendingMomentUI extends StatefulWidget {
+  final Map<String, dynamic> moment;
+  const PendingMomentUI({super.key, required this.moment});
+
+  @override
+  State<PendingMomentUI> createState() => _PendingMomentUIState();
+}
+
+class _PendingMomentUIState extends State<PendingMomentUI> {
+  VideoPlayerController? _tempVideoController;
+
+  @override
+  void initState() {
+    super.initState();
+    final isVideo = widget.moment['is_video'] == true;
+    final path = widget.moment['local_path'];
+
+    // 🔥 FIX 2: If uploading a video, load the first frame as a thumbnail!
+    if (isVideo && path != null) {
+      if (kIsWeb) {
+        _tempVideoController =
+            VideoPlayerController.networkUrl(Uri.parse(path));
+      } else {
+        _tempVideoController = VideoPlayerController.file(File(path));
+      }
+
+      _tempVideoController!.initialize().then((_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _tempVideoController?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final path = widget.moment['local_path'];
+    final isVideo = widget.moment['is_video'] == true;
+    final progress = widget.moment['progress'] as double? ?? 0.05;
+    final percent = (progress * 100).toInt();
+
+    return Container(
+      color: Colors.grey[900],
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // IMAGE PREVIEW
+          if (path != null && !isVideo && !kIsWeb)
+            Opacity(
+              opacity: 0.3,
+              child: Image.file(File(path), fit: BoxFit.cover),
+            ),
+
+          // VIDEO PREVIEW
+          if (isVideo &&
+              _tempVideoController != null &&
+              _tempVideoController!.value.isInitialized)
+            Opacity(
+              opacity: 0.3,
+              child: FittedBox(
+                fit: BoxFit.cover,
+                child: SizedBox(
+                  width: _tempVideoController!.value.size.width,
+                  height: _tempVideoController!.value.size.height,
+                  child:
+                      IgnorePointer(child: VideoPlayer(_tempVideoController!)),
+                ),
+              ),
+            ),
+
+          // FALLBACK IF VIDEO IS STILL LOADING
+          if (isVideo &&
+              (_tempVideoController == null ||
+                  !_tempVideoController!.value.isInitialized))
+            const Center(
+                child: Icon(Icons.videocam, color: Colors.white24, size: 50)),
+
+          // THE RING & CANCEL UI
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    SizedBox(
+                      width: 60,
+                      height: 60,
+                      child: CircularProgressIndicator(
+                        value: progress,
+                        color: const Color(0xFF4CAF50),
+                        backgroundColor: Colors.white24,
+                        strokeWidth: 5,
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () {
+                        // 🛑 Abort upload instantly!
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('Upload cancelled.'),
+                                backgroundColor: Colors.orange));
+                        ProfileScreen.pendingMomentUpload.value = null;
+                      },
+                      child: const CircleAvatar(
+                        backgroundColor: Colors.black54,
+                        radius: 20,
+                        child: Icon(Icons.close, color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text('$percent%',
+                    style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold)),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
