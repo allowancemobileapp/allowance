@@ -20,7 +20,7 @@ class StoryViewerScreen extends StatefulWidget {
     required this.stories,
     required this.initialIndex,
     required this.userPreferences,
-    this.storyId, // Change 'required String storyId' to 'this.storyId'
+    this.storyId,
   });
 
   @override
@@ -42,12 +42,13 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   bool _isTransitioning = false;
   int _viewCount = 0;
   StreamSubscription<List<Map<String, dynamic>>>? _viewSubscription;
+  RealtimeChannel? _realtimeStoryChannel;
   final TextEditingController _replyController = TextEditingController();
   bool _isSendingReply = false;
 
   late final List<dynamic> _sortedStories;
 
-  // Theme color for paywall (same as your app)
+  // Theme color for paywall
   final Color themeColor = const Color(0xFF4CAF50);
 
   @override
@@ -91,8 +92,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     });
   }
 
-  // === REPLACE YOUR _playCurrentStory METHOD WITH THIS ===
-  // Replace these two methods to combine Caching + Navigation fix
   Future<void> _playCurrentStory() async {
     _videoController?.removeListener(_videoProgressListener);
     _videoController?.dispose();
@@ -181,7 +180,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
     final story = _sortedStories[index];
 
-    // Fix: Do NOT count the creator viewing their own story
+    // Do NOT count the creator viewing their own story
     if (user.id == story['user_id']) return;
 
     try {
@@ -226,7 +225,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     return (start, end);
   }
 
-  // Helper to show "23h ago", "3m ago", "just now", etc.
   String _timeAgo(String createdAt) {
     final date = DateTime.parse(createdAt).toLocal();
     final difference = DateTime.now().difference(date);
@@ -237,7 +235,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     return '${difference.inDays}d ago';
   }
 
-  // Place this after your _timeAgo method
   String _formatDuration(Duration duration) {
     String twoDigits(int n) => n.toString().padLeft(2, "0");
     String twoDigitMinutes = twoDigits(duration.inMinutes.remainder(60));
@@ -259,7 +256,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           .from('story_views')
           .select('id, user_id')
           .eq('story_id', storyId)
-          .neq('user_id', currentUserId); // Ignore own views
+          .neq('user_id', currentUserId);
       if (mounted) {
         setState(() => _viewCount = (response as List).length);
       }
@@ -283,7 +280,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
   }
 
   Future<void> _showViewersList() async {
-    _pauseStory(); // Pause video/timer while viewing list
+    _pauseStory();
 
     final storyId = _sortedStories[_currentIndex]['id'];
     final supabase = Supabase.instance.client;
@@ -303,8 +300,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               .select(
                   'user_id, viewed_at, profiles:user_id(username, avatar_url, school_name)')
               .eq('story_id', storyId)
-              .neq(
-                  'user_id', currentUserId ?? '') // Hide yourself from the list
+              .neq('user_id', currentUserId ?? '')
               .order('viewed_at', ascending: false),
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
@@ -381,10 +377,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       },
     );
 
-    _resumeStory(); // Resume playing when panel is closed
+    _resumeStory();
   }
 
-  // === REPLACE _videoProgressListener WITH THIS (fixes "doesn't advance to next story") ===
   void _videoProgressListener() {
     if (!mounted || _videoController == null || _isPaused || _isTransitioning) {
       return;
@@ -396,7 +391,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       final position = controller.value.position;
       final duration = controller.value.duration;
 
-      // Calculate progress for the bar
       final progress = position.inMilliseconds /
           duration.inMilliseconds.clamp(1, double.infinity);
 
@@ -405,17 +399,14 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             () => _progressValues[_currentIndex] = progress.clamp(0.0, 1.0));
       }
 
-      // Trigger next story when video ends
       if (duration.inMilliseconds > 0 && position >= duration) {
-        _isTransitioning =
-            true; // Mark as transitioning to prevent multiple triggers
-        controller.removeListener(_videoProgressListener); // Clean up
+        _isTransitioning = true;
+        controller.removeListener(_videoProgressListener);
         _goToNextStory();
       }
     }
   }
 
-  // === REPLACE _goToNextStory WITH THIS ===
   void _goToNextStory() {
     if (_currentIndex < _sortedStories.length - 1) {
       _pageController.nextPage(
@@ -427,7 +418,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
-  // === REPLACE _goToPreviousStory WITH THIS ===
   void _goToPreviousStory() {
     if (_currentIndex > 0) {
       _pageController.previousPage(
@@ -451,9 +441,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     _startProgressForCurrentStory();
   }
 
-  // === REPLACE _toggleLike WITH THIS (fixes like count resetting to 0 even when RLS blocks count update) ===
-  // === REPLACE _toggleLike WITH THIS (fixes count resetting to 0) ===
-  // === REPLACE _toggleLike WITH THIS ===
   Future<void> _toggleLike() async {
     final story = _sortedStories[_currentIndex];
     final storyId = story['id'] as int;
@@ -464,7 +451,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     final wasLiked = _likedStoryIds.contains(storyId);
     final currentCount = (story['likes_count'] ?? 0) as int;
 
-    // Optimistic UI update (instant feel)
+    // Optimistic UI update
     setState(() {
       if (wasLiked) {
         _likedStoryIds.remove(storyId);
@@ -476,7 +463,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     });
 
     try {
-      // Database operation only — the trigger handles the real count
       if (wasLiked) {
         await supabase
             .from('story_likes')
@@ -490,7 +476,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       }
     } catch (e) {
       debugPrint('Like error: $e');
-      // Rollback UI only if DB failed
       setState(() {
         if (wasLiked) {
           _likedStoryIds.add(storyId);
@@ -551,7 +536,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                       MaterialPageRoute(
                         builder: (_) => SubscriptionScreen(
                           userPreferences: widget.userPreferences,
-                          themeColor: themeColor, // ← Fixed here
+                          themeColor: themeColor,
                         ),
                       ),
                     );
@@ -577,7 +562,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       return;
     }
 
-    // Premium user - normal reshare
     final user = Supabase.instance.client.auth.currentUser;
     if (user == null) return;
 
@@ -663,11 +647,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
-  // Helper to find existing chat or create a new one
   Future<String> _getOrCreateDirectChat(
       String currentUserId, String otherUserId) async {
     try {
-      // This calls the existing function in your Supabase schema
       final response = await Supabase.instance.client.rpc(
         'get_or_create_personal_chat',
         params: {
@@ -675,8 +657,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           'user_b': otherUserId,
         },
       );
-
-      // Returns the UUID String of the chat
       return response.toString();
     } catch (e) {
       debugPrint("RPC Chat Error: $e");
@@ -684,7 +664,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
-  // Method to send the reply
   Future<void> _sendStoryReply(Map<String, dynamic> story) async {
     final text = _replyController.text.trim();
     if (text.isEmpty || _isSendingReply) return;
@@ -708,7 +687,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           ? story['thumbnail_url'] ?? story['media_url']
           : story['media_url'];
 
-      // Extract caption and format the reply payload
       final String caption = (story['caption'] ?? '').toString().trim();
       final String replyPayload = caption.isNotEmpty
           ? 'Story_${story['id']}_$caption'
@@ -799,7 +777,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           .eq('id', _sortedStories[_currentIndex]['id']);
 
       if (mounted) {
-        Navigator.pop(context); // close viewer after delete
+        Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
               content: Text('Story deleted'), backgroundColor: Colors.green),
@@ -817,7 +795,31 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
-  // === REPLACE dispose WITH THIS ===
+  void _setupRealtimeLikes() {
+    final storyId = _sortedStories[_currentIndex]['id'];
+    _realtimeStoryChannel?.unsubscribe();
+
+    _realtimeStoryChannel = Supabase.instance.client
+        .channel('public:stories:$storyId')
+        .onPostgresChanges(
+            event: PostgresChangeEvent.update,
+            schema: 'public',
+            table: 'stories',
+            filter: PostgresChangeFilter(
+                type: PostgresChangeFilterType.eq,
+                column: 'id',
+                value: storyId),
+            callback: (payload) {
+              if (mounted) {
+                setState(() {
+                  _sortedStories[_currentIndex]['likes_count'] =
+                      payload.newRecord['likes_count'];
+                });
+              }
+            })
+        .subscribe();
+  }
+
   @override
   void dispose() {
     _replyController.dispose();
@@ -826,6 +828,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     _videoController?.dispose();
     _viewSubscription?.cancel();
     _preloadedController?.dispose();
+    _realtimeStoryChannel?.unsubscribe();
     _pageController.dispose();
     super.dispose();
   }
@@ -839,15 +842,14 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     final userStoryCount = userEnd - userStart + 1;
     final currentUserPosition = _currentIndex - userStart;
 
+    final bool isPlus = story['profiles']?['subscription_tier'] == 'Membership';
+
     return Scaffold(
       backgroundColor: Colors.black,
-      // FIX: Prevents the Scaffold from pushing the Stack up,
-      // allowing our AnimatedPositioned to handle it cleanly.
       resizeToAvoidBottomInset: false,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // 1. PageView (Media Content)
           PageView.builder(
             controller: _pageController,
             onPageChanged: (index) {
@@ -857,6 +859,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               _startProgressForCurrentStory();
               _markStoryAsViewed(index);
               _initViewCountAndSubscription();
+              _setupRealtimeLikes();
             },
             itemCount: _sortedStories.length,
             itemBuilder: (context, index) {
@@ -947,8 +950,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               );
             },
           ),
-
-          // 2. Progress Bars (Top)
           Positioned(
             top: MediaQuery.of(context).padding.top + 8,
             left: 16,
@@ -977,8 +978,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               ),
             ),
           ),
-
-          // 3. Tap Zones (Navigation)
           Positioned.fill(
             child: Row(
               children: [
@@ -997,8 +996,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               ],
             ),
           ),
-
-          // 4. Video Scrubber
           if (story['media_type'] == 'video' &&
               _videoController != null &&
               _videoController!.value.isInitialized)
@@ -1055,8 +1052,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 ],
               ),
             ),
-
-          // 4.5 URL Link Icon
           if (story['url'] != null && story['url'].toString().trim().isNotEmpty)
             Positioned(
               bottom: 140,
@@ -1079,8 +1074,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 ),
               ),
             ),
-
-          // 5. Top Bar (Profile/Close)
           Positioned(
             top: MediaQuery.of(context).padding.top + 45,
             left: 16,
@@ -1096,10 +1089,18 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      '@${story['profiles']?['username'] ?? 'user'}',
-                      style: const TextStyle(
-                          color: Colors.white, fontWeight: FontWeight.bold),
+                    Row(
+                      children: [
+                        Text(
+                          '@${story['profiles']?['username'] ?? 'user'}',
+                          style: const TextStyle(
+                              color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                        if (isPlus) ...[
+                          const SizedBox(width: 4),
+                          const Icon(Icons.star, color: Colors.amber, size: 14),
+                        ]
+                      ],
                     ),
                     Row(
                       children: [
@@ -1140,12 +1141,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               ],
             ),
           ),
-
-          // 6. BOTTOM BAR (Fixed positioning)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
-            // FIX: Adjust bottom position so it's flush with the keyboard but has
-            // a small margin for a cleaner look.
             bottom: MediaQuery.of(context).viewInsets.bottom > 0
                 ? MediaQuery.of(context).viewInsets.bottom + 10
                 : 30,
@@ -1157,9 +1154,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 Expanded(
                   child: Container(
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.2),
+                      color: Colors.black.withOpacity(0.7),
                       borderRadius: BorderRadius.circular(30),
-                      border: Border.all(color: Colors.white12),
+                      border: Border.all(color: Colors.white24),
                     ),
                     child: Row(
                       children: [
@@ -1172,11 +1169,10 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                             style: const TextStyle(
                                 color: Colors.white, fontSize: 16),
                             onTap: _pauseStory,
-                            // FIX: Rebuilds UI so the Send icon appears/disappears as you type
                             onChanged: (value) => setState(() {}),
                             decoration: const InputDecoration(
                               hintText: 'Reply...',
-                              hintStyle: TextStyle(color: Colors.white70),
+                              hintStyle: TextStyle(color: Colors.white54),
                               border: InputBorder.none,
                               contentPadding: EdgeInsets.symmetric(
                                   horizontal: 12, vertical: 12),
@@ -1194,8 +1190,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                   ),
                 ),
                 const SizedBox(width: 12),
-
-                // --- If it's NOT your story, show the Reshare button ---
                 if (!isOwnStory)
                   GestureDetector(
                     onTap: _reshareStory,
@@ -1204,8 +1198,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                       child: Icon(Icons.repeat, color: Colors.white, size: 28),
                     ),
                   ),
-
-                // --- If it IS your story, show the Viewers Eye button ---
                 if (isOwnStory)
                   GestureDetector(
                     onTap: _showViewersList,
@@ -1223,7 +1215,6 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                       ),
                     ),
                   ),
-
                 const SizedBox(width: 16),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),

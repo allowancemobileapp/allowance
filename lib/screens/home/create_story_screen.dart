@@ -1,6 +1,8 @@
 // lib/screens/home/create_story_screen.dart
+import 'dart:async';
 import 'dart:io';
 import 'package:allowance/screens/home/video_trimmer_screen.dart';
+import 'package:video_compress/video_compress.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:wechat_camera_picker/wechat_camera_picker.dart';
 import 'package:flutter/material.dart';
@@ -22,6 +24,10 @@ class MediaItem {
 
 class CreateStoryScreen extends StatefulWidget {
   final UserPreferences userPreferences;
+
+  // 🔥 NEW: Global state to track uploading stories from anywhere!
+  static final ValueNotifier<Map<String, dynamic>?> pendingStoryUpload =
+      ValueNotifier(null);
   const CreateStoryScreen({super.key, required this.userPreferences});
 
   @override
@@ -357,9 +363,24 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
     required int durationDays,
   }) async {
     const bucket = 'gist-images';
-    // Calculate expiry date
     final expiresAt =
         DateTime.now().add(Duration(days: durationDays)).toIso8601String();
+
+    CreateStoryScreen.pendingStoryUpload.value = {'progress': 0.05};
+
+    final progressTimer =
+        Timer.periodic(const Duration(milliseconds: 300), (timer) {
+      final current = CreateStoryScreen.pendingStoryUpload.value;
+      if (current != null && current['progress'] != null) {
+        double prog = current['progress'];
+        if (prog < 0.90) {
+          CreateStoryScreen.pendingStoryUpload.value = {
+            ...current,
+            'progress': prog + 0.05
+          };
+        }
+      }
+    });
 
     try {
       if (isTextOnly) {
@@ -369,10 +390,24 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
         for (var media in mediaList) {
           final ext = media.file.name.split('.').last;
           final path = 'stories/${const Uuid().v4()}.$ext';
+          Uint8List bytesToUpload = media.bytes;
+
+          // 🔥 WHATSAPP SPEED COMPRESSION FOR STORY VIDEOS
+          if (media.type == 'video' && !kIsWeb) {
+            final info = await VideoCompress.compressVideo(
+              media.file.path,
+              quality: VideoQuality.LowQuality, // Fast, social media quality
+              deleteOrigin: false,
+              includeAudio: true,
+            );
+            if (info != null && info.file != null) {
+              bytesToUpload = await info.file!.readAsBytes();
+            }
+          }
 
           await supabase.storage.from(bucket).uploadBinary(
                 path,
-                media.bytes,
+                bytesToUpload,
                 fileOptions: const FileOptions(upsert: true),
               );
 
@@ -381,8 +416,20 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
               caption, linkUrl, expiresAt);
         }
       }
+
+      CreateStoryScreen.pendingStoryUpload.value = {
+        ...CreateStoryScreen.pendingStoryUpload.value!,
+        'progress': 1.0
+      };
     } catch (e) {
       debugPrint("Background Upload Error: $e");
+    } finally {
+      progressTimer.cancel();
+      if (!isTextOnly && !kIsWeb) VideoCompress.deleteAllCache();
+
+      Future.delayed(const Duration(milliseconds: 500), () {
+        CreateStoryScreen.pendingStoryUpload.value = null;
+      });
     }
   }
 
