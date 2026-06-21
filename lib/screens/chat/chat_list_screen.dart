@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:allowance/screens/chat/chat_room_screen.dart';
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
+import 'package:allowance/shared/services/chat_sync_service.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -498,10 +499,27 @@ class _ChatListScreenState extends State<ChatListScreen>
                   isTyping: isTyping,
                   amIAdmin: amIAdmin,
                   hasMention: hasMention,
+                  onClearUnread: _clearUnreadForChat,
                 );
               },
             ),
     );
+  }
+
+  // 🔥 PASTE IT HERE: Inside _ChatListScreenState
+  void _clearUnreadForChat(String chatIdStr) {
+    if (!mounted) return;
+    setState(() {
+      _unreadMessages.removeWhere((m) => m['chat_id'].toString() == chatIdStr);
+    });
+
+    // Fire and forget update to the DB to ensure ghost messages are marked read
+    supabase
+        .from('messages')
+        .update({'is_read': true})
+        .match({'chat_id': chatIdStr, 'is_read': false})
+        .neq('sender_id', _myId!)
+        .catchError((_) {});
   }
 
   Widget _buildTabLabel(String text, int index, int unreadCount) {
@@ -540,6 +558,7 @@ class _ChatTile extends StatefulWidget {
   final bool isTyping;
   final bool amIAdmin;
   final bool hasMention;
+  final Function(String) onClearUnread;
 
   const _ChatTile({
     super.key,
@@ -551,6 +570,7 @@ class _ChatTile extends StatefulWidget {
     required this.unreadCount,
     required this.isTyping,
     required this.amIAdmin,
+    required this.onClearUnread,
     this.searchQuery = '',
     this.hasMention = false,
   });
@@ -735,6 +755,8 @@ class _ChatTileState extends State<_ChatTile> {
     }
   }
 
+  // 🔥 FIX: Aggressively clears unread messages from local state AND Database
+
   @override
   Widget build(BuildContext context) {
     if (_isLoadingMeta) {
@@ -781,9 +803,12 @@ class _ChatTileState extends State<_ChatTile> {
         }
 
         return ListTile(
-          onTap: () {
+          onTap: () async {
+            // 🔥 CLEAR 1: Instantly wipe the unread bubble as soon as you tap
+            widget.onClearUnread(chatId.toString());
+
             if (isGroup) {
-              Navigator.push(
+              await Navigator.push(
                   context,
                   MaterialPageRoute(
                       builder: (context) => ChatRoomScreen(
@@ -794,7 +819,7 @@ class _ChatTileState extends State<_ChatTile> {
                           isGroup: true,
                           creatorId: widget.chat['creator_id']?.toString())));
             } else {
-              Navigator.push(
+              await Navigator.push(
                   context,
                   MaterialPageRoute(
                       builder: (context) => IndividualChatScreen(
@@ -808,6 +833,9 @@ class _ChatTileState extends State<_ChatTile> {
                           },
                           userPreferences: widget.userPreferences)));
             }
+
+            // 🔥 CLEAR 2: Wipe out any messages that arrived *while* you were inside the chat!
+            widget.onClearUnread(chatId.toString());
           },
           contentPadding:
               const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -853,9 +881,19 @@ class _ChatTileState extends State<_ChatTile> {
                   ],
                 ),
               ),
-              // 🔥 FIX: Time is ALWAYS the time. It never changes to "typing"
-              Text(_cachedLastMessageTime,
-                  style: const TextStyle(color: Colors.white54, fontSize: 12)),
+              // 🔥 FIX: Live time updates for pending messages
+              ValueListenableBuilder<List<Map<String, dynamic>>>(
+                  valueListenable: ChatSyncService.instance.pendingMessages,
+                  builder: (context, pending, child) {
+                    final myPending =
+                        pending.where((m) => m['chat_id'] == chatId).toList();
+                    return Text(
+                        myPending.isNotEmpty
+                            ? _formatTime(myPending.first['created_at'])
+                            : _cachedLastMessageTime,
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 12));
+                  }),
             ],
           ),
           subtitle: Row(
@@ -870,18 +908,45 @@ class _ChatTileState extends State<_ChatTile> {
                           style: TextStyle(
                               color: widget.themeColor.withOpacity(0.7),
                               fontSize: 12)),
-                    // 🔥 FIX: "typing..." only shows up here in the subtitle!
-                    Text(_localIsTyping ? "typing..." : _cachedLastMessage,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            color: _localIsTyping
-                                ? widget.themeColor
-                                : Colors.white54,
-                            fontStyle: _localIsTyping
-                                ? FontStyle.italic
-                                : FontStyle.normal,
-                            fontSize: 14)),
+
+                    // 🔥 FIX: Live Subtitle updates for pending/failed messages!
+                    ValueListenableBuilder<List<Map<String, dynamic>>>(
+                        valueListenable:
+                            ChatSyncService.instance.pendingMessages,
+                        builder: (context, pending, child) {
+                          final myPending = pending
+                              .where((m) => m['chat_id'] == chatId)
+                              .toList();
+                          String displayMsg =
+                              _localIsTyping ? "typing..." : _cachedLastMessage;
+                          Color msgColor = _localIsTyping
+                              ? widget.themeColor
+                              : Colors.white54;
+
+                          if (myPending.isNotEmpty && !_localIsTyping) {
+                            final lastMsg = myPending.first;
+                            displayMsg =
+                                lastMsg['content'].toString().trim().isEmpty
+                                    ? '📷 Media'
+                                    : lastMsg['content'];
+                            if (lastMsg['is_failed'] == true) {
+                              displayMsg = '❌ Failed to send';
+                              msgColor = Colors.redAccent;
+                            } else if (lastMsg['is_pending'] == true) {
+                              displayMsg = '🕒 $displayMsg';
+                            }
+                          }
+
+                          return Text(displayMsg,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  color: msgColor,
+                                  fontStyle: _localIsTyping
+                                      ? FontStyle.italic
+                                      : FontStyle.normal,
+                                  fontSize: 14));
+                        }),
                   ],
                 ),
               ),
@@ -890,26 +955,24 @@ class _ChatTileState extends State<_ChatTile> {
                   children: [
                     if (widget.hasMention)
                       Container(
-                        margin: const EdgeInsets.only(right: 6),
-                        padding: const EdgeInsets.all(4),
-                        decoration: const BoxDecoration(
-                            color: Colors.grey, shape: BoxShape.circle),
-                        child: const Text('@',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.bold)),
-                      ),
+                          margin: const EdgeInsets.only(right: 6),
+                          padding: const EdgeInsets.all(4),
+                          decoration: const BoxDecoration(
+                              color: Colors.grey, shape: BoxShape.circle),
+                          child: const Text('@',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold))),
                     Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                          color: widget.themeColor, shape: BoxShape.circle),
-                      child: Text(widget.unreadCount.toString(),
-                          style: const TextStyle(
-                              color: Color(0xFF121212),
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold)),
-                    ),
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                            color: widget.themeColor, shape: BoxShape.circle),
+                        child: Text(widget.unreadCount.toString(),
+                            style: const TextStyle(
+                                color: Color(0xFF121212),
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold))),
                   ],
                 ),
             ],

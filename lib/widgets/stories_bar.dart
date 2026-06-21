@@ -97,9 +97,22 @@ class StoriesBarState extends State<StoriesBar> {
 
   // 🔥 THE MISSING METHOD: This checks if YOU have viewed the story!
   bool _hasViewedStory(dynamic story) {
-    if (_myId == null) return false;
-    final views = story['story_views'] as List<dynamic>? ?? [];
-    return views.any((v) => v['user_id'].toString() == _myId);
+    // Fetch ID dynamically so it never gets stuck when logging into a new account!
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+    if (currentUserId == null) return false;
+
+    // 1. Your own stories shouldn't have a green "unread" ring forever
+    if (story['user_id'].toString() == currentUserId) {
+      return true;
+    }
+
+    // 2. Check if you have viewed this specific story
+    final views = story['story_views'];
+    if (views is List) {
+      return views
+          .any((v) => v is Map && v['user_id']?.toString() == currentUserId);
+    }
+    return false;
   }
 
   @override
@@ -136,13 +149,29 @@ class StoriesBarState extends State<StoriesBar> {
 
         final uniqueUsers = grouped.entries.toList();
 
-        // Sort users so people with unseen stories jump to the front!
+        // Helper to get the most recent story time for secondary sorting
+        DateTime getMostRecent(List<dynamic> stories) {
+          DateTime latest = DateTime.fromMillisecondsSinceEpoch(0);
+          for (var s in stories) {
+            final d = DateTime.parse(s['created_at']);
+            if (d.isAfter(latest)) latest = d;
+          }
+          return latest;
+        }
+
+        // Sort users so people with UNSEEN stories jump to the front!
         uniqueUsers.sort((a, b) {
-          bool aViewed = a.value.every((s) => _hasViewedStory(s));
-          bool bViewed = b.value.every((s) => _hasViewedStory(s));
-          if (aViewed && !bViewed) return 1;
-          if (!aViewed && bViewed) return -1;
-          return 0;
+          bool aFullyViewed = a.value.every((s) => _hasViewedStory(s));
+          bool bFullyViewed = b.value.every((s) => _hasViewedStory(s));
+
+          // 1. Unread before read
+          if (!aFullyViewed && bFullyViewed) return -1;
+          if (aFullyViewed && !bFullyViewed) return 1;
+
+          // 2. If both are read or both are unread, sort by who posted most recently
+          final aRecent = getMostRecent(a.value);
+          final bRecent = getMostRecent(b.value);
+          return bRecent.compareTo(aRecent);
         });
 
         final List<dynamic> continuousStories = [];
@@ -274,6 +303,7 @@ class StoriesBarState extends State<StoriesBar> {
 
                             int localTargetIndex = 0;
                             for (int k = 0; k < sortedUserStories.length; k++) {
+                              // If we haven't seen it, we stop here and open this one!
                               if (!_hasViewedStory(sortedUserStories[k])) {
                                 localTargetIndex = k;
                                 break;

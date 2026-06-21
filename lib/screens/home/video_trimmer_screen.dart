@@ -3,8 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:video_trimmer/video_trimmer.dart';
 
 class VideoTrimmerScreen extends StatefulWidget {
-  final File file;
-  const VideoTrimmerScreen({super.key, required this.file});
+  final File file; // REVERTED: Must be non-nullable File
+
+  const VideoTrimmerScreen({Key? key, required this.file}) : super(key: key);
 
   @override
   State<VideoTrimmerScreen> createState() => _VideoTrimmerScreenState();
@@ -24,7 +25,7 @@ class _VideoTrimmerScreenState extends State<VideoTrimmerScreen> {
   }
 
   void _loadVideo() {
-    _trimmer.loadVideo(videoFile: widget.file);
+    _trimmer.loadVideo(videoFile: widget.file); // Fixed Error!
   }
 
   Future<void> _saveVideo() async {
@@ -39,7 +40,6 @@ class _VideoTrimmerScreenState extends State<VideoTrimmerScreen> {
         setState(() {
           _progressVisibility = false;
         });
-        // This passes the cropped video path back to your CreateStoryScreen!
         Navigator.of(context).pop(outputPath);
       },
     );
@@ -54,9 +54,9 @@ class _VideoTrimmerScreenState extends State<VideoTrimmerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Color(0xFF121212),
+      backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
-        backgroundColor: Color(0xFF121212),
+        backgroundColor: const Color(0xFF121212),
         title: const Text("Trim Video", style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
@@ -69,7 +69,7 @@ class _VideoTrimmerScreenState extends State<VideoTrimmerScreen> {
       body: Center(
         child: Container(
           padding: const EdgeInsets.only(bottom: 30.0),
-          color: Color(0xFF121212),
+          color: const Color(0xFF121212),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             mainAxisSize: MainAxisSize.max,
@@ -86,7 +86,6 @@ class _VideoTrimmerScreenState extends State<VideoTrimmerScreen> {
               Center(
                 child: Padding(
                   padding: const EdgeInsets.all(8.0),
-                  // THIS IS THE SLIDER FEATURE YOU WERE MISSING
                   child: TrimViewer(
                     trimmer: _trimmer,
                     viewerHeight: 50.0,
