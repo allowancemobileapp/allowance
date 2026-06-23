@@ -794,7 +794,12 @@ class _ChatTileState extends State<_ChatTile> {
       builder: (context, msgSnapshot) {
         if (msgSnapshot.hasData && msgSnapshot.data!.isNotEmpty) {
           final msg = msgSnapshot.data!.first;
-          _cachedLastMessage = msg['content'] ?? '📷 Media';
+
+          // 🔥 FIX: Render Sticker UI string instead of generic path text
+          String rawContent = msg['content'] ?? '📷 Media';
+          if (rawContent == 'Sticker/GIF') rawContent = '🎭 Sticker';
+
+          _cachedLastMessage = rawContent;
           _cachedLastMessageTime = _formatTime(msg['created_at']);
           SharedPreferences.getInstance().then((prefs) => prefs.setString(
               'last_msg_$chatId',
@@ -804,7 +809,6 @@ class _ChatTileState extends State<_ChatTile> {
 
         return ListTile(
           onTap: () async {
-            // 🔥 CLEAR 1: Instantly wipe the unread bubble as soon as you tap
             widget.onClearUnread(chatId.toString());
 
             if (isGroup) {
@@ -833,8 +837,6 @@ class _ChatTileState extends State<_ChatTile> {
                           },
                           userPreferences: widget.userPreferences)));
             }
-
-            // 🔥 CLEAR 2: Wipe out any messages that arrived *while* you were inside the chat!
             widget.onClearUnread(chatId.toString());
           },
           contentPadding:
@@ -881,7 +883,6 @@ class _ChatTileState extends State<_ChatTile> {
                   ],
                 ),
               ),
-              // 🔥 FIX: Live time updates for pending messages
               ValueListenableBuilder<List<Map<String, dynamic>>>(
                   valueListenable: ChatSyncService.instance.pendingMessages,
                   builder: (context, pending, child) {
@@ -908,8 +909,6 @@ class _ChatTileState extends State<_ChatTile> {
                           style: TextStyle(
                               color: widget.themeColor.withOpacity(0.7),
                               fontSize: 12)),
-
-                    // 🔥 FIX: Live Subtitle updates for pending/failed messages!
                     ValueListenableBuilder<List<Map<String, dynamic>>>(
                         valueListenable:
                             ChatSyncService.instance.pendingMessages,
@@ -929,6 +928,11 @@ class _ChatTileState extends State<_ChatTile> {
                                 lastMsg['content'].toString().trim().isEmpty
                                     ? '📷 Media'
                                     : lastMsg['content'];
+
+                            // 🔥 FIX: Formats the pending message UI nicely on the list view
+                            if (displayMsg == 'Sticker/GIF')
+                              displayMsg = '🎭 Sticker';
+
                             if (lastMsg['is_failed'] == true) {
                               displayMsg = '❌ Failed to send';
                               msgColor = Colors.redAccent;

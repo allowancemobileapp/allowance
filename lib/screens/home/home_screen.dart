@@ -22,6 +22,7 @@ import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/screens/home/ticket_screen.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as js;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
@@ -58,6 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
       GlobalKey<StoriesBarState>();
   final Map<int, VideoPlayerController> _videoControllers = {};
   final Map<int, bool> _isVideoMuted = {};
+  final Map<String, int> _schoolActivityCounts = {};
   // 1. Updated _colorfulTabs (changed Order icon to food-related)
   // 1. Updated _colorfulTabs (Circular icons, Library added)
   final List<Map<String, dynamic>> _colorfulTabs = [
@@ -130,7 +132,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _prefs = widget.userPreferences ?? UserPreferences();
 
     _scrollController.addListener(() {
-      // Updates ONLY the button, skipping the global build method entirely.
       if (_scrollController.offset > 300 && !_showBackToTopButton.value) {
         _showBackToTopButton.value = true;
       } else if (_scrollController.offset <= 300 &&
@@ -145,6 +146,12 @@ class _HomeScreenState extends State<HomeScreen> {
     _fetchGistsAndStartSlideshow();
     _setupGlobalChatListener();
     _recoverPendingSubscription();
+
+    // 🔥 Web App Prompt
+    _checkWebInstallPrompt();
+
+    // 🔥 NEW: Check if the user belongs to a school or state yet
+    _checkLocationPrompt();
   }
 
   @override
@@ -160,39 +167,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _scrollController.dispose();
     _showBackToTopButton.dispose(); // <-- Dispose notifier
     super.dispose();
-  }
-
-  // --- NEW: LISTENS FOR MESSAGES ANYWHERE IN THE APP ---
-  void _setupGlobalChatListener() {
-    final myId = supabase.auth.currentUser?.id;
-    if (myId == null) return;
-
-    _globalChatChannel = supabase
-        .channel('global-messages')
-        .onPostgresChanges(
-            event: PostgresChangeEvent.insert,
-            schema: 'public',
-            table: 'messages',
-            callback: (payload) async {
-              final newMsg = payload.newRecord;
-              final senderId = newMsg['sender_id'];
-              final chatId = newMsg['chat_id'];
-
-              // If someone else sent it, AND we are NOT currently inside that specific chat screen
-              if (senderId != myId && chatId != activeChatId) {
-                final senderData = await supabase
-                    .from('profiles')
-                    .select('username, avatar_url')
-                    .eq('id', senderId)
-                    .maybeSingle();
-                final senderName = senderData?['username'] ?? 'Someone';
-                final avatarUrl = senderData?['avatar_url'] ?? '';
-
-                _showInAppNotification(
-                    senderName, newMsg['content'] ?? '📷 Media', avatarUrl);
-              }
-            })
-        .subscribe();
   }
 
   // --- NEW: THE COOL ROUNDED TOP BANNER ---
@@ -515,97 +489,606 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _chooseUniversity() async {
-    List<dynamic> schools = [];
-    String? errorMsg;
-    try {
-      schools = await ApiService.fetchSchools();
-    } catch (e) {
-      errorMsg = "Couldn't load schools right now. Please try again later.";
-    }
-    if (!mounted) return;
-    if (errorMsg != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(errorMsg)));
+  // --- NEW: MANDATORY LOCATION PROMPT ---
+  Future<void> _checkLocationPrompt() async {
+    // If user already has a valid school OR a public state selected, do nothing
+    if (_prefs.schoolName != null &&
+        _prefs.schoolName!.trim().isNotEmpty &&
+        _prefs.schoolName != 'Allowance') {
       return;
     }
+
+    // Delay to let the home screen finish rendering its initial frame
+    await Future.delayed(const Duration(seconds: 1));
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false, // 🔥 Force them to choose before continuing
+      enableDrag: false,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => PopScope(
+        canPop: false, // Prevents Android back button bypass
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.travel_explore,
+                  size: 60, color: Color(0xFF4CAF50)),
+              const SizedBox(height: 16),
+              const Text("Where do you belong?",
+                  style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white)),
+              const SizedBox(height: 12),
+              const Text(
+                  "To enjoy the full Allowance experience, join your Campus community or explore globally in Public Mode!",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Colors.white70, fontSize: 15, height: 1.4)),
+              const SizedBox(height: 32),
+
+              // 🎓 School Button
+              ElevatedButton.icon(
+                icon: const Icon(Icons.school, color: Colors.black),
+                label: const Text("Select University",
+                    style: TextStyle(
+                        color: Colors.black,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF4CAF50),
+                  minimumSize: const Size(double.infinity, 56),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
+                ),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _chooseUniversity();
+                },
+              ),
+              const SizedBox(height: 16),
+
+              // 🌍 Public State Button
+              OutlinedButton.icon(
+                icon: const Icon(Icons.public, color: Colors.blueAccent),
+                label: const Text("Go Public (Select State)",
+                    style: TextStyle(
+                        color: Colors.blueAccent,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16)),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Colors.blueAccent, width: 1.5),
+                  backgroundColor: Colors.blueAccent.withOpacity(0.1),
+                  minimumSize: const Size(double.infinity, 56),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16)),
+                ),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _showStatePicker();
+                },
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- 2. DYNAMIC ACTIVITY TAGS ---
+  Widget _getActivityTagForSchool(String id) {
+    final count = _schoolActivityCounts[id] ?? 0;
+
+    String text;
+    Color color;
+
+    // 🔥 100% ACCURATE THRESHOLDS based on actual registered students!
+    if (count >= 100) {
+      text = 'Highly Active 🔥';
+      color = Colors.greenAccent;
+    } else if (count >= 30) {
+      text = 'Very Active ⚡';
+      color = Colors.blueAccent;
+    } else if (count >= 10) {
+      text = 'Active ✨';
+      color = Colors.purpleAccent;
+    } else if (count >= 2) {
+      text = 'Calm/Slow 🍃';
+      color = Colors.orangeAccent;
+    } else {
+      text = 'Not Active 😴';
+      color = Colors.redAccent;
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        border: Border.all(color: color.withOpacity(0.3), width: 1.5),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+            color: color,
+            fontSize: 10,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 0.5),
+      ),
+    );
+  }
+
+  // --- 1. THE BACKGROUND FETCH FOR THE PICKER ---
+  Future<List<dynamic>> _fetchSchoolsAndActivity() async {
+    try {
+      final schools = await ApiService.fetchSchools();
+      // 🔥 REAL ACTIVITY MEASUREMENT: Accurately count users per school
+      final profiles = await supabase.from('profiles').select('school_id');
+      _schoolActivityCounts.clear();
+      for (var p in profiles) {
+        final sId = p['school_id']?.toString() ?? '';
+        if (sId.isNotEmpty) {
+          _schoolActivityCounts[sId] = (_schoolActivityCounts[sId] ?? 0) + 1;
+        }
+      }
+      return schools;
+    } catch (e) {
+      throw Exception("Failed to load schools");
+    }
+  }
+
+  // --- 2. INSTANT LOAD SCHOOL PICKER ---
+  void _chooseUniversity() {
+    // 🔥 FIX: Opens instantly! No awaiting here.
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (sheetContext) => _buildSchoolPicker(sheetContext, schools),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (sheetContext) => _buildSchoolPicker(sheetContext),
     );
   }
 
-  Widget _buildSchoolPicker(BuildContext modalContext, List<dynamic> schools) {
+  // --- 3. THE INSTANT RENDER PICKER UI ---
+  Widget _buildSchoolPicker(BuildContext modalContext) {
+    final textColor = _isDarkMode ? Colors.white : Colors.black87;
     return DraggableScrollableSheet(
       expand: false,
-      initialChildSize: 0.5,
-      maxChildSize: 0.9,
-      minChildSize: 0.3,
+      initialChildSize: 0.75,
+      maxChildSize: 0.95,
+      minChildSize: 0.5,
       builder: (BuildContext draggableSheetContext,
           ScrollController scrollController) {
-        final textColor = _isDarkMode ? Colors.white : Colors.black87;
         return Container(
-          padding: const EdgeInsets.symmetric(vertical: 16),
           decoration: BoxDecoration(
-            color: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            color: _isDarkMode ? const Color(0xFF121212) : Colors.grey[100],
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
           ),
-          child: schools.isNotEmpty
-              ? ListView.builder(
-                  controller: scrollController,
-                  itemCount: schools.length,
-                  itemBuilder: (ctx, index) {
-                    final school = schools[index];
-                    final name = school["name"] as String? ?? "Unnamed School";
-                    final isSelected =
-                        _prefs.schoolId == school["id"].toString();
+          child: Column(
+            children: [
+              const SizedBox(height: 12),
+              Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2))),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Text("Select University",
+                    style: TextStyle(
+                        fontFamily: 'Montserrat',
+                        fontSize: 20,
+                        color: textColor,
+                        fontWeight: FontWeight.bold)),
+              ),
+              const Divider(color: Colors.white10, height: 1),
 
-                    return ListTile(
-                      title: Text(
-                        name,
-                        style: TextStyle(
-                          fontFamily: 'Montserrat',
-                          fontSize: 18,
-                          color: textColor,
-                        ),
+              // THE SCROLLABLE SCHOOL LIST WITH FUTURE BUILDER
+              Expanded(
+                child: FutureBuilder<List<dynamic>>(
+                    future: _fetchSchoolsAndActivity(),
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(
+                            child: CircularProgressIndicator(
+                                color: Color(0xFF4CAF50)));
+                      }
+                      if (snapshot.hasError) {
+                        return Center(
+                            child: Text(
+                                "Couldn't load schools. Please try again.",
+                                style: TextStyle(color: textColor)));
+                      }
+
+                      final schools = snapshot.data ?? [];
+                      if (schools.isEmpty) {
+                        return Center(
+                            child: Text("No schools available",
+                                style: TextStyle(color: textColor)));
+                      }
+
+                      return ListView.builder(
+                        controller: scrollController,
+                        itemCount: schools.length,
+                        itemBuilder: (ctx, index) {
+                          final school = schools[index];
+                          final name =
+                              school["name"] as String? ?? "Unnamed School";
+                          final idStr = school["id"].toString();
+                          final isSelected = _prefs.schoolId == idStr;
+
+                          return ListTile(
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 24, vertical: 8),
+                            title: Text(name,
+                                style: TextStyle(
+                                    fontFamily: 'Montserrat',
+                                    fontSize: 16,
+                                    color: textColor,
+                                    fontWeight: FontWeight.w600)),
+                            subtitle: Align(
+                              alignment: Alignment.centerLeft,
+                              child: _getActivityTagForSchool(idStr),
+                            ),
+                            trailing: isSelected
+                                ? Icon(Icons.check_circle,
+                                    color: themeColor, size: 28)
+                                : null,
+                            onTap: () async {
+                              _prefs.schoolId = idStr;
+                              _prefs.schoolName = name;
+                              await _prefs.savePreferences();
+                              if (!mounted) return;
+                              Navigator.pop(modalContext);
+                              setState(() => _selectedRestaurants.clear());
+                              _handleRefresh(); // Instantly update Home Screen
+                            },
+                          );
+                        },
+                      );
+                    }),
+              ),
+
+              // THE STEADY PUBLIC MODE BOTTOM BAR (BRAND THEMED)
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: _isDarkMode ? const Color(0xFF1E1E1E) : Colors.white,
+                  borderRadius:
+                      const BorderRadius.vertical(top: Radius.circular(24)),
+                  boxShadow: [
+                    BoxShadow(
+                        color: Colors.black.withOpacity(0.3),
+                        blurRadius: 10,
+                        offset: const Offset(0, -5))
+                  ],
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: themeColor.withOpacity(0.15),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        side: BorderSide(
+                            color: themeColor.withOpacity(0.5), width: 1.5),
                       ),
-                      trailing: isSelected
-                          ? Icon(Icons.check, color: themeColor)
-                          : null,
-                      onTap: () async {
-                        _prefs.schoolId = school["id"].toString();
-                        _prefs.schoolName = name;
-                        await _prefs.savePreferences();
-
-                        if (!mounted) return;
-
-                        Navigator.pop(context);
-
-                        setState(() {
-                          _selectedRestaurants.clear();
-                        });
-                      },
-                    );
-                  },
-                )
-              : Center(
-                  child: Text(
-                    "No schools available",
-                    style: TextStyle(color: textColor),
+                      minimumSize: const Size(double.infinity, 56),
+                    ),
+                    onPressed: () {
+                      Navigator.pop(modalContext);
+                      _showStatePicker();
+                    },
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.public, color: themeColor, size: 24),
+                        const SizedBox(width: 10),
+                        Text('Switch to Public Mode (State)',
+                            style: TextStyle(
+                                color: themeColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                letterSpacing: 0.5)),
+                      ],
+                    ),
                   ),
                 ),
+              ),
+            ],
+          ),
         );
       },
+    );
+  }
+
+  // --- 4. PUBLIC MODE STATE PICKER ---
+  // --- UPDATED: SAVES STATE (PUBLIC MODE) PERMANENTLY TO DB ---
+  void _showStatePicker() {
+    final List<String> states = [
+      "Abia",
+      "Adamawa",
+      "Akwa Ibom",
+      "Anambra",
+      "Bauchi",
+      "Bayelsa",
+      "Benue",
+      "Borno",
+      "Cross River",
+      "Delta",
+      "Ebonyi",
+      "Edo",
+      "Ekiti",
+      "Enugu",
+      "FCT - Abuja",
+      "Gombe",
+      "Imo",
+      "Jigawa",
+      "Kaduna",
+      "Kano",
+      "Katsina",
+      "Kebbi",
+      "Kogi",
+      "Kwara",
+      "Lagos",
+      "Nasarawa",
+      "Niger",
+      "Ogun",
+      "Ondo",
+      "Osun",
+      "Oyo",
+      "Plateau",
+      "Rivers",
+      "Sokoto",
+      "Taraba",
+      "Yobe",
+      "Zamfara"
+    ];
+    int selectedIndex = 0;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF121212),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) {
+        return Container(
+          height: 400,
+          padding: const EdgeInsets.only(top: 24),
+          child: Column(
+            children: [
+              const Text("Select Your State",
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text("Public Mode",
+                  style: TextStyle(
+                      color: themeColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              Expanded(
+                child: CupertinoPicker(
+                  itemExtent: 45,
+                  scrollController: FixedExtentScrollController(initialItem: 0),
+                  onSelectedItemChanged: (index) => selectedIndex = index,
+                  children: states
+                      .map((state) => Center(
+                          child: Text(state,
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w500))))
+                      .toList(),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: SafeArea(
+                  top: false,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: themeColor,
+                        minimumSize: const Size(double.infinity, 56),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16))),
+                    onPressed: () async {
+                      final selectedState = states[selectedIndex];
+                      // Empty schoolId means "Public Mode".
+                      _prefs.schoolId = "";
+                      _prefs.schoolName = selectedState;
+                      await _prefs.savePreferences();
+
+                      // 🔥 FIX: Save to DB so it persists on next login!
+                      final myId = supabase.auth.currentUser?.id;
+                      if (myId != null) {
+                        supabase
+                            .from('profiles')
+                            .update(
+                                {'school_id': '', 'school_name': selectedState})
+                            .eq('id', myId)
+                            .then((_) {});
+                      }
+
+                      if (mounted) {
+                        Navigator.pop(ctx);
+                        setState(() => _selectedRestaurants.clear());
+                        _handleRefresh();
+                      }
+                    },
+                    child: const Text('Confirm',
+                        style: TextStyle(
+                            color: Colors.black,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // --- ULTRA-SLEEK WEB INSTALL PROMPT (OVERFLOW FIXED) ---
+  Future<void> _checkWebInstallPrompt() async {
+    if (!kIsWeb) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final hasSeen = prefs.getBool('has_seen_web_install') ?? false;
+
+    if (!hasSeen) {
+      await prefs.setBool('has_seen_web_install', true);
+
+      Future.delayed(const Duration(seconds: 3), () {
+        if (!mounted) return;
+        showModalBottomSheet(
+          context: context,
+          backgroundColor: const Color(0xFF121212),
+          isScrollControlled: true, // Allows sheet to adjust dynamically
+          shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
+          builder: (ctx) => SafeArea(
+            // 🔥 FIX 1: SafeArea added
+            child: SingleChildScrollView(
+              // 🔥 FIX 2: Prevents pixel overflow on small screens!
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                            color: Colors.white24,
+                            borderRadius: BorderRadius.circular(2))),
+                    const SizedBox(height: 24),
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: themeColor.withOpacity(0.15),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(Icons.install_mobile,
+                          size: 50, color: themeColor),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text("Get the Allowance App!",
+                        style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white)),
+                    const SizedBox(height: 12),
+                    const Text(
+                        "Install Allowance on your home screen for lightning-fast speeds, offline access, and real-time push notifications! 🚀",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: Colors.white70, fontSize: 15, height: 1.4)),
+                    const SizedBox(height: 24),
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: Column(
+                        children: [
+                          _buildInstallStep("1",
+                              "Tap the Share icon (iOS) or Menu (Android) in your browser header."),
+                          const Divider(color: Colors.white10, height: 20),
+                          _buildInstallStep(
+                              "2", "Select 'Add to Home Screen'."),
+                          const Divider(color: Colors.white10, height: 20),
+                          _buildInstallStep("3",
+                              "Open Allowance directly from your app drawer!"),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 32),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 56,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          if (kIsWeb) {
+                            try {
+                              (js.context as dynamic)
+                                  .callMethod('triggerPwaInstall');
+                            } catch (e) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Click the browser menu and select 'Add to Home Screen'")));
+                            }
+                          }
+                        },
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: themeColor,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16))),
+                        child: const Text("I'll Install It Now",
+                            style: TextStyle(
+                                color: Colors.black,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16)),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text("Maybe later",
+                            style: TextStyle(
+                                color: Colors.white54, fontSize: 15))),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      });
+    }
+  }
+
+  Widget _buildInstallStep(String number, String text) {
+    return Row(
+      children: [
+        CircleAvatar(
+            radius: 12,
+            backgroundColor: themeColor.withOpacity(0.2),
+            child: Text(number,
+                style: TextStyle(
+                    color: themeColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold))),
+        const SizedBox(width: 12),
+        Expanded(
+            child: Text(text,
+                style: const TextStyle(color: Colors.white, fontSize: 14))),
+      ],
     );
   }
 
   void _showRestaurantSelection() async {
     final sid = _prefs.schoolId;
     setState(() => _vendorBarTapped = true);
+
     if (sid != null && sid.isNotEmpty) {
       List<dynamic> vendors = [];
       String? errorMsg;
@@ -615,19 +1098,55 @@ class _HomeScreenState extends State<HomeScreen> {
             .map<String>((v) => v['name'] as String? ?? "Unnamed Vendor")
             .toList();
       } catch (e) {
-        errorMsg = "Couldn't load vendors right now. Please try again later.";
+        errorMsg = "error";
       }
+
       if (!mounted) return;
-      if (errorMsg != null) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(errorMsg)));
+
+      if (errorMsg != null || _restaurants.isEmpty) {
+        showModalBottomSheet(
+            context: context,
+            backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
+            shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+            builder: (ctx) {
+              final assetPath = errorMsg != null
+                  ? 'assets/images/no_internet.jpg'
+                  : 'assets/images/coming_soon.jpg';
+              return SizedBox(
+                height: 350,
+                child: Center(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(24),
+                    child: Image.asset(
+                      assetPath,
+                      width: 220,
+                      fit: BoxFit.contain,
+                      errorBuilder: (context, error, stackTrace) => Container(
+                        width: 220,
+                        height: 220,
+                        decoration: BoxDecoration(
+                            color: Colors.grey[900],
+                            borderRadius: BorderRadius.circular(24)),
+                        child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.image_not_supported,
+                                  color: Colors.white24, size: 50),
+                              const SizedBox(height: 12),
+                              Text(assetPath.split('/').last,
+                                  style: const TextStyle(
+                                      color: Colors.white54, fontSize: 12))
+                            ]),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            });
         return;
       }
-      if (_restaurants.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text("No vendors available for this school.")));
-        return;
-      }
+
       showModalBottomSheet(
         context: context,
         isScrollControlled: true,
@@ -827,9 +1346,44 @@ class _HomeScreenState extends State<HomeScreen> {
               MaterialPageRoute(
                   builder: (_) => OrderScreen(userPreferences: _prefs)));
         } else if (tab["label"] == "Library") {
-          // Placeholder for the upcoming Library feature!
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Library feature coming soon! 📚')),
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => Scaffold(
+                backgroundColor: const Color(0xFF121212),
+                appBar: AppBar(
+                    backgroundColor: Colors.transparent,
+                    elevation: 0,
+                    iconTheme: const IconThemeData(color: Colors.white)),
+                body: Center(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(24),
+                    child: Image.asset(
+                      'assets/images/coming_soon.jpg',
+                      width: 220,
+                      fit: BoxFit.contain,
+                      errorBuilder: (context, error, stackTrace) => Container(
+                        width: 220,
+                        height: 220,
+                        decoration: BoxDecoration(
+                            color: Colors.grey[900],
+                            borderRadius: BorderRadius.circular(24)),
+                        child: const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.image_not_supported,
+                                  color: Colors.white24, size: 50),
+                              SizedBox(height: 12),
+                              Text('coming_soon.jpg',
+                                  style: TextStyle(
+                                      color: Colors.white54, fontSize: 12))
+                            ]),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           );
         }
       },
@@ -837,12 +1391,11 @@ class _HomeScreenState extends State<HomeScreen> {
         width: 48,
         height: 48,
         decoration: BoxDecoration(
-          color: (tab["color"] as Color).withOpacity(0.65),
-          shape: BoxShape.circle, // Made perfectly round!
-        ),
+            color: (tab["color"] as Color).withOpacity(0.65),
+            shape: BoxShape.circle),
         child: Center(
-          child: Icon(tab["icon"] as IconData?, color: Colors.white, size: 24),
-        ),
+            child:
+                Icon(tab["icon"] as IconData?, color: Colors.white, size: 24)),
       ),
     );
   }
@@ -1102,6 +1655,52 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // --- UPDATED: LISTENS FOR CHATS AND REAL-TIME GISTS ---
+  void _setupGlobalChatListener() {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    _globalChatChannel = supabase.channel('global-app-events');
+
+    // Listen for Chats
+    _globalChatChannel!.onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'messages',
+        callback: (payload) async {
+          final newMsg = payload.newRecord;
+          final senderId = newMsg['sender_id'];
+          final chatId = newMsg['chat_id'];
+
+          if (senderId != myId && chatId != activeChatId) {
+            final senderData = await supabase
+                .from('profiles')
+                .select('username, avatar_url')
+                .eq('id', senderId)
+                .maybeSingle();
+            final senderName = senderData?['username'] ?? 'Someone';
+            final avatarUrl = senderData?['avatar_url'] ?? '';
+            _showInAppNotification(
+                senderName, newMsg['content'] ?? '📷 Media', avatarUrl);
+          }
+        });
+
+    // 🔥 NEW: Listen for Real-Time Gists!
+    _globalChatChannel!.onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'gists',
+        callback: (payload) {
+          final newGist = payload.newRecord;
+          if (newGist['status'] == 'active' && mounted) {
+            _handleRefresh(); // Silently pulls the new gist into the feed!
+          }
+        });
+
+    _globalChatChannel!.subscribe();
+  }
+
+  // --- UPDATED: BUILD METHOD WITH WHATSAPP LOADING SCREEN ---
   @override
   Widget build(BuildContext context) {
     final Color bgColor =
@@ -1111,255 +1710,290 @@ class _HomeScreenState extends State<HomeScreen> {
       data: _isDarkMode
           ? ThemeData.dark().copyWith(scaffoldBackgroundColor: bgColor)
           : ThemeData.light().copyWith(scaffoldBackgroundColor: bgColor),
-      child: Scaffold(
-        appBar: _selectedIndex == 0 ? _buildAppBar() : null,
-        bottomNavigationBar: _buildCustomFooter(bgColor),
-
-        // --- NEW: UNIVERSAL PLUS BUTTON ---
-        floatingActionButton: FloatingActionButton(
-          heroTag: 'universal_plus_btn',
-          backgroundColor: themeColor,
-          elevation: 4,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          onPressed: () => _showUniversalPlusMenu(context),
-          child: const Icon(Icons.add, color: Colors.white, size: 32),
-        ),
-
-        body: SafeArea(
-          child: Stack(
-            children: [
-              IndexedStack(
-                index: _selectedIndex,
+      child: Stack(
+        children: [
+          Scaffold(
+            appBar: _selectedIndex == 0 ? _buildAppBar() : null,
+            bottomNavigationBar: _buildCustomFooter(bgColor),
+            floatingActionButton: FloatingActionButton(
+              heroTag: 'universal_plus_btn',
+              backgroundColor: themeColor,
+              elevation: 4,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
+              onPressed: () => _showUniversalPlusMenu(context),
+              child: const Icon(Icons.add, color: Colors.white, size: 32),
+            ),
+            body: SafeArea(
+              child: Stack(
                 children: [
-                  // INDEX 0: HOME
-                  RefreshIndicator(
-                    color: themeColor,
-                    onRefresh: _handleRefresh,
-                    child: CustomScrollView(
-                      controller: _scrollController,
-                      physics: const AlwaysScrollableScrollPhysics(),
-                      slivers: [
-                        SliverToBoxAdapter(
-                          child: Padding(
-                            padding: const EdgeInsets.only(
-                                left: 16, top: 20, right: 16, bottom: 8),
-                            child: Column(
-                              children: [
-                                GestureDetector(
-                                  onTap: () {
-                                    setState(() => _vendorBarTapped = true);
-                                    _showRestaurantSelection();
-                                  },
-                                  child: Container(
-                                    width: MediaQuery.of(context).size.width *
-                                        0.85,
-                                    height: 44,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF1E1E1E),
-                                      borderRadius: BorderRadius.circular(25),
+                  IndexedStack(
+                    index: _selectedIndex,
+                    children: [
+                      RefreshIndicator(
+                        color: themeColor,
+                        onRefresh: _handleRefresh,
+                        child: CustomScrollView(
+                          controller: _scrollController,
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          slivers: [
+                            SliverToBoxAdapter(
+                              child: Padding(
+                                padding: const EdgeInsets.only(
+                                    left: 16, top: 20, right: 16, bottom: 8),
+                                child: Column(
+                                  children: [
+                                    GestureDetector(
+                                      onTap: () {
+                                        setState(() => _vendorBarTapped = true);
+                                        _showRestaurantSelection();
+                                      },
+                                      child: Container(
+                                        width:
+                                            MediaQuery.of(context).size.width *
+                                                0.85,
+                                        height: 44,
+                                        decoration: BoxDecoration(
+                                            color: const Color(0xFF1E1E1E),
+                                            borderRadius:
+                                                BorderRadius.circular(25)),
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 16),
+                                        child: Row(children: [
+                                          Icon(BoxIcons.bxs_store,
+                                              color: themeColor, size: 20),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                              child: _selectedRestaurants
+                                                      .isNotEmpty
+                                                  ? SingleChildScrollView(
+                                                      scrollDirection:
+                                                          Axis.horizontal,
+                                                      child: Row(
+                                                          children: _selectedRestaurants
+                                                              .map((v) => Padding(
+                                                                  padding:
+                                                                      const EdgeInsets.only(
+                                                                          right:
+                                                                              12),
+                                                                  child: Chip(
+                                                                      label: Text(
+                                                                          v,
+                                                                          style: const TextStyle(
+                                                                              fontSize: 12.6,
+                                                                              color: Colors.white)),
+                                                                      backgroundColor: const Color(0xFF2A2A2A))))
+                                                              .toList()))
+                                                  : const Text("Select Vendor", style: TextStyle(fontSize: 15.4, color: Colors.white54))),
+                                          !_vendorBarTapped
+                                              ? Icon(BoxIcons.bxs_chevron_down,
+                                                  color: themeColor, size: 22)
+                                              : const SizedBox(),
+                                        ]),
+                                      ),
                                     ),
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 16),
-                                    child: Row(children: [
-                                      Icon(BoxIcons.bxs_store,
-                                          color: themeColor, size: 20),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                          child: _selectedRestaurants.isNotEmpty
-                                              ? SingleChildScrollView(
-                                                  scrollDirection:
-                                                      Axis.horizontal,
-                                                  child: Row(
-                                                      children: _selectedRestaurants
-                                                          .map((v) => Padding(
-                                                              padding: const EdgeInsets.only(
-                                                                  right: 12),
-                                                              child: Chip(
-                                                                  label: Text(v,
-                                                                      style: const TextStyle(
-                                                                          fontSize:
-                                                                              12.6,
-                                                                          color: Colors
-                                                                              .white)),
-                                                                  backgroundColor:
-                                                                      const Color(0xFF2A2A2A))))
-                                                          .toList()))
-                                              : const Text("Select Vendor", style: TextStyle(fontSize: 15.4, color: Colors.white54))),
-                                      !_vendorBarTapped
-                                          ? Icon(BoxIcons.bxs_chevron_down,
-                                              color: themeColor, size: 22)
-                                          : const SizedBox(),
-                                    ]),
-                                  ),
+                                    const SizedBox(height: 16),
+                                    Container(
+                                      width: MediaQuery.of(context).size.width *
+                                          0.85,
+                                      height: 44,
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFF1E1E1E),
+                                          borderRadius:
+                                              BorderRadius.circular(25)),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 16),
+                                      child: Row(children: [
+                                        Icon(BoxIcons.bxs_dollar_circle,
+                                            color: themeColor, size: 20),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                            child: TextField(
+                                                controller: _budgetController,
+                                                focusNode: _budgetFocusNode,
+                                                keyboardType:
+                                                    TextInputType.number,
+                                                style: const TextStyle(
+                                                    fontSize: 12.6,
+                                                    color: Colors.white),
+                                                decoration:
+                                                    const InputDecoration(
+                                                        hintText:
+                                                            "Enter Budget",
+                                                        hintStyle: TextStyle(
+                                                            color:
+                                                                Colors.white54,
+                                                            fontSize: 15.4),
+                                                        border:
+                                                            InputBorder.none))),
+                                        InkWell(
+                                            onTap: () => Navigator.push(
+                                                context,
+                                                MaterialPageRoute(
+                                                    builder: (_) =>
+                                                        AvailableOptionsScreen(
+                                                            userPreferences:
+                                                                _prefs,
+                                                            selectedRestaurants:
+                                                                _selectedRestaurants))),
+                                            child: Container(
+                                                decoration: BoxDecoration(
+                                                    color: themeColor,
+                                                    shape: BoxShape.circle),
+                                                padding:
+                                                    const EdgeInsets.all(6),
+                                                child: const Icon(
+                                                    BoxIcons.bxs_chevron_right,
+                                                    color: Colors.white,
+                                                    size: 22))),
+                                      ]),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    SizedBox(
+                                      width: MediaQuery.of(context).size.width *
+                                          0.85,
+                                      height: 60,
+                                      child: Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.spaceBetween,
+                                        children: _colorfulTabs
+                                            .map(
+                                                (tab) => _buildCircularTab(tab))
+                                            .toList(),
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                const SizedBox(height: 16),
-                                Container(
-                                  width:
-                                      MediaQuery.of(context).size.width * 0.85,
-                                  height: 44,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF1E1E1E),
-                                    borderRadius: BorderRadius.circular(25),
-                                  ),
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 16),
-                                  child: Row(children: [
-                                    Icon(BoxIcons.bxs_dollar_circle,
-                                        color: themeColor, size: 20),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                        child: TextField(
-                                            controller: _budgetController,
-                                            focusNode: _budgetFocusNode,
-                                            keyboardType: TextInputType.number,
-                                            style: const TextStyle(
-                                                fontSize: 12.6,
-                                                color: Colors.white),
-                                            decoration: const InputDecoration(
-                                                hintText: "Enter Budget",
-                                                hintStyle: TextStyle(
-                                                    color: Colors.white54,
-                                                    fontSize: 15.4),
-                                                border: InputBorder.none))),
-                                    InkWell(
-                                        onTap: () => Navigator.push(
-                                            context,
-                                            MaterialPageRoute(
-                                                builder: (_) =>
-                                                    AvailableOptionsScreen(
-                                                        userPreferences: _prefs,
-                                                        selectedRestaurants:
-                                                            _selectedRestaurants))),
-                                        child: Container(
-                                            decoration: BoxDecoration(
-                                                color: themeColor,
-                                                shape: BoxShape.circle),
-                                            padding: const EdgeInsets.all(6),
-                                            child: const Icon(
-                                                BoxIcons.bxs_chevron_right,
-                                                color: Colors.white,
-                                                size: 22))),
-                                  ]),
-                                ),
-                                const SizedBox(height: 12),
-                                SizedBox(
-                                  width:
-                                      MediaQuery.of(context).size.width * 0.85,
-                                  height: 60,
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: _colorfulTabs
-                                        .map((tab) => _buildCircularTab(tab))
-                                        .toList(),
-                                  ),
-                                ),
-                              ],
+                              ),
                             ),
-                          ),
-                        ),
-                        SliverPersistentHeader(
-                          pinned: true,
-                          delegate: _GistBarHeaderDelegate(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                _buildGistFilterBar(),
-                                const SizedBox(height: 10),
-                                StoriesBar(
-                                    key: _storiesBarKey,
-                                    userPreferences:
-                                        widget.userPreferences ?? _prefs),
-                              ],
+                            SliverPersistentHeader(
+                              pinned: true,
+                              delegate: _GistBarHeaderDelegate(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    _buildGistFilterBar(),
+                                    const SizedBox(height: 10),
+                                    StoriesBar(
+                                        key: _storiesBarKey,
+                                        userPreferences:
+                                            widget.userPreferences ?? _prefs),
+                                  ],
+                                ),
+                              ),
                             ),
-                          ),
+                            _buildGistSlideshow(),
+                          ],
                         ),
-                        _buildGistSlideshow(),
-                      ],
-                    ),
+                      ),
+                      ExploreScreen(userPreferences: _prefs),
+                      ChatListScreen(userPreferences: _prefs),
+                      ProfileScreen(
+                          userPreferences: _prefs,
+                          onSave: () => setState(() => _selectedIndex = 0)),
+                    ],
                   ),
-
-                  // INDEX 1: EXPLORE
-                  ExploreScreen(userPreferences: _prefs),
-
-                  // INDEX 2: CHATS
-                  ChatListScreen(userPreferences: _prefs),
-
-                  // INDEX 3: PROFILE
-                  ProfileScreen(
-                      userPreferences: _prefs,
-                      onSave: () => setState(() => _selectedIndex = 0)),
+                  if (_selectedIndex == 0)
+                    Positioned(
+                      bottom: 20,
+                      left: 0,
+                      right: 0,
+                      child: ValueListenableBuilder<bool>(
+                        valueListenable: _showBackToTopButton,
+                        builder: (context, show, child) {
+                          if (!show) return const SizedBox.shrink();
+                          return Center(
+                            child: Opacity(
+                              opacity: 0.5,
+                              child: GestureDetector(
+                                onTap: () => _scrollController.animateTo(0,
+                                    duration: const Duration(milliseconds: 600),
+                                    curve: Curves.easeInOut),
+                                child: Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                        color: themeColor,
+                                        shape: BoxShape.circle),
+                                    child: const Icon(Icons.arrow_upward,
+                                        color: Colors.white, size: 28)),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
                 ],
               ),
-              // --- OUTSIDE THE BOX: Listens silently without rebuilding the whole screen ---
-              if (_selectedIndex == 0)
-                Positioned(
-                  bottom: 20,
-                  left: 0,
-                  right: 0,
-                  child: ValueListenableBuilder<bool>(
-                    valueListenable: _showBackToTopButton,
-                    builder: (context, show, child) {
-                      if (!show) return const SizedBox.shrink();
-                      return Center(
-                        child: Opacity(
-                          opacity: 0.5,
-                          child: GestureDetector(
-                            onTap: () {
-                              _scrollController.animateTo(0,
-                                  duration: const Duration(milliseconds: 600),
-                                  curve: Curves.easeInOut);
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                  color: themeColor, shape: BoxShape.circle),
-                              child: const Icon(Icons.arrow_upward,
-                                  color: Colors.white, size: 28),
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-            ],
+            ),
           ),
-        ),
+          // 🔥 SYNC SCREEN COMPLETELY REMOVED! YOU GO STRAIGHT IN!
+        ],
       ),
     );
   }
 
+  // --- UPDATED: REAL-TIME NOTIFICATION BADGE ---
+  // --- FIXED: REAL-TIME NOTIFICATION BADGE ---
   PreferredSizeWidget _buildAppBar() {
+    final isPublicMode = _prefs.schoolId == "" &&
+        _prefs.schoolName != null &&
+        _prefs.schoolName!.isNotEmpty;
+    final hasLocation = _prefs.schoolId?.isNotEmpty == true || isPublicMode;
+    final myId = supabase.auth.currentUser?.id ?? '';
+
     return AppBar(
-      // These two lines fix the color-changing issue on scroll:
       scrolledUnderElevation: 0,
       surfaceTintColor: Colors.transparent,
-
-      // --- FIX: Updated to match the new Profile Screen global color! ---
       backgroundColor: _isDarkMode ? const Color(0xFF121212) : Colors.grey[100],
       elevation: 0,
       centerTitle: true,
-      leading: Builder(
-        builder: (appBarContext) => IconButton(
-          icon: const Icon(Icons.notifications, size: 36),
-          onPressed: () {
-            _showNotifications();
-          },
-        ),
+      leading: StreamBuilder<List<Map<String, dynamic>>>(
+        // 🔥 FIX: Only uses one .eq() here to prevent the SupabaseStreamBuilder error
+        stream: myId.isEmpty
+            ? const Stream.empty()
+            : supabase
+                .from('notifications')
+                .stream(primaryKey: ['id']).eq('user_id', myId),
+        builder: (context, snapshot) {
+          // 🔥 FIX: Filters the 'read == false' locally so the stream never breaks!
+          final unreadCount =
+              snapshot.data?.where((n) => n['read'] == false).length ?? 0;
+          return IconButton(
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.notifications, size: 36),
+                if (unreadCount > 0)
+                  Positioned(
+                    top: 0,
+                    right: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: const BoxDecoration(
+                          color: Colors.redAccent, shape: BoxShape.circle),
+                      child: Text(
+                        unreadCount > 9 ? '9+' : unreadCount.toString(),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            onPressed: _showNotifications,
+          );
+        },
       ),
-      title: Image.asset(
-        'assets/images/allowance_logo.png',
-        height: 200,
-        width: 200,
-        fit: BoxFit.contain,
-      ),
+      title: Image.asset('assets/images/allowance_logo.png',
+          height: 200, width: 200, fit: BoxFit.contain),
       actions: [
         IconButton(
-          icon: const Icon(BoxIcons.bxs_map, size: 36),
-          color: _prefs.schoolId?.isNotEmpty == true
-              ? themeColor
+          icon: Icon(isPublicMode ? Icons.public : BoxIcons.bxs_map,
+              size: isPublicMode ? 32 : 36),
+          color: hasLocation
+              ? (isPublicMode ? Colors.blueAccent : themeColor)
               : (_isDarkMode ? Colors.white54 : Colors.black54),
           onPressed: _chooseUniversity,
         )
@@ -1367,6 +2001,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // --- UPDATED: HYPER-RESPONSIVE TASKBAR ---
   Widget _buildCustomFooter(Color screenBgColor) {
     final icons = [
       BoxIcons.bxs_home,
@@ -1402,17 +2037,14 @@ class _HomeScreenState extends State<HomeScreen> {
             iconWidget = Container(
               padding: EdgeInsets.all(sel ? 2 : 0),
               decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: sel ? Border.all(color: themeColor, width: 2) : null,
-              ),
+                  shape: BoxShape.circle,
+                  border: sel ? Border.all(color: themeColor, width: 2) : null),
               child: CircleAvatar(
-                radius: 13,
-                backgroundColor: const Color(0xFF1E1E1E),
-                backgroundImage: NetworkImage(_prefs.avatarUrl!),
-              ),
+                  radius: 13,
+                  backgroundColor: const Color(0xFF1E1E1E),
+                  backgroundImage: NetworkImage(_prefs.avatarUrl!)),
             );
           } else if (isChatTab) {
-            // --- CHAT BADGE MOVED TO TASKBAR ---
             iconWidget = StreamBuilder<List<Map<String, dynamic>>>(
               stream: supabase.auth.currentUser == null
                   ? const Stream.empty()
@@ -1424,7 +2056,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 final allUnread = snapshot.data ?? [];
                 final unreadCount =
                     allUnread.where((msg) => msg['sender_id'] != myId).length;
-
                 return Stack(
                   clipBehavior: Clip.none,
                   children: [
@@ -1435,34 +2066,35 @@ class _HomeScreenState extends State<HomeScreen> {
                         top: -4,
                         right: -6,
                         child: Container(
-                          padding: const EdgeInsets.all(4),
-                          decoration: const BoxDecoration(
-                              color: Colors.redAccent, shape: BoxShape.circle),
-                          child: Text(
-                            unreadCount > 99 ? '99+' : unreadCount.toString(),
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 9,
-                                fontWeight: FontWeight.bold),
-                          ),
-                        ),
+                            padding: const EdgeInsets.all(4),
+                            decoration: const BoxDecoration(
+                                color: Colors.redAccent,
+                                shape: BoxShape.circle),
+                            child: Text(
+                                unreadCount > 99
+                                    ? '99+'
+                                    : unreadCount.toString(),
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.bold))),
                       ),
                   ],
                 );
               },
             );
           } else {
-            iconWidget = Icon(
-              icons[i],
-              size: 28,
-              color: sel ? themeColor : Colors.white54,
-            );
+            iconWidget = Icon(icons[i],
+                size: 28, color: sel ? themeColor : Colors.white54);
           }
 
           return GestureDetector(
+            behavior: HitTestBehavior
+                .opaque, // 🔥 THE FIX: Makes the entire padding area instantly clickable!
             onTap: acts[i],
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 24, vertical: 8), // Increased hit box width
               child: iconWidget,
             ),
           );
@@ -1533,7 +2165,19 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // --- REPLACED: Show Notifications Bottom Sheet (Added routing logic!) ---
+  // --- UPDATED: CLEARS ALL NOTIFICATIONS INSTANTLY WHEN OPENED ---
   void _showNotifications() async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    // 🔥 INSTANTLY MARK ALL AS READ SO THE BELL NUMBER DISAPPEARS IMMEDIATELY
+    supabase
+        .from('notifications')
+        .update({'read': true})
+        .eq('user_id', myId)
+        .eq('read', false)
+        .then((_) {});
+
     final notifications = await _fetchNotifications();
     if (!mounted) return;
 
@@ -1599,8 +2243,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     radius: 22,
                                     backgroundColor: const Color(0xFF4CAF50),
                                     child: const Icon(Icons.confirmation_number,
-                                        color: Colors.white, size: 26),
-                                  )
+                                        color: Colors.white, size: 26))
                                 : CircleAvatar(
                                     radius: 22,
                                     backgroundColor: Colors.grey[700],
@@ -1631,13 +2274,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                         ? Colors.white70
                                         : Colors.grey[700])),
                             onTap: () async {
-                              // Mark as read silently
-                              try {
-                                await supabase.from('notifications').update(
-                                    {'read': true}).eq('id', notif['id']);
-                              } catch (_) {}
-
-                              // Route to correct screen based on type!
                               if (gistId != null) {
                                 Navigator.pushNamed(context, '/gist',
                                     arguments: {'id': gistId});
@@ -1676,7 +2312,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // --- 1. UNIVERSAL PLUS MENU ---
-  // --- 1. UNIVERSAL PLUS MENU (ROW-BY-ROW) ---
   void _showUniversalPlusMenu(BuildContext context) {
     final isPlus = _prefs.subscriptionTier == 'Membership';
 
@@ -1688,7 +2323,7 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (ctx) => DraggableScrollableSheet(
-        initialChildSize: 0.8, // Opens to 80% of screen height
+        initialChildSize: 0.8,
         minChildSize: 0.5,
         maxChildSize: 0.95,
         expand: false,
@@ -1708,17 +2343,16 @@ class _HomeScreenState extends State<HomeScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16.0),
               child: TextField(
                 style: const TextStyle(color: Colors.white),
-                textInputAction: TextInputAction
-                    .search, // Puts a "Search" button on keyboard
+                textInputAction: TextInputAction.search,
                 onSubmitted: (query) {
                   if (query.trim().isNotEmpty) {
-                    Navigator.pop(ctx); // Close the bottom sheet
+                    Navigator.pop(ctx);
                     Navigator.push(
                       context,
                       MaterialPageRoute(
                         builder: (_) => ExploreScreen(
                           userPreferences: _prefs,
-                          initialQuery: query.trim(), // Passes the typed word
+                          initialQuery: query.trim(),
                         ),
                       ),
                     );
@@ -1739,7 +2373,6 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             const SizedBox(height: 16),
 
-            // --- ROW-BY-ROW LAYOUT WITH DESCRIPTIONS ---
             Expanded(
               child: ListView(
                 controller: scrollController,
@@ -1748,26 +2381,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     icon: Icons.amp_stories,
                     color: Colors.purpleAccent,
                     title: 'Create Story',
-                    subtitle: 'Share updates that disappear after 24h',
+                    subtitle: 'Share updates with your campus',
                     onTap: () async {
                       Navigator.pop(ctx);
-                      // ENFORCE 1 ACTIVE STORY FOR FREE USERS
-                      if (!isPlus) {
-                        final myId = supabase.auth.currentUser?.id;
-                        final countResp = await supabase
-                            .from('stories')
-                            .select('*')
-                            .eq('user_id', myId!)
-                            .gt('expires_at',
-                                DateTime.now().toUtc().toIso8601String())
-                            .count(CountOption.exact);
-                        if ((countResp.count ?? 0) >= 1) {
-                          _showUniversalSubscriptionSheet(
-                              customMessage:
-                                  "Free users can only have 1 active story at a time. Upgrade to post unlimited 10-day stories!");
-                          return;
-                        }
-                      }
+                      // 🔥 FIX: Free users can now post unlimited stories (duration restricted inside CreateStoryScreen)
                       Navigator.push(
                           context,
                           MaterialPageRoute(
@@ -1782,7 +2399,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     subtitle: 'Post memories permanently to your profile',
                     onTap: () async {
                       Navigator.pop(ctx);
-                      // ENFORCE 3 MOMENTS MAX FOR FREE USERS
                       if (!isPlus) {
                         final myId = supabase.auth.currentUser?.id;
                         final countResp = await supabase
@@ -1857,7 +2473,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       }
                     },
                   ),
-                  // --- NEW: REFERRALS WITH LIVE STATS ---
                   FutureBuilder<Map<String, dynamic>?>(
                       future: supabase
                           .from('referral_leaderboard')
@@ -1888,10 +2503,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
-
             const Divider(color: Colors.white10, height: 1),
-
-            // --- SUBSCRIPTION STATUS FOOTER ---
             Container(
               padding: const EdgeInsets.all(20),
               decoration: const BoxDecoration(
@@ -1939,7 +2551,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         tooltip: 'Manage Subscription',
                         onPressed: () {
                           Navigator.pop(ctx);
-                          _confirmCancelSubscription(); // Opens the cancel dialog
+                          _confirmCancelSubscription();
                         },
                       ),
                     )
@@ -1952,7 +2564,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // --- 2. UNIVERSAL SUBSCRIPTION POPUP ---
+  // --- 3. UNIVERSAL SUBSCRIPTION POPUP (OVERFLOW FIXED) ---
   void _showUniversalSubscriptionSheet({String? customMessage}) {
     showModalBottomSheet(
       context: context,
@@ -1962,84 +2574,92 @@ class _HomeScreenState extends State<HomeScreen> {
           borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) => StatefulBuilder(
           builder: (BuildContext context, StateSetter setModalState) {
-        return Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                  child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(2)))),
-              const SizedBox(height: 24),
-              const Text('Upgrade to Plus ✨',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
+        return SingleChildScrollView(
+          // 🔥 FIX 2: Wrapped in SingleChildScrollView to prevent pixel overflow
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 24.0,
+              right: 24.0,
+              top: 24.0,
+              bottom: MediaQuery.of(context).viewInsets.bottom +
+                  24.0, // Safe padding for bottom
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                    child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                            color: Colors.white24,
+                            borderRadius: BorderRadius.circular(2)))),
+                const SizedBox(height: 24),
+                const Text('Upgrade to Plus ✨',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
 
-              // CANDY CRUSH STYLE COUNTDOWN / CUSTOM MESSAGES
-              if (customMessage != null)
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                      color: Colors.orangeAccent.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.orangeAccent)),
-                  child: Text(customMessage,
-                      style: const TextStyle(
-                          color: Colors.orangeAccent,
-                          fontWeight: FontWeight.bold)),
-                )
-              else
-                const Text(
-                    'Unlock the full university cheat code and remove all limits.',
-                    style: TextStyle(color: Colors.white70, fontSize: 14)),
+                if (customMessage != null)
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                        color: Colors.orangeAccent.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.orangeAccent)),
+                    child: Text(customMessage,
+                        style: const TextStyle(
+                            color: Colors.orangeAccent,
+                            fontWeight: FontWeight.bold)),
+                  )
+                else
+                  const Text(
+                      'Unlock the full university cheat code and remove all limits.',
+                      style: TextStyle(color: Colors.white70, fontSize: 14)),
 
-              const SizedBox(height: 16),
+                const SizedBox(height: 16),
+                _buildPerkRow(Icons.delivery_dining,
+                    'Massively discounted delivery rates'),
+                _buildPerkRow(
+                    Icons.timer, 'Book unavailable delivery agents in advance'),
+                _buildPerkRow(
+                    Icons.amp_stories, 'Post Stories that last up to 10 days'),
+                _buildPerkRow(Icons.photo_library,
+                    'Post unlimited Moments (Free max is 3)'),
+                _buildPerkRow(Icons.history,
+                    'Save & Backup Chats (Free chats delete in 24h)'),
+                _buildPerkRow(Icons.group_add, 'Create custom Campus Groups'),
+                _buildPerkRow(Icons.airplane_ticket,
+                    'Create & Sell Tickets for events'), // Updated Icon
 
-              _buildPerkRow(Icons.block, 'Ad-free experience across the app'),
-              _buildPerkRow(Icons.photo_library,
-                  'Post unlimited Moments (Free max is 3)'),
-              _buildPerkRow(Icons.history,
-                  'Save & Backup Chats (Free chats delete in 24h)'),
-              _buildPerkRow(Icons.group_add, 'Create custom Campus Groups'),
-              _buildPerkRow(
-                  Icons.timer, 'Post Stories that last up to 10 days'),
-              _buildPerkRow(
-                  BoxIcons.bxs_coupon, 'Create & Sell Tickets for events'),
-              _buildPerkRow(BoxIcons.bx_food_menu,
-                  'Unlimited food orders (No 5-hour wait)'),
-
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton(
-                  onPressed: _isProcessingSubscription
-                      ? null
-                      : () => _subscribeToMembership(context, setModalState),
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: themeColor,
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16))),
-                  child: _isProcessingSubscription
-                      ? const CircularProgressIndicator(color: Colors.black)
-                      : const Text('Subscribe - ₦700/mo',
-                          style: TextStyle(
-                              color: Colors.black,
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold)),
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: _isProcessingSubscription
+                        ? null
+                        : () => _subscribeToMembership(context, setModalState),
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF4CAF50),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16))),
+                    child: _isProcessingSubscription
+                        ? const CircularProgressIndicator(color: Colors.black)
+                        : const Text('Subscribe - ₦700/mo',
+                            style: TextStyle(
+                                color: Colors.black,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold)),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 16),
-            ],
+                const SizedBox(height: 16),
+              ],
+            ),
           ),
         );
       }),

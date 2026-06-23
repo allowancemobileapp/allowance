@@ -392,31 +392,35 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
           final path = 'stories/${const Uuid().v4()}.$ext';
           Uint8List bytesToUpload = media.bytes;
 
-          // 🔥 WHATSAPP SPEED COMPRESSION FOR STORY VIDEOS
           if (media.type == 'video' && !kIsWeb) {
-            final info = await VideoCompress.compressVideo(
-              media.file.path,
-              quality: VideoQuality.LowQuality, // Fast, social media quality
-              deleteOrigin: false,
-              includeAudio: true,
-            );
-            if (info != null && info.file != null) {
-              bytesToUpload = await info.file!.readAsBytes();
+            try {
+              // 🔥 FIX: Changed to DefaultQuality to preserve video playback and quality!
+              final info = await VideoCompress.compressVideo(
+                media.file.path,
+                quality: VideoQuality.DefaultQuality,
+                deleteOrigin: false,
+                includeAudio: true,
+              );
+              if (info != null &&
+                  info.file != null &&
+                  info.file!.lengthSync() > 1000) {
+                bytesToUpload = await info.file!.readAsBytes();
+              } else {
+                throw 'Compression returned empty file';
+              }
+            } catch (e) {
+              debugPrint("Story Video compression failed, using original: $e");
+              bytesToUpload = media.bytes;
             }
           }
 
-          await supabase.storage.from(bucket).uploadBinary(
-                path,
-                bytesToUpload,
-                fileOptions: const FileOptions(upsert: true),
-              );
-
+          await supabase.storage.from(bucket).uploadBinary(path, bytesToUpload,
+              fileOptions: const FileOptions(upsert: true));
           final publicUrl = supabase.storage.from(bucket).getPublicUrl(path);
           await _insertDatabaseRow(supabase, userId, publicUrl, media.type,
               caption, linkUrl, expiresAt);
         }
       }
-
       CreateStoryScreen.pendingStoryUpload.value = {
         ...CreateStoryScreen.pendingStoryUpload.value!,
         'progress': 1.0
@@ -426,7 +430,6 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
     } finally {
       progressTimer.cancel();
       if (!isTextOnly && !kIsWeb) VideoCompress.deleteAllCache();
-
       Future.delayed(const Duration(milliseconds: 500), () {
         CreateStoryScreen.pendingStoryUpload.value = null;
       });

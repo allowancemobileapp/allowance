@@ -127,8 +127,9 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   }
 
   // =====================================
-  // GLOBAL BACKGROUND POSTING
+  // GLOBAL BACKGROUND POSTING (SMART COMPRESSION)
   // =====================================
+  // --- UPDATED: VIDEO COMPRESSION FAIL-SAFE ---
   void _startBackgroundUpload() async {
     cancelUploadFlag = false;
     final supabase = Supabase.instance.client;
@@ -140,9 +141,8 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
     ProfileScreen.pendingMomentUpload.value = {
       'local_path': currentPath,
       'is_video': isVideo,
-      'progress': 0.05,
+      'progress': 0.05
     };
-
     Navigator.pop(context);
 
     final progressTimer =
@@ -167,52 +167,51 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
       final extension = isVideo ? '.mp4' : '.jpg';
       final baseFileName = '${DateTime.now().millisecondsSinceEpoch}';
       final fileName = '$baseFileName$extension';
-      final hdFileName =
-          '${baseFileName}_hd$extension'; // 🔥 NEW: The secret HD file
+      final hdFileName = '${baseFileName}_hd$extension';
 
       Uint8List fastBytes;
 
-      // 🔥 YOUTUBE ARCHITECTURE: Compress a super fast SD video for instant loading
       if (isVideo && !kIsWeb) {
-        final info = await VideoCompress.compressVideo(
-          currentPath,
-          quality: VideoQuality
-              .LowQuality, // Drops quality heavily for blazing fast loads!
-          deleteOrigin: false,
-          includeAudio: true,
-        );
-        fastBytes = (info != null && info.file != null)
-            ? await info.file!.readAsBytes()
-            : await _currentFile.readAsBytes();
+        try {
+          // 🔥 FIX: Changed to DefaultQuality to preserve playback
+          final info = await VideoCompress.compressVideo(
+            currentPath,
+            quality: VideoQuality.DefaultQuality,
+            deleteOrigin: false,
+            includeAudio: true,
+          );
+          if (info != null &&
+              info.file != null &&
+              info.file!.lengthSync() > 1000) {
+            fastBytes = await info.file!.readAsBytes();
+          } else {
+            throw 'Compression resulted in empty file';
+          }
+        } catch (e) {
+          debugPrint("Compression failed, using original video: $e");
+          fastBytes = await _currentFile.readAsBytes();
+        }
       } else {
         fastBytes = await _currentFile.readAsBytes();
       }
 
       if (cancelUploadFlag) throw 'Cancelled by user';
 
-      // 1. Upload the Fast SD version
       await supabase.storage.from('memories-bucket').uploadBinary(
-            fileName,
-            fastBytes,
-            fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
-          );
+          fileName, fastBytes,
+          fileOptions: const FileOptions(cacheControl: '3600', upsert: false));
 
-      // 2. Silently upload the raw HD version in the background! (Won't delay the user)
       if (isVideo) {
         final hdBytes = await _currentFile.readAsBytes();
         supabase.storage
             .from('memories-bucket')
-            .uploadBinary(
-              hdFileName,
-              hdBytes,
-              fileOptions:
-                  const FileOptions(cacheControl: '3600', upsert: false),
-            )
-            .catchError((_) {}); // Ignore background errors for HD
+            .uploadBinary(hdFileName, hdBytes,
+                fileOptions:
+                    const FileOptions(cacheControl: '3600', upsert: false))
+            .catchError((error) => '');
       }
 
       if (cancelUploadFlag) throw 'Cancelled by user';
-
       final publicUrl =
           supabase.storage.from('memories-bucket').getPublicUrl(fileName);
 
@@ -233,7 +232,6 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
     } finally {
       progressTimer.cancel();
       if (isVideo && !kIsWeb) VideoCompress.deleteAllCache();
-
       Future.delayed(const Duration(milliseconds: 500), () {
         ProfileScreen.pendingMomentUpload.value = null;
       });

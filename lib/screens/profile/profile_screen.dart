@@ -664,9 +664,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
       appBar: AppBar(
         backgroundColor: _bg,
         elevation: 0,
-        scrolledUnderElevation: 0, // <-- STOPS COLOR CHANGE ON SCROLL
-        surfaceTintColor:
-            Colors.transparent, // <-- STOPS COLOR CHANGE ON SCROLL
+        scrolledUnderElevation: 0,
+        surfaceTintColor: Colors.transparent,
         centerTitle: true,
         title: Image.asset('assets/images/profile.png',
             height: 110, fit: BoxFit.contain),
@@ -769,8 +768,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         color: Colors.white,
                         fontSize: 24,
                         fontWeight: FontWeight.bold)),
-
-                // 🔥 THE FIX: Added a Row here to display the Plus Star beside the username!
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -797,9 +794,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ],
             ),
-
             const SizedBox(height: 32),
-
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 60),
               child: Container(
@@ -815,8 +810,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
             ),
             const SizedBox(height: 16),
-
-            // --- MAIN CONTENT AREA (MEMORIES OR PROFILE) ---
             _selectedSegment == 0
                 ? _buildInstagramStyleGrid()
                 : Container(
@@ -828,28 +821,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     child: Column(
                       children: [
                         if (profile['is_delivery_agent'] == true) ...[
-                          SwitchListTile(
-                            title: const Text('Available for Delivery 🛵',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 15)),
-                            subtitle: const Text(
-                                'Turn on to receive orders from students',
-                                style: TextStyle(
-                                    color: Colors.white54, fontSize: 12)),
-                            value: profile['is_available_for_delivery'] == true,
-                            activeThumbColor: _accent,
-                            onChanged: (val) async {
-                              setState(() => _cachedProfileData![
-                                  'is_available_for_delivery'] = val);
-                              await Supabase.instance.client
-                                  .from('profiles')
-                                  .update({
-                                'is_available_for_delivery': val
-                              }).eq('id', profile['id']);
-                            },
-                          ),
+                          // 🔥 THE REPLACEMENT IS HERE!
+                          _buildDeliveryToggle(profile),
                           const Divider(color: Colors.white10, height: 1),
                         ],
                         _buildProfileTile(Icons.school_outlined, 'Campus',
@@ -869,11 +842,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ],
                     ),
                   ),
-
             const SizedBox(height: 48),
-
             _buildActionRow(),
-
             const SizedBox(height: 32),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -1051,6 +1021,183 @@ class _ProfileScreenState extends State<ProfileScreen> {
               }
             })
         .subscribe();
+  }
+
+  // --- NEW: AVAILABILITY SLIDE UP SHEET ---
+  void _showAvailabilitySheet(Map<String, dynamic> profile) {
+    double sliderValue = 30.0; // default 30 mins
+    final List<double> intervals = [
+      5,
+      10,
+      15,
+      30,
+      60,
+      120,
+      180,
+      240,
+      300,
+      360,
+      480,
+      600,
+      720
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          String formatTime(double mins) {
+            if (mins < 60) return "${mins.toInt()} mins";
+            final hrs = mins ~/ 60;
+            final m = mins.toInt() % 60;
+            return m == 0 ? "$hrs hr${hrs > 1 ? 's' : ''}" : "$hrs hr $m min";
+          }
+
+          return Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Set Next Availability',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                Text('Available in: ${formatTime(sliderValue)}',
+                    style: const TextStyle(
+                        color: Colors.amber,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold)),
+                Slider(
+                  value: sliderValue,
+                  min: 5,
+                  max: 720,
+                  divisions: 100,
+                  activeColor: Colors.amber,
+                  onChanged: (val) {
+                    double closest = intervals.reduce(
+                        (a, b) => (a - val).abs() < (b - val).abs() ? a : b);
+                    setModalState(() => sliderValue = closest);
+                  },
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.amber,
+                      minimumSize: const Size(double.infinity, 48)),
+                  onPressed: () async {
+                    final nextTime = DateTime.now()
+                        .toUtc()
+                        .add(Duration(minutes: sliderValue.toInt()));
+                    setState(() {
+                      _cachedProfileData!['is_available_for_delivery'] = false;
+                      _cachedProfileData!['next_available_at'] =
+                          nextTime.toIso8601String();
+                    });
+                    await Supabase.instance.client.from('profiles').update({
+                      'is_available_for_delivery': false,
+                      'next_available_at': nextTime.toIso8601String(),
+                    }).eq('id', profile['id']);
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Set Timer (Allow Bookings)',
+                      style: TextStyle(
+                          color: Colors.black, fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(height: 12),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF4CAF50),
+                      minimumSize: const Size(double.infinity, 48)),
+                  onPressed: () async {
+                    setState(() {
+                      _cachedProfileData!['is_available_for_delivery'] = false;
+                      _cachedProfileData!['next_available_at'] = null;
+                    });
+                    await Supabase.instance.client.from('profiles').update({
+                      'is_available_for_delivery': false,
+                      'next_available_at': null,
+                    }).eq('id', profile['id']);
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text("Until I'm Back (Turn Off)",
+                      style: TextStyle(
+                          color: Colors.black, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // --- NEW: REPLACES THE OLD SWITCH LIST TILE ---
+  Widget _buildDeliveryToggle(Map<String, dynamic> profile) {
+    final isAvailable = profile['is_available_for_delivery'] == true;
+    final nextAvailStr = profile['next_available_at'] as String?;
+    DateTime? nextAvail;
+    if (nextAvailStr != null) {
+      nextAvail = DateTime.tryParse(nextAvailStr)?.toLocal();
+    }
+
+    bool isBookable =
+        !isAvailable && nextAvail != null && nextAvail.isAfter(DateTime.now());
+
+    Color thumbColor;
+    Color activeTrackColor;
+    String statusText;
+
+    if (isAvailable) {
+      thumbColor = const Color(0xFF4CAF50);
+      activeTrackColor = const Color(0xFF4CAF50).withOpacity(0.5);
+      statusText = "Online (Receiving Orders)";
+    } else if (isBookable) {
+      thumbColor = Colors.amber;
+      activeTrackColor = Colors.amber.withOpacity(0.5);
+
+      final diff = nextAvail!.difference(DateTime.now());
+      final m = diff.inMinutes;
+      String timeStr = m < 60 ? "${m}m" : "${diff.inHours}h ${m % 60}m";
+      statusText = "Bookable (Back in $timeStr)";
+    } else {
+      thumbColor = Colors.grey;
+      activeTrackColor = Colors.white24;
+      statusText = "Offline (Not visible to users)";
+    }
+
+    return ListTile(
+      title: const Text('Available for Delivery 🛵',
+          style: TextStyle(
+              color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
+      subtitle: Text(statusText,
+          style: TextStyle(
+              color: isBookable ? Colors.amber : Colors.white54, fontSize: 12)),
+      trailing: Switch(
+        value: isAvailable || isBookable,
+        activeColor: thumbColor,
+        activeTrackColor: activeTrackColor,
+        inactiveThumbColor: Colors.grey,
+        inactiveTrackColor: Colors.white24,
+        onChanged: (val) async {
+          if (val) {
+            setState(() {
+              _cachedProfileData!['is_available_for_delivery'] = true;
+              _cachedProfileData!['next_available_at'] = null;
+            });
+            await Supabase.instance.client.from('profiles').update({
+              'is_available_for_delivery': true,
+              'next_available_at': null,
+            }).eq('id', profile['id']);
+          } else {
+            _showAvailabilitySheet(profile);
+          }
+        },
+      ),
+    );
   }
 
   Widget _buildInstagramStyleGrid() {

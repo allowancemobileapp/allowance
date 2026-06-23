@@ -59,88 +59,88 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     _loadProfileData();
   }
 
+  // --- UPDATED: LAZY LOADING PREVENTS LAG SPIKES ---
   Future<void> _loadProfileData() async {
     final currentUserId = supabase.auth.currentUser?.id;
     if (currentUserId == null) return;
 
     try {
-      final String safeId =
-          widget.targetUserId.toString().trim(); // <-- THE FIX
+      final String safeId = widget.targetUserId.toString().trim();
 
+      // 1. Fetch ONLY the Profile First to render UI instantly
+      final profileResp = await supabase
+          .from('profiles')
+          .select()
+          .eq('id', safeId)
+          .maybeSingle();
+
+      if (mounted) {
+        setState(() {
+          _profile = profileResp;
+          _isLoading = false; // Render immediately!
+        });
+      }
+
+      // 2. Fetch the heavy stuff asynchronously without blocking the UI
       final results = await Future.wait<dynamic>([
-        supabase
-            .from('profiles')
-            .select()
-            .eq('id', safeId) // Use safeId instead of raw targetUserId
-            .maybeSingle(),
         supabase
             .from('followers')
             .select('*')
-            .eq('following_id', widget.targetUserId)
+            .eq('following_id', safeId)
             .count(CountOption.exact),
         supabase
             .from('followers')
             .select()
             .eq('follower_id', currentUserId)
-            .eq('following_id', widget.targetUserId)
+            .eq('following_id', safeId)
             .maybeSingle(),
         supabase
             .from('moments')
             .select('*')
-            .eq('user_id', widget.targetUserId)
+            .eq('user_id', safeId)
             .count(CountOption.exact),
         supabase
             .from('followers')
             .select('*')
-            .eq('follower_id', widget.targetUserId)
+            .eq('follower_id', safeId)
             .count(CountOption.exact),
         supabase
             .from('stories')
             .select('id')
-            .eq('user_id', widget.targetUserId)
+            .eq('user_id', safeId)
             .gt('expires_at', DateTime.now().toUtc().toIso8601String())
             .limit(1),
         supabase
             .from('post_alerts')
             .select('target_user_id')
             .eq('subscriber_id', currentUserId)
-            .eq('target_user_id', widget.targetUserId)
+            .eq('target_user_id', safeId)
             .maybeSingle(),
       ]);
 
-      final profileResp = results[0] as Map<String, dynamic>?;
-      final followersResp = results[1] as PostgrestResponse;
-      final followingStatusResp = results[2]; // <-- FIX: Removed typo
-      final momentsResp = results[3] as PostgrestResponse;
-      final followingCountResp = results[4] as PostgrestResponse;
-      final storiesResp = results[5] as List<dynamic>;
-      final alertsResp = results[6];
-
       final isPrivate = profileResp?['is_private'] == true;
-      final isFollowingStatus = followingStatusResp != null;
-      final isMe = currentUserId == widget.targetUserId;
+      final isFollowingStatus = results[1] != null;
+      final isMe = currentUserId == safeId;
 
       List<dynamic> fetchedMoments = [];
       if (profileResp != null && (!isPrivate || isFollowingStatus || isMe)) {
         fetchedMoments = await supabase
             .from('moments')
-            // <-- FIX: Added the join for profiles!
             .select('*, profiles:user_id(username, avatar_url, school_name)')
-            .eq('user_id', widget.targetUserId)
-            .order('created_at', ascending: false);
+            .eq('user_id', safeId)
+            .order('created_at', ascending: false)
+            .limit(30); // 🔥 Limit prevents RAM crash
       }
 
       if (mounted) {
         setState(() {
-          _profile = profileResp;
-          _followerCount = followersResp.count;
-          _totalMomentsCount = momentsResp.count;
-          _followingCount = followingCountResp.count;
+          _followerCount = (results[0] as PostgrestResponse).count;
           _isFollowing = isFollowingStatus;
+          _totalMomentsCount = (results[2] as PostgrestResponse).count;
+          _followingCount = (results[3] as PostgrestResponse).count;
+          _hasActiveStories = (results[4] as List<dynamic>).isNotEmpty;
+          _isSubscribedToAlerts = results[5] != null;
           _moments = fetchedMoments;
-          _hasActiveStories = storiesResp.isNotEmpty;
-          _isSubscribedToAlerts = alertsResp != null;
-          _isLoading = false;
         });
       }
     } catch (e) {

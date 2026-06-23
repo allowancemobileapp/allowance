@@ -374,7 +374,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     bool paymentLaunched = false;
 
     try {
-      // 1. UPLOAD MEDIA (Your existing upload code here...)
+      // 1. UPLOAD MEDIA
       const bucket = 'gist-images';
       final List<String> uploadedUrls = [];
       final List<String> uploadedPaths = [];
@@ -416,11 +416,10 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         }
       }
 
-      // 2. CREATE DRAFT GIST (Modified for Coupons)
+      // 2. CREATE DRAFT GIST
       final numDays = int.tryParse(_durationController.text) ?? 0;
       final pricePerDay = _pricePerDay;
-      final totalNaira =
-          _estimatedPrice.toInt(); // This uses the discounted price!
+      final totalNaira = _estimatedPrice.toInt();
 
       final reference = 'gist_${const Uuid().v4()}';
       final bool is100PercentFree = _appliedCoupon != null &&
@@ -436,7 +435,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'media_type': mediaType,
         'number_of_days': numDays,
         'price_per_day': pricePerDay,
-        'paid': is100PercentFree, // Instantly paid if 100% discount
+        'paid': is100PercentFree,
         'status': is100PercentFree ? 'active' : 'draft',
         'start_date': DateTime.now().toUtc().toIso8601String().split('T').first,
         'category': _selectedCategory,
@@ -460,14 +459,21 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           .single();
       draftGistId = insertResp['id'] as int;
 
-      // INCREMENT COUPON COUNT IF APPLIED
       if (_appliedCoupon != null) {
         await supabase.rpc('increment_coupon',
             params: {'p_code': _appliedCoupon!['code']});
       }
 
-      // --- 100% DISCOUNT BYPASS ---
+      // --- 🔥 FIX: 100% DISCOUNT BYPASS (FORCE EDGE FUNCTION INVOCATION) ---
       if (is100PercentFree) {
+        // Guaranteed Edge Function Call!
+        try {
+          supabase.functions.invoke('send-push-for-gist', body: {
+            'type': 'gist',
+            'gistId': draftGistId,
+          });
+        } catch (_) {}
+
         if (mounted) {
           setState(() => _isSubmitting = false);
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -475,16 +481,15 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
               backgroundColor: widget.themeColor));
           Navigator.of(context).pop();
         }
-        return; // Stop execution, no payment gateway needed!
+        return;
       }
 
-      // Safeguard for 0 days input
       if (totalNaira <= 0) {
         await supabase.from('gists').delete().eq('id', draftGistId);
         return;
       }
 
-      // 3. INITIALIZE PAYMENT (Flutterwave Primary, Paystack Backup)
+      // 3. INITIALIZE PAYMENT
       String gateway = 'flutterwave';
       String? authUrlString;
 
@@ -493,7 +498,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           'flutterwave-init',
           body: {
             'tx_ref': reference,
-            'amount': totalNaira.toString(), // Passes the reduced amount!
+            'amount': totalNaira.toString(),
             'currency': 'NGN',
             'redirect_url': 'https://allowanceapp.org',
             'customer': {'email': user.email ?? 'user@allowance.com'},
@@ -517,7 +522,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           final payResp = await supabase.functions.invoke(
             'paystack-init',
             body: {
-              'amount': totalNaira * 100, // Paystack is Kobo
+              'amount': totalNaira * 100,
               'email': user.email ?? 'user@allowance.com',
               'reference': reference,
               'metadata': {'gist_id': draftGistId.toString()}
@@ -541,7 +546,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         }
       }
 
-      // 4. SAVE PREFS AND LAUNCH URL (Exactly the same)
+      // 4. SAVE PREFS AND LAUNCH URL
       paymentLaunched = true;
 
       final prefs = await SharedPreferences.getInstance();
@@ -645,6 +650,16 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   .toIso8601String(),
               'updated_at': DateTime.now().toIso8601String(),
             }).eq('id', gistId);
+
+            // 🔥 FIX: Guaranteed Edge Function Call after successful payment!
+            try {
+              Supabase.instance.client.functions
+                  .invoke('send-push-for-gist', body: {
+                'type': 'gist',
+                'gistId': gistId,
+              });
+            } catch (_) {}
+
             return true;
           }
         }

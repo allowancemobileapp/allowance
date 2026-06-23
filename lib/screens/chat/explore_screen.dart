@@ -296,190 +296,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
   }
 
-  // --- 1. DELIVERY PICKER (5-HOUR LOGIC) ---
-  Future<void> _showDeliveryPicker(Map<String, dynamic> selectedOption) async {
-    final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
-
-    if (!isPlus) {
-      final prefs = await SharedPreferences.getInstance();
-      final myId = supabase.auth.currentUser?.id;
-      final lastOrderStr = prefs.getString('last_order_time_$myId');
-
-      if (lastOrderStr != null) {
-        final lastOrder = DateTime.parse(lastOrderStr);
-        final diff = DateTime.now().difference(lastOrder);
-
-        if (diff.inHours < 5) {
-          final timeLeft = const Duration(hours: 5) - diff;
-          final timeString = "${timeLeft.inHours}h ${timeLeft.inMinutes % 60}m";
-
-          showModalBottomSheet(
-            context: context,
-            backgroundColor: const Color(0xFF1E1E1E),
-            isScrollControlled: true,
-            shape: const RoundedRectangleBorder(
-                borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-            builder: (ctx) => Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.timer, color: Colors.orangeAccent, size: 60),
-                  const SizedBox(height: 16),
-                  const Text("Out of Energy!",
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 12),
-                  Text(
-                      "Free users can order food once every 5 hours.\n\nNext order available in: $timeString",
-                      textAlign: TextAlign.center,
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 16)),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 56,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        _showUniversalSubscriptionSheet(); // <-- SLIDES UP THE PAYWALL!
-                      },
-                      style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF4CAF50),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16))),
-                      child: const Text("Remove Limit (Upgrade)",
-                          style: TextStyle(
-                              color: Colors.black,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16)),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  TextButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: const Text("I'll wait",
-                          style: TextStyle(color: Colors.white54)))
-                ],
-              ),
-            ),
-          );
-          return;
-        }
-      }
-      await prefs.setString(
-          'last_order_time_$myId', DateTime.now().toIso8601String());
-    }
-
-    final vendorName =
-        selectedOption['vendors']?['name']?.toString() ?? 'Vendor';
-    final items = selectedOption['items'] as List<dynamic>;
-    final total = items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
-
-    final orderData = {
-      'vendor': vendorName,
-      'items': items
-          .map((i) => {
-                'name': i['name'],
-                'price': getAdjustedPrice(i).toStringAsFixed(0),
-                'qty': i['quantity'] ?? 1,
-              })
-          .toList(),
-      'total': total.toStringAsFixed(0)
-    };
-
-    _openDeliveryAgentGrid(orderData);
-  }
-
-  // --- 2. UNIVERSAL SUBSCRIPTION POPUP ---
-  void _showUniversalSubscriptionSheet({String? customMessage}) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1E1E1E),
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (ctx) => StatefulBuilder(
-          builder: (BuildContext context, StateSetter setModalState) {
-        return Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                  child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(2)))),
-              const SizedBox(height: 24),
-              const Text('Upgrade to Plus ✨',
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              if (customMessage != null)
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                      color: Colors.orangeAccent.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.orangeAccent)),
-                  child: Text(customMessage,
-                      style: const TextStyle(
-                          color: Colors.orangeAccent,
-                          fontWeight: FontWeight.bold)),
-                )
-              else
-                const Text(
-                    'Unlock the full university cheat code and remove all limits.',
-                    style: TextStyle(color: Colors.white70, fontSize: 14)),
-              const SizedBox(height: 16),
-              _buildPerkRow(Icons.block, 'Ad-free experience across the app'),
-              _buildPerkRow(Icons.delivery_dining,
-                  'Unlimited food orders (No 5-hour wait)'),
-              _buildPerkRow(Icons.photo_library,
-                  'Post unlimited Moments (Free max is 3)'),
-              _buildPerkRow(Icons.history,
-                  'Save & Backup Chats (Free chats delete in 24h)'),
-              _buildPerkRow(Icons.group_add, 'Create custom Campus Groups'),
-              _buildPerkRow(BoxIcons.bx_food_menu,
-                  'Unlimited food orders (No 5-hour wait)'),
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton(
-                  onPressed: _isProcessingSubscription
-                      ? null
-                      : () => _subscribeToMembership(context, setModalState),
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF4CAF50),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16))),
-                  child: _isProcessingSubscription
-                      ? const CircularProgressIndicator(color: Colors.black)
-                      : const Text('Subscribe - ₦700/mo',
-                          style: TextStyle(
-                              color: Colors.black,
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold)),
-                ),
-              ),
-              const SizedBox(height: 16),
-            ],
-          ),
-        );
-      }),
-    );
-  }
-
   Widget _buildPerkRow(IconData icon, String text) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 16.0),
@@ -707,94 +523,388 @@ class _ExploreScreenState extends State<ExploreScreen> {
     }
   }
 
+  // --- NEW TIMER HELPER ---
+  String _getTimeUntil(String? dateStr) {
+    if (dateStr == null) return '';
+    final date = DateTime.tryParse(dateStr)?.toLocal();
+    if (date == null || date.isBefore(DateTime.now())) return '';
+    final diff = date.difference(DateTime.now());
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
+    final hrs = diff.inHours;
+    final mins = diff.inMinutes % 60;
+    return mins == 0 ? '${hrs}h' : '${hrs}h ${mins}m';
+  }
+
+  // --- 1. DELIVERY PICKER (REMOVED 5-HOUR LIMIT) ---
+  Future<void> _showDeliveryPicker(Map<String, dynamic> selectedOption) async {
+    final vendorName =
+        selectedOption['vendors']?['name']?.toString() ?? 'Vendor';
+    final items = selectedOption['items'] as List<dynamic>;
+    final total = items.fold<double>(0, (sum, i) => sum + getAdjustedPrice(i));
+
+    final orderData = {
+      'vendor': vendorName,
+      'items': items
+          .map((i) => {
+                'name': i['name'],
+                'price': getAdjustedPrice(i).toStringAsFixed(0),
+                'qty': i['quantity'] ?? 1,
+              })
+          .toList(),
+      'total': total.toStringAsFixed(0)
+    };
+
+    _openDeliveryAgentGrid(orderData);
+  }
+
+  // --- 2. UPDATED DELIVERY AGENT GRID (COOLER PRICING UI) ---
   void _openDeliveryAgentGrid(Map<String, dynamic> orderData) {
+    final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
+
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
+      backgroundColor: const Color(0xFF121212),
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (_) => Container(
-        constraints:
-            BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
-        child: Column(
-          children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('Select a Runner 🏃‍♂️',
-                  style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF4CAF50))),
-            ),
-            const Divider(height: 1, color: Colors.white24),
-            Expanded(
-              child: FutureBuilder<List<dynamic>>(
-                future: supabase
-                    .from('profiles')
-                    .select('id, username, avatar_url, gender')
-                    .eq('is_delivery_agent', true)
-                    .eq('is_available_for_delivery', true)
-                    .eq('school_id', widget.userPreferences.schoolId ?? ''),
-                builder: (ctx, snap) {
-                  if (snap.connectionState == ConnectionState.waiting)
-                    return const Center(
-                        child: CircularProgressIndicator(
-                            color: Color(0xFF4CAF50)));
-                  final list = snap.data ?? [];
-                  if (list.isEmpty)
-                    return const Center(
-                        child: Text('No agents available right now 😴',
-                            style: TextStyle(color: Colors.white70)));
+        constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.85),
+        child: FutureBuilder<List<dynamic>>(
+          future: Future.wait([
+            Supabase.instance.client
+                .from('profiles')
+                .select(
+                    'id, username, avatar_url, gender, is_available_for_delivery, next_available_at')
+                .eq('is_delivery_agent', true)
+                .eq('school_id', widget.userPreferences.schoolId ?? '')
+                .or('is_available_for_delivery.eq.true,next_available_at.gt.${DateTime.now().toUtc().toIso8601String()}'),
+            Supabase.instance.client
+                .from('app_settings')
+                .select('free_delivery_fee, plus_delivery_fee')
+                .eq('id', 1)
+                .maybeSingle(),
+          ]),
+          builder: (ctx, snap) {
+            if (snap.connectionState == ConnectionState.waiting) {
+              return const Center(
+                  child: CircularProgressIndicator(color: Color(0xFF4CAF50)));
+            }
 
-                  list.shuffle();
-                  return GridView.builder(
+            final rawList = (snap.data?[0] as List<dynamic>?) ?? [];
+            final list = List<dynamic>.from(rawList)..shuffle();
+            final settings = (snap.data?[1] as Map<String, dynamic>?) ?? {};
+
+            final freeFee =
+                (settings['free_delivery_fee'] as num?)?.toInt() ?? 500;
+            final plusFee =
+                (settings['plus_delivery_fee'] as num?)?.toInt() ?? 200;
+            final currentFee = isPlus ? plusFee : freeFee;
+
+            return Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      const Text('Select a Runner 🏃‍♂️',
+                          style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF4CAF50))),
+                      // 🔥 FIX 1: THE NEW COOL CENTERED DELIVERY FEE BADGE
+                      Container(
+                        margin: const EdgeInsets.only(top: 8),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                              color: Colors.amber.withOpacity(0.3), width: 1.5),
+                        ),
+                        child: Text(
+                          'Delivery Fee: ₦$currentFee',
+                          style: const TextStyle(
+                              fontSize: 14,
+                              color: Colors.amber,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 0.5),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1, color: Colors.white24),
+                Expanded(
+                  child: list.isEmpty
+                      ? const Center(
+                          child: Text('No agents available right now 😴',
+                              style: TextStyle(color: Colors.white70)))
+                      : GridView.builder(
+                          padding: const EdgeInsets.all(16),
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 16,
+                            childAspectRatio: 0.70, // Fits badge and gender
+                          ),
+                          itemCount: list.length,
+                          itemBuilder: (ctx, i) {
+                            final person = list[i];
+                            final isAvailable =
+                                person['is_available_for_delivery'] == true;
+                            final timeStr =
+                                _getTimeUntil(person['next_available_at']);
+                            final isBookable =
+                                !isAvailable && timeStr.isNotEmpty;
+
+                            return GestureDetector(
+                              onTap: () {
+                                // 🔥 BLOCK FREE USERS FROM BOOKING
+                                if (isBookable && !isPlus) {
+                                  Navigator.pop(context);
+                                  _showUniversalSubscriptionSheet(
+                                      customMessage:
+                                          "Only Allowance Plus ✨ members can book unavailable agents in advance!");
+                                  return;
+                                }
+
+                                final finalOrderData =
+                                    Map<String, dynamic>.from(orderData);
+                                finalOrderData['delivery_fee'] = currentFee;
+                                final oldTotal = double.tryParse(
+                                        finalOrderData['total'].toString()) ??
+                                    0.0;
+                                finalOrderData['total'] =
+                                    (oldTotal + currentFee).toStringAsFixed(0);
+
+                                _sendOrderToAppChat(person, finalOrderData);
+                              },
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Stack(
+                                    alignment: Alignment.bottomCenter,
+                                    clipBehavior: Clip.none,
+                                    children: [
+                                      CircleAvatar(
+                                        radius: 36,
+                                        backgroundColor:
+                                            const Color(0xFF1E1E1E),
+                                        backgroundImage: person['avatar_url'] !=
+                                                null
+                                            ? NetworkImage(person['avatar_url'])
+                                            : null,
+                                        child: person['avatar_url'] == null
+                                            ? const Icon(Icons.delivery_dining,
+                                                color: Colors.white54, size: 30)
+                                            : null,
+                                      ),
+                                      // 🔥 THE YELLOW BOOK BADGE
+                                      if (isBookable)
+                                        Positioned(
+                                          bottom: -8,
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 6, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: Colors.amber,
+                                              borderRadius:
+                                                  BorderRadius.circular(8),
+                                              border: Border.all(
+                                                  color: Colors.black,
+                                                  width: 2),
+                                            ),
+                                            child: Text('BOOK in $timeStr',
+                                                style: const TextStyle(
+                                                    color: Colors.black,
+                                                    fontSize: 9,
+                                                    fontWeight:
+                                                        FontWeight.bold)),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  SizedBox(height: isBookable ? 14 : 8),
+                                  Text(person['username'] ?? 'Agent',
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis),
+                                  // 🔥 SHOW GENDER UNDER NAME
+                                  if (person['gender'] != null)
+                                    Text(person['gender'],
+                                        style: const TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 11)),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                ),
+                // 🔥 THE FIXED UPGRADE BAR FOR FREE USERS
+                if (!isPlus)
+                  Container(
                     padding: const EdgeInsets.all(16),
-                    gridDelegate:
-                        const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 3,
-                      crossAxisSpacing: 10,
-                      mainAxisSpacing: 16,
-                      childAspectRatio: 0.85,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF1E1E1E),
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(20)),
                     ),
-                    itemCount: list.length,
-                    itemBuilder: (ctx, i) {
-                      final person = list[i];
-                      return GestureDetector(
-                        onTap: () => _sendOrderToAppChat(person, orderData),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
                           children: [
-                            CircleAvatar(
-                              radius: 36,
-                              backgroundColor: Colors.grey[800],
-                              backgroundImage: person['avatar_url'] != null
-                                  ? NetworkImage(person['avatar_url'])
-                                  : null,
-                              child: person['avatar_url'] == null
-                                  ? const Icon(Icons.delivery_dining,
-                                      color: Colors.white54, size: 30)
-                                  : null,
-                            ),
-                            const SizedBox(height: 8),
-                            Text(person['username'] ?? 'Agent',
+                            const Icon(Icons.star,
+                                color: Colors.amber, size: 28),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                'Upgrade to Plus to drop your delivery fee to ₦$plusFee and book unavailable agents!',
                                 style: const TextStyle(
                                     color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 13),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500),
+                              ),
+                            ),
                           ],
                         ),
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF4CAF50),
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12)),
+                            ),
+                            onPressed: () {
+                              Navigator.pop(context);
+                              _showUniversalSubscriptionSheet();
+                            },
+                            child: const Text('Upgrade to Plus',
+                                style: TextStyle(
+                                    fontWeight: FontWeight.bold, fontSize: 16)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            );
+          },
         ),
       ),
+    );
+  }
+
+  // --- 3. UNIVERSAL SUBSCRIPTION POPUP (OVERFLOW FIXED) ---
+  void _showUniversalSubscriptionSheet({String? customMessage}) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => StatefulBuilder(
+          builder: (BuildContext context, StateSetter setModalState) {
+        return SingleChildScrollView(
+          // 🔥 FIX 2: Wrapped in SingleChildScrollView to prevent pixel overflow
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 24.0,
+              right: 24.0,
+              top: 24.0,
+              bottom: MediaQuery.of(context).viewInsets.bottom +
+                  24.0, // Safe padding for bottom
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                    child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                            color: Colors.white24,
+                            borderRadius: BorderRadius.circular(2)))),
+                const SizedBox(height: 24),
+                const Text('Upgrade to Plus ✨',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+
+                if (customMessage != null)
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                        color: Colors.orangeAccent.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.orangeAccent)),
+                    child: Text(customMessage,
+                        style: const TextStyle(
+                            color: Colors.orangeAccent,
+                            fontWeight: FontWeight.bold)),
+                  )
+                else
+                  const Text(
+                      'Unlock the full university cheat code and remove all limits.',
+                      style: TextStyle(color: Colors.white70, fontSize: 14)),
+
+                const SizedBox(height: 16),
+                _buildPerkRow(Icons.delivery_dining,
+                    'Massively discounted delivery rates'),
+                _buildPerkRow(
+                    Icons.timer, 'Book unavailable delivery agents in advance'),
+                _buildPerkRow(
+                    Icons.amp_stories, 'Post Stories that last up to 10 days'),
+                _buildPerkRow(Icons.photo_library,
+                    'Post unlimited Moments (Free max is 3)'),
+                _buildPerkRow(Icons.history,
+                    'Save & Backup Chats (Free chats delete in 24h)'),
+                _buildPerkRow(Icons.group_add, 'Create custom Campus Groups'),
+                _buildPerkRow(Icons.airplane_ticket,
+                    'Create & Sell Tickets for events'), // Updated Icon
+
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  height: 56,
+                  child: ElevatedButton(
+                    onPressed: _isProcessingSubscription
+                        ? null
+                        : () => _subscribeToMembership(context, setModalState),
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF4CAF50),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16))),
+                    child: _isProcessingSubscription
+                        ? const CircularProgressIndicator(color: Colors.black)
+                        : const Text('Subscribe - ₦700/mo',
+                            style: TextStyle(
+                                color: Colors.black,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+            ),
+          ),
+        );
+      }),
     );
   }
 

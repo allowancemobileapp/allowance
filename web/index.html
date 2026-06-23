@@ -30,6 +30,28 @@
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js"></script>
 
+    <script>
+      let deferredPrompt;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+      });
+
+      function triggerPwaInstall() {
+        if (deferredPrompt) {
+          deferredPrompt.prompt();
+          deferredPrompt.userChoice.then((choiceResult) => {
+            if (choiceResult.outcome === 'accepted') {
+              console.log('User accepted the PWA prompt');
+            }
+            deferredPrompt = null;
+          });
+        } else {
+          alert("To install, click the Share icon (iOS) or Menu (Android) and select 'Add to Home Screen'");
+        }
+      }
+    </script>
+
     <!-- Firebase Setup -->
     <script>
       const firebaseConfig = {

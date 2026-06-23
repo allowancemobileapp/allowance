@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:wechat_camera_picker/wechat_camera_picker.dart';
 
 class ChatSyncService {
   static final ChatSyncService instance = ChatSyncService._internal();
@@ -98,18 +99,24 @@ class ChatSyncService {
       List<String> localPaths = List<String>.from(msg['local_paths'] ?? []);
 
       if (localPaths.isNotEmpty) {
-        // 🔥 FIX: Start the smooth progress simulator!
         _simulateProgress(localId);
 
         for (String path in localPaths) {
           Uint8List fileBytes;
           String fileName;
 
-          // 🔥 THE WEB FIX: Extract bytes directly from the Browser's Blob URL
+          // 🔥 FIXED: Keeps your http import alive, but rescues 'blob:' URLs from crashing!
           if (kIsWeb) {
-            final response = await http.get(Uri.parse(path));
-            fileBytes = response.bodyBytes;
-            final ext = msg['media_type'] == 'video' ? 'mp4' : 'jpg';
+            if (path.startsWith('blob:')) {
+              final xfile = XFile(path);
+              fileBytes = await xfile.readAsBytes();
+            } else {
+              final response = await http.get(Uri.parse(path));
+              fileBytes = response.bodyBytes;
+            }
+            final ext = msg['media_type'] == 'video'
+                ? 'mp4'
+                : (msg['media_type'] == 'sticker' ? 'png' : 'jpg');
             fileName =
                 '${DateTime.now().millisecondsSinceEpoch}_${path.hashCode}.$ext';
           } else {
@@ -145,17 +152,20 @@ class ChatSyncService {
           }
         }
 
-        // Stop simulator and force 100% when upload finishes
         _simulatedTimers[localId]?.cancel();
         uploadProgress.value = Map.from(uploadProgress.value)..[localId] = 1.0;
       }
 
+      // 🔥 FIXED: Preserves the 'media_url' if we sent a pre-saved sticker
       final payload = {
         'chat_id': msg['chat_id'],
         'sender_id': msg['sender_id'],
         'content': msg['content'],
         'is_read': false,
-        if (uploadedUrls.isNotEmpty) 'media_url': uploadedUrls.join(','),
+        if (uploadedUrls.isNotEmpty || msg['media_url'] != null)
+          'media_url': uploadedUrls.isNotEmpty
+              ? uploadedUrls.join(',')
+              : msg['media_url'],
         if (msg['media_type'] != null) 'media_type': msg['media_type'],
         if (msg['thumbnail_url'] != null) 'thumbnail_url': msg['thumbnail_url'],
         if (msg['file_size_bytes'] != null)
@@ -164,13 +174,8 @@ class ChatSyncService {
         if (msg['reply_content'] != null) 'reply_content': msg['reply_content'],
       };
 
-      try {
-        await supabase.from('messages').insert(payload);
-      } catch (insertError) {
-        throw Exception("Failed to insert message into database");
-      }
+      await supabase.from('messages').insert(payload);
 
-      // Keep in UI as "sent" (1 Grey Tick) for 3 seconds so it bridges bad networks
       final msgs = List<Map<String, dynamic>>.from(pendingMessages.value);
       final idx = msgs.indexWhere((m) => m['local_id'] == localId);
       if (idx != -1) {

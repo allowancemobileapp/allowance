@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -97,6 +98,7 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
   int _commentsCount = 0;
   bool _isMuted = false;
   bool _authorIsPlus = false;
+  bool _showHeartOverlay = false;
 
   // 🔥 NEW: Controls Image Loading Speed vs Quality to prevent crashes
   bool _isHighQuality = false;
@@ -585,12 +587,15 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     final isPlus =
         _authorIsPlus || profile['subscription_tier'] == 'Membership';
 
-    // 🔥 FIX 1: Wrap in GestureDetector to catch the ID when deleted!
     return GestureDetector(
+      // 🔥 FIX: Ensures taps on the video register to the detector!
+      behavior: HitTestBehavior.opaque,
+      onDoubleTap: () {
+        HapticFeedback.lightImpact();
+        _toggleLike();
+      },
       onTap: () async {
-        if (!isVideo) return; // Only videos need tap-to-pause
-
-        // This stops the video from swallowing the tap on Web
+        if (!isVideo) return;
         if (_videoController != null && _videoController!.value.isInitialized) {
           if (_videoController!.value.isPlaying) {
             _videoController!.pause();
@@ -609,13 +614,11 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                         _videoController!.value.isInitialized
                     ? Stack(alignment: Alignment.bottomCenter, children: [
                         Center(
-                          child: AspectRatio(
-                              aspectRatio: _videoController!.value.aspectRatio,
-                              // 🔥 FIX 2: IgnorePointer stops Web browsers from eating the tap
-                              child: IgnorePointer(
-                                  child: VideoPlayer(_videoController!))),
-                        ),
-
+                            child: AspectRatio(
+                                aspectRatio:
+                                    _videoController!.value.aspectRatio,
+                                child: IgnorePointer(
+                                    child: VideoPlayer(_videoController!)))),
                         if (!_videoController!.value.isPlaying)
                           Container(
                               padding: const EdgeInsets.all(16),
@@ -624,27 +627,36 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                                   shape: BoxShape.circle),
                               child: const Icon(Icons.play_arrow_rounded,
                                   color: Colors.white, size: 54)),
-
-                        // 🔥 YOUTUBE STYLE PROGRESS BAR
-                        VideoProgressIndicator(
-                          _videoController!,
-                          allowScrubbing: true,
-                          colors: const VideoProgressColors(
-                              playedColor: Color(0xFF4CAF50),
-                              bufferedColor: Colors.white24,
-                              backgroundColor: Colors.transparent),
-                        ),
+                        VideoProgressIndicator(_videoController!,
+                            allowScrubbing: true,
+                            colors: const VideoProgressColors(
+                                playedColor: Color(0xFF4CAF50),
+                                bufferedColor: Colors.white24,
+                                backgroundColor: Colors.transparent)),
                       ])
                     : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
                 : CachedNetworkImage(
                     imageUrl: widget.moment['media_url'],
                     fit: BoxFit.contain,
-                    // High Quality toggle respects images!
                     memCacheWidth: _isHighQuality ? null : 600,
                     placeholder: (context, url) =>
                         const CircularProgressIndicator(
-                            color: Color(0xFF4CAF50)),
-                  ),
+                            color: Color(0xFF4CAF50))),
+          ),
+          Center(
+            child: IgnorePointer(
+              child: AnimatedOpacity(
+                opacity: _showHeartOverlay ? 0.9 : 0.0,
+                duration: const Duration(milliseconds: 200),
+                child: AnimatedScale(
+                  scale: _showHeartOverlay ? 1.0 : 0.3,
+                  duration: const Duration(milliseconds: 400),
+                  curve: Curves.elasticOut,
+                  child: const Icon(Icons.favorite,
+                      color: Colors.white, size: 100),
+                ),
+              ),
+            ),
           ),
           Positioned(
             top: 0,
@@ -656,30 +668,26 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
-                    Image.asset(
-                      'assets/images/moments.png',
-                      height: 90,
-                      fit: BoxFit.contain,
-                      errorBuilder: (ctx, err, stack) => const Text('Moments',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              shadows: [
-                                Shadow(color: Colors.black87, blurRadius: 4)
-                              ])),
-                    ),
+                    Image.asset('assets/images/moments.png',
+                        height: 90,
+                        fit: BoxFit.contain,
+                        errorBuilder: (ctx, err, stack) => const Text('Moments',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                shadows: [
+                                  Shadow(color: Colors.black87, blurRadius: 4)
+                                ]))),
                     Positioned(
-                      left: 8,
-                      child: IconButton(
-                        icon: const Icon(Icons.arrow_back_ios,
-                            color: Colors.white,
-                            shadows: [
-                              Shadow(color: Colors.black87, blurRadius: 4)
-                            ]),
-                        onPressed: () => Navigator.pop(context),
-                      ),
-                    ),
+                        left: 8,
+                        child: IconButton(
+                            icon: const Icon(Icons.arrow_back_ios,
+                                color: Colors.white,
+                                shadows: [
+                                  Shadow(color: Colors.black87, blurRadius: 4)
+                                ]),
+                            onPressed: () => Navigator.pop(context))),
                     Positioned(
                       right: 8,
                       child: Row(
@@ -687,29 +695,28 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                         children: [
                           if (isVideo)
                             IconButton(
-                              icon: Icon(
-                                  _isMuted ? Icons.volume_off : Icons.volume_up,
+                                icon: Icon(
+                                    _isMuted
+                                        ? Icons.volume_off
+                                        : Icons.volume_up,
+                                    color: Colors.white,
+                                    shadows: const [
+                                      Shadow(color: Colors.black, blurRadius: 4)
+                                    ]),
+                                onPressed: () {
+                                  setState(() {
+                                    _isMuted = !_isMuted;
+                                    _videoController
+                                        ?.setVolume(_isMuted ? 0.0 : 1.0);
+                                  });
+                                }),
+                          IconButton(
+                              icon: const Icon(Icons.more_vert,
                                   color: Colors.white,
-                                  shadows: const [
+                                  shadows: [
                                     Shadow(color: Colors.black, blurRadius: 4)
                                   ]),
-                              onPressed: () {
-                                setState(() {
-                                  _isMuted = !_isMuted;
-                                  _videoController
-                                      ?.setVolume(_isMuted ? 0.0 : 1.0);
-                                });
-                              },
-                            ),
-                          // 🔥 FIX: "More" button is now visible to EVERYONE so they can tap HD.
-                          IconButton(
-                            icon: const Icon(Icons.more_vert,
-                                color: Colors.white,
-                                shadows: [
-                                  Shadow(color: Colors.black, blurRadius: 4)
-                                ]),
-                            onPressed: _showMomentOptions,
-                          ),
+                              onPressed: _showMomentOptions),
                         ],
                       ),
                     ),
@@ -748,7 +755,7 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                                 size: 16,
                                 shadows: [
                                   Shadow(color: Colors.black87, blurRadius: 4)
-                                ]),
+                                ])
                           ],
                         ],
                       ),
