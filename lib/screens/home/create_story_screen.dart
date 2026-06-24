@@ -389,24 +389,53 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
       } else {
         for (var media in mediaList) {
           final ext = media.file.name.split('.').last;
-          final path = 'stories/${const Uuid().v4()}.$ext';
+          final baseFileName = const Uuid().v4();
+          final path = 'stories/$baseFileName.$ext';
+          final hdPath = 'stories/${baseFileName}_hd.$ext';
+
           Uint8List bytesToUpload = media.bytes;
+          bool isHdAvailable = false;
 
           if (media.type == 'video' && !kIsWeb) {
             try {
-              // 🔥 FIX: Changed to DefaultQuality to preserve video playback and quality!
-              final info = await VideoCompress.compressVideo(
-                media.file.path,
-                quality: VideoQuality.DefaultQuality,
-                deleteOrigin: false,
-                includeAudio: true,
-              );
-              if (info != null &&
-                  info.file != null &&
-                  info.file!.lengthSync() > 1000) {
-                bytesToUpload = await info.file!.readAsBytes();
+              // 🧠 SMART QUALITY ENGINE
+              final mediaInfo =
+                  await VideoCompress.getMediaInfo(media.file.path);
+              final int width = mediaInfo.width ?? 0;
+              final int height = mediaInfo.height ?? 0;
+              final int maxRes = width > height ? width : height;
+              final double sizeMb = (mediaInfo.filesize ?? 0) / (1024 * 1024);
+
+              // 1. Skip compression if it's already 720p or lower and under 30MB
+              if (maxRes <= 1280 && sizeMb < 30) {
+                bytesToUpload = media.bytes;
               } else {
-                throw 'Compression returned empty file';
+                // 2. Compress high-res or large files
+                VideoQuality targetQuality =
+                    VideoQuality.Res1280x720Quality; // Target 720p Default
+
+                if (sizeMb > 50) {
+                  // 3. For very large files, drop to 540p to guarantee fast load times (NEVER 360p)
+                  targetQuality = VideoQuality.Res960x540Quality;
+                }
+
+                final info = await VideoCompress.compressVideo(
+                  media.file.path,
+                  quality: targetQuality,
+                  deleteOrigin: false,
+                  includeAudio: true,
+                );
+
+                // FINAL DECISION: 50,000 bytes (50KB) minimum size for a valid video
+                if (info != null &&
+                    info.file != null &&
+                    info.file!.lengthSync() > 50000) {
+                  bytesToUpload = await info.file!.readAsBytes();
+                  isHdAvailable =
+                      true; // We made a fast copy, save original for HD toggle
+                } else {
+                  throw 'Compression returned corrupted/empty file';
+                }
               }
             } catch (e) {
               debugPrint("Story Video compression failed, using original: $e");
@@ -414,9 +443,20 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
             }
           }
 
+          // Upload Fast/Optimized Version
           await supabase.storage.from(bucket).uploadBinary(path, bytesToUpload,
               fileOptions: const FileOptions(upsert: true));
           final publicUrl = supabase.storage.from(bucket).getPublicUrl(path);
+
+          // Upload Original HD Version (Silent & in Background)
+          if (isHdAvailable && media.type == 'video' && !kIsWeb) {
+            supabase.storage
+                .from(bucket)
+                .uploadBinary(hdPath, media.bytes,
+                    fileOptions: const FileOptions(upsert: true))
+                .catchError((_) => null);
+          }
+
           await _insertDatabaseRow(supabase, userId, publicUrl, media.type,
               caption, linkUrl, expiresAt);
         }

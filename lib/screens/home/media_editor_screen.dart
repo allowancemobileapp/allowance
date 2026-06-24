@@ -170,22 +170,47 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
       final hdFileName = '${baseFileName}_hd$extension';
 
       Uint8List fastBytes;
+      bool uploadHd = false;
 
       if (isVideo && !kIsWeb) {
         try {
-          // 🔥 FIX: Changed to DefaultQuality to preserve playback
-          final info = await VideoCompress.compressVideo(
-            currentPath,
-            quality: VideoQuality.DefaultQuality,
-            deleteOrigin: false,
-            includeAudio: true,
-          );
-          if (info != null &&
-              info.file != null &&
-              info.file!.lengthSync() > 1000) {
-            fastBytes = await info.file!.readAsBytes();
+          // 🧠 SMART QUALITY ENGINE FOR MOMENTS
+          final mediaInfo = await VideoCompress.getMediaInfo(currentPath);
+          final int width = mediaInfo.width ?? 0;
+          final int height = mediaInfo.height ?? 0;
+          final int maxRes = width > height ? width : height;
+          final double sizeMb = (mediaInfo.filesize ?? 0) / (1024 * 1024);
+
+          // 1. Skip compression if it's already 720p or lower and under 30MB
+          if (maxRes <= 1280 && sizeMb < 30) {
+            fastBytes = await _currentFile.readAsBytes();
           } else {
-            throw 'Compression resulted in empty file';
+            // 2. Compress high-res or large files
+            VideoQuality targetQuality =
+                VideoQuality.Res1280x720Quality; // Target 720p Default
+
+            if (sizeMb > 50) {
+              // 3. Very large files go to 540p to prevent video freezing on the viewer's end (NEVER 360P)
+              targetQuality = VideoQuality.Res960x540Quality;
+            }
+
+            final info = await VideoCompress.compressVideo(
+              currentPath,
+              quality: targetQuality,
+              deleteOrigin: false,
+              includeAudio: true,
+            );
+
+            // FINAL DECISION: 50,000 bytes (50KB) minimum size for a valid video
+            if (info != null &&
+                info.file != null &&
+                info.file!.lengthSync() > 50000) {
+              fastBytes = await info.file!.readAsBytes();
+              uploadHd =
+                  true; // Compression succeeded, let's back up the HD original!
+            } else {
+              throw 'Compression resulted in corrupted file';
+            }
           }
         } catch (e) {
           debugPrint("Compression failed, using original video: $e");
@@ -197,18 +222,20 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
 
       if (cancelUploadFlag) throw 'Cancelled by user';
 
+      // Upload Optimized Fast Version
       await supabase.storage.from('memories-bucket').uploadBinary(
           fileName, fastBytes,
           fileOptions: const FileOptions(cacheControl: '3600', upsert: false));
 
-      if (isVideo) {
+      // Upload HD copy ONLY if we compressed the main one
+      if (isVideo && uploadHd) {
         final hdBytes = await _currentFile.readAsBytes();
         supabase.storage
             .from('memories-bucket')
             .uploadBinary(hdFileName, hdBytes,
                 fileOptions:
                     const FileOptions(cacheControl: '3600', upsert: false))
-            .catchError((error) => '');
+            .catchError((error) => null); // Silent error catch
       }
 
       if (cancelUploadFlag) throw 'Cancelled by user';

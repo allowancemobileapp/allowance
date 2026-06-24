@@ -2,7 +2,7 @@ name: allowance
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 2.0.1+1
+version: 2.0.2+11
 
 environment:
   sdk: ">=3.5.3 <4.0.0"
