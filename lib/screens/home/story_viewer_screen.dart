@@ -1,4 +1,5 @@
 // lib/screens/home/story_viewer_screen.dart
+import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -843,6 +844,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     final currentUserPosition = _currentIndex - userStart;
 
     final bool isPlus = story['profiles']?['subscription_tier'] == 'Membership';
+    final bool isSharedGist =
+        story['url'] != null && story['url'].toString().contains('type=gist');
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -878,25 +881,21 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                       Container(
                         decoration: const BoxDecoration(
                           gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [Color(0xFF1A1A1A), Color(0xFF111111)],
-                          ),
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [Color(0xFF1A1A1A), Color(0xFF111111)]),
                         ),
                         child: Center(
                           child: Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 40),
-                            child: Text(
-                              storyItem['caption'] ?? '',
-                              style: const TextStyle(
-                                fontSize: 32,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white,
-                                height: 1.35,
-                                letterSpacing: -0.5,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
+                            child: Text(storyItem['caption'] ?? '',
+                                style: const TextStyle(
+                                    fontSize: 32,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white,
+                                    height: 1.35,
+                                    letterSpacing: -0.5),
+                                textAlign: TextAlign.center),
                           ),
                         ),
                       )
@@ -906,29 +905,27 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                               _videoController!.value.isInitialized
                           ? Center(
                               child: AspectRatio(
-                                aspectRatio:
-                                    _videoController!.value.aspectRatio,
-                                child: VideoPlayer(_videoController!),
-                              ),
-                            )
+                                  aspectRatio:
+                                      _videoController!.value.aspectRatio,
+                                  child: VideoPlayer(_videoController!)))
                           : const Center(child: CircularProgressIndicator()))
                     else
                       Center(
-                        child: Image.network(
-                          storyItem['media_url'],
-                          fit: BoxFit.contain,
-                          errorBuilder: (_, __, ___) => const Icon(Icons.error,
-                              color: Colors.white, size: 60),
-                        ),
-                      ),
+                          child: Image.network(storyItem['media_url'],
+                              fit: BoxFit.contain,
+                              errorBuilder: (_, __, ___) => const Icon(
+                                  Icons.error,
+                                  color: Colors.white,
+                                  size: 60))),
                     if (!isText && caption.isNotEmpty)
                       Positioned(
-                        bottom: 160,
-                        left: 24,
-                        right: 24,
+                        bottom: 85, // 🔥 Pushed down right above the input bar!
+                        left: 16,
+                        right: 16,
                         child: Container(
                           padding: const EdgeInsets.symmetric(
-                              vertical: 12, horizontal: 16),
+                              vertical: 8,
+                              horizontal: 12), // 🔥 Smaller padding
                           decoration: BoxDecoration(
                             color: Colors.black.withOpacity(0.65),
                             borderRadius: BorderRadius.circular(12),
@@ -937,9 +934,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                             caption,
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 17,
+                              fontSize: 13, // 🔥 Smaller font size
                               fontWeight: FontWeight.w500,
-                              height: 1.4,
+                              height: 1.3,
                             ),
                             textAlign: TextAlign.center,
                           ),
@@ -982,17 +979,13 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             child: Row(
               children: [
                 Expanded(
-                  child: GestureDetector(
-                    onTap: _goToPreviousStory,
-                    behavior: HitTestBehavior.translucent,
-                  ),
-                ),
+                    child: GestureDetector(
+                        onTap: _goToPreviousStory,
+                        behavior: HitTestBehavior.translucent)),
                 Expanded(
-                  child: GestureDetector(
-                    onTap: _goToNextStory,
-                    behavior: HitTestBehavior.translucent,
-                  ),
-                ),
+                    child: GestureDetector(
+                        onTap: _goToNextStory,
+                        behavior: HitTestBehavior.translucent)),
               ],
             ),
           ),
@@ -1006,33 +999,29 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               child: Row(
                 children: [
                   GestureDetector(
-                    onTap: () => _isPaused ? _resumeStory() : _pauseStory(),
-                    child: Icon(
-                      _isPaused
-                          ? Icons.play_arrow_rounded
-                          : Icons.pause_rounded,
-                      color: Colors.white,
-                      size: 30,
-                    ),
-                  ),
+                      onTap: () => _isPaused ? _resumeStory() : _pauseStory(),
+                      child: Icon(
+                          _isPaused
+                              ? Icons.play_arrow_rounded
+                              : Icons.pause_rounded,
+                          color: Colors.white,
+                          size: 30)),
                   const SizedBox(width: 8),
                   Text(
-                    "${_formatDuration(_videoController!.value.position)} / ${_formatDuration(_videoController!.value.duration)}",
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold),
-                  ),
+                      "${_formatDuration(_videoController!.value.position)} / ${_formatDuration(_videoController!.value.duration)}",
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold)),
                   Expanded(
                     child: SliderTheme(
                       data: SliderTheme.of(context).copyWith(
-                        trackHeight: 2,
-                        thumbShape:
-                            const RoundSliderThumbShape(enabledThumbRadius: 6),
-                        activeTrackColor: Colors.white,
-                        inactiveTrackColor: Colors.white24,
-                        thumbColor: Colors.white,
-                      ),
+                          trackHeight: 2,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6),
+                          activeTrackColor: Colors.white,
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: Colors.white),
                       child: Slider(
                         value: _videoController!.value.position.inMilliseconds
                             .toDouble(),
@@ -1059,18 +1048,53 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               child: GestureDetector(
                 onTap: () async {
                   final uri = Uri.parse(story['url'] as String);
-                  if (await canLaunchUrl(uri)) {
+                  if (await canLaunchUrl(uri))
                     await launchUrl(uri, mode: LaunchMode.externalApplication);
-                  }
                 },
                 child: Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.2),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white24),
-                  ),
+                      color: Colors.white.withOpacity(0.2),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white24)),
                   child: const Icon(Icons.link, color: Colors.white, size: 28),
+                ),
+              ),
+            ),
+          if (isSharedGist)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 100,
+              left: 16,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(12),
+                    border:
+                        Border.all(color: Colors.blueAccent.withOpacity(0.5))),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(children: [
+                      Icon(Icons.campaign, color: Colors.blueAccent, size: 18),
+                      SizedBox(width: 6),
+                      Text('Shared Gist',
+                          style: TextStyle(
+                              color: Colors.blueAccent,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12))
+                    ]),
+                    const SizedBox(height: 4),
+                    Text('@${story['profiles']?['username'] ?? 'User'}',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14)),
+                    Text('${story['profiles']?['school_name'] ?? 'Allowance'}',
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 10)),
+                  ],
                 ),
               ),
             ),
@@ -1080,64 +1104,72 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             right: 16,
             child: Row(
               children: [
-                CircleAvatar(
-                  backgroundImage: story['profiles']?['avatar_url'] != null
-                      ? NetworkImage(story['profiles']['avatar_url'])
-                      : null,
-                ),
-                const SizedBox(width: 8),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          '@${story['profiles']?['username'] ?? 'user'}',
-                          style: const TextStyle(
-                              color: Colors.white, fontWeight: FontWeight.bold),
-                        ),
-                        if (isPlus) ...[
-                          const SizedBox(width: 4),
-                          const Icon(Icons.star, color: Colors.amber, size: 14),
-                        ]
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        if (story['profiles']?['school_name'] != null &&
-                            story['profiles']!['school_name']
-                                .toString()
-                                .trim()
-                                .isNotEmpty) ...[
-                          Text(
-                            story['profiles']!['school_name'],
-                            style: TextStyle(
-                                color: Colors.white.withOpacity(0.6),
-                                fontSize: 12),
+                // 🔥 FIX: Removed the void .then() call
+                GestureDetector(
+                  onTap: () {
+                    UniversalProfileCard.show(
+                        context, story['user_id'], widget.userPreferences);
+                  },
+                  behavior: HitTestBehavior.opaque,
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                          backgroundImage: story['profiles']?['avatar_url'] !=
+                                  null
+                              ? NetworkImage(story['profiles']['avatar_url'])
+                              : null),
+                      const SizedBox(width: 8),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(
+                                  '@${story['profiles']?['username'] ?? 'user'}',
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold)),
+                              if (isPlus) ...[
+                                const SizedBox(width: 4),
+                                const Icon(Icons.star,
+                                    color: Colors.amber, size: 14)
+                              ]
+                            ],
                           ),
-                          const Text(' • ',
-                              style: TextStyle(
-                                  color: Colors.white54, fontSize: 12)),
+                          Row(
+                            children: [
+                              if (story['profiles']?['school_name'] != null &&
+                                  story['profiles']!['school_name']
+                                      .toString()
+                                      .trim()
+                                      .isNotEmpty) ...[
+                                Text(story['profiles']!['school_name'],
+                                    style: TextStyle(
+                                        color: Colors.white.withOpacity(0.6),
+                                        fontSize: 12)),
+                                const Text(' • ',
+                                    style: TextStyle(
+                                        color: Colors.white54, fontSize: 12)),
+                              ],
+                              Text(_timeAgo(story['created_at']),
+                                  style: const TextStyle(
+                                      color: Colors.white54, fontSize: 12)),
+                            ],
+                          ),
                         ],
-                        Text(
-                          _timeAgo(story['created_at']),
-                          style: const TextStyle(
-                              color: Colors.white54, fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
                 const Spacer(),
                 if (isOwnStory)
                   IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red, size: 28),
-                    onPressed: _deleteStory,
-                  ),
+                      icon:
+                          const Icon(Icons.delete, color: Colors.red, size: 28),
+                      onPressed: _deleteStory),
                 IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () => Navigator.pop(context),
-                ),
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.pop(context)),
               ],
             ),
           ),
@@ -1154,10 +1186,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 Expanded(
                   child: Container(
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.7),
-                      borderRadius: BorderRadius.circular(30),
-                      border: Border.all(color: Colors.white24),
-                    ),
+                        color: Colors.black.withOpacity(0.7),
+                        borderRadius: BorderRadius.circular(30),
+                        border: Border.all(color: Colors.white24)),
                     child: Row(
                       children: [
                         const SizedBox(width: 12),
@@ -1171,20 +1202,18 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                             onTap: _pauseStory,
                             onChanged: (value) => setState(() {}),
                             decoration: const InputDecoration(
-                              hintText: 'Reply...',
-                              hintStyle: TextStyle(color: Colors.white54),
-                              border: InputBorder.none,
-                              contentPadding: EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 12),
-                            ),
+                                hintText: 'Reply...',
+                                hintStyle: TextStyle(color: Colors.white54),
+                                border: InputBorder.none,
+                                contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 12)),
                             onSubmitted: (_) => _sendStoryReply(story),
                           ),
                         ),
                         if (_replyController.text.isNotEmpty)
                           IconButton(
-                            icon: const Icon(Icons.send, color: Colors.white),
-                            onPressed: () => _sendStoryReply(story),
-                          ),
+                              icon: const Icon(Icons.send, color: Colors.white),
+                              onPressed: () => _sendStoryReply(story)),
                       ],
                     ),
                   ),
@@ -1192,29 +1221,24 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 const SizedBox(width: 12),
                 if (!isOwnStory)
                   GestureDetector(
-                    onTap: _reshareStory,
-                    child: const Padding(
-                      padding: EdgeInsets.only(bottom: 10),
-                      child: Icon(Icons.repeat, color: Colors.white, size: 28),
-                    ),
-                  ),
+                      onTap: _reshareStory,
+                      child: const Padding(
+                          padding: EdgeInsets.only(bottom: 10),
+                          child: Icon(Icons.repeat,
+                              color: Colors.white, size: 28))),
                 if (isOwnStory)
                   GestureDetector(
-                    onTap: _showViewersList,
-                    child: Padding(
-                      padding: const EdgeInsets.only(bottom: 12),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.remove_red_eye,
-                              color: Colors.white, size: 24),
-                          const SizedBox(width: 4),
-                          Text('$_viewCount',
-                              style: const TextStyle(
-                                  color: Colors.white, fontSize: 14)),
-                        ],
-                      ),
-                    ),
-                  ),
+                      onTap: _showViewersList,
+                      child: Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Row(children: [
+                            const Icon(Icons.remove_red_eye,
+                                color: Colors.white, size: 24),
+                            const SizedBox(width: 4),
+                            Text('$_viewCount',
+                                style: const TextStyle(
+                                    color: Colors.white, fontSize: 14))
+                          ]))),
                 const SizedBox(width: 16),
                 Padding(
                   padding: const EdgeInsets.only(bottom: 6),
@@ -1222,27 +1246,23 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       IconButton(
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                        icon: Icon(
-                          _likedStoryIds.contains(story['id'])
-                              ? Icons.favorite
-                              : Icons.favorite_border,
-                          color: _likedStoryIds.contains(story['id'])
-                              ? Colors.red
-                              : Colors.white,
-                          size: 28,
-                        ),
-                        onPressed: _toggleLike,
-                      ),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          icon: Icon(
+                              _likedStoryIds.contains(story['id'])
+                                  ? Icons.favorite
+                                  : Icons.favorite_border,
+                              color: _likedStoryIds.contains(story['id'])
+                                  ? Colors.red
+                                  : Colors.white,
+                              size: 28),
+                          onPressed: _toggleLike),
                       const SizedBox(width: 6),
-                      Text(
-                        '${story['likes_count'] ?? 0}',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold),
-                      ),
+                      Text('${story['likes_count'] ?? 0}',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),

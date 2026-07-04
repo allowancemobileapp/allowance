@@ -66,6 +66,16 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
   List<XFile> _pickedVideos = []; // ← NEW
   bool _isVideoMode = false;
   bool _isPlusMember = false;
+  // 🔥 NEW: Poll & State Variables
+  bool _isPoll = false;
+  bool _allowMultipleVotes = false;
+  final List<TextEditingController> _pollOptionControllers = [
+    TextEditingController(),
+    TextEditingController()
+  ];
+  String _targetAudience = 'University'; // 'University' or 'State'
+  String? _selectedStateId;
+  late Future<List<Map<String, dynamic>>> _statesFuture;
 
   String? _selectedCategory;
   final categories = ['Sports', 'Entertainment', 'Official', 'Religion'];
@@ -75,8 +85,18 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     super.initState();
     _selectedSchoolId = widget.schoolId;
     _schoolsFuture = _fetchSchools();
+    _statesFuture = _fetchStates(); // 🔥 NEW: Fetch States
     _recoverPendingGistPayment();
     _checkPlusStatus();
+  }
+
+  @override
+  void dispose() {
+    _couponController.dispose();
+    for (var c in _pollOptionControllers) {
+      c.dispose();
+    } // Clean up poll controllers
+    super.dispose();
   }
 
   Future<void> _checkPlusStatus() async {
@@ -102,6 +122,21 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       final supabase = Supabase.instance.client;
       // cast result explicitly to List<dynamic>? then map safely
       final dynamic raw = await supabase.from('schools').select().order('name');
+      final List<dynamic>? resp = raw as List<dynamic>?;
+      if (resp == null) return [];
+      return resp
+          .map<Map<String, dynamic>>((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchStates() async {
+    try {
+      final raw = await Supabase.instance.client.from('states').select().order(
+          'name',
+          ascending: true); // 🔥 FIX: Forces strict A-Z alphabetical sorting
       final List<dynamic>? resp = raw as List<dynamic>?;
       if (resp == null) return [];
       return resp
@@ -242,12 +277,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     );
   }
 
-  @override
-  void dispose() {
-    _couponController.dispose();
-    super.dispose();
-  }
-
   double get _pricePerDay {
     final dbType = _typeMap[_selectedGistType];
     switch (dbType) {
@@ -354,6 +383,12 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
       return;
     }
 
+    if (_isPoll && _pollOptionControllers.any((c) => c.text.trim().isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please fill all poll options')));
+      return;
+    }
+
     final supabase = Supabase.instance.client;
     final user = supabase.auth.currentUser;
     if (user == null) return;
@@ -361,12 +396,19 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     final dbType = _typeMap[_selectedGistType];
     if (dbType == null) return;
 
-    final chosenSchoolId = _selectedSchoolId ?? widget.schoolId;
-    if (dbType == 'local' &&
-        (chosenSchoolId == null || chosenSchoolId.isEmpty)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Select university for local gist')));
-      return;
+    if (dbType == 'local') {
+      if (_targetAudience == 'University' &&
+          (_selectedSchoolId == null || _selectedSchoolId!.isEmpty)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Select university for local gist')));
+        return;
+      }
+      if (_targetAudience == 'State' &&
+          (_selectedStateId == null || _selectedStateId!.isEmpty)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Select a state for local gist')));
+        return;
+      }
     }
 
     setState(() => _isSubmitting = true);
@@ -441,13 +483,22 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'category': _selectedCategory,
         'payment_reference':
             is100PercentFree ? 'coupon_${_appliedCoupon!['code']}' : reference,
+
+        // 🔥 NEW: Poll and State Engine logic!
+        'has_poll': _isPoll,
+        'poll_options': _isPoll
+            ? _pollOptionControllers
+                .map((c) => c.text.trim())
+                .where((t) => t.isNotEmpty)
+                .toList()
+            : [],
+        'allow_multiple_votes': _allowMultipleVotes,
+        if (_targetAudience == 'State' && _selectedStateId != null)
+          'state_id': int.tryParse(_selectedStateId!),
+        if (_targetAudience == 'University' && _selectedSchoolId != null)
+          'school_id': int.tryParse(_selectedSchoolId!),
       };
 
-      if (dbType == 'local' &&
-          chosenSchoolId != null &&
-          chosenSchoolId.isNotEmpty) {
-        draftPayload['school_id'] = int.tryParse(chosenSchoolId);
-      }
       if (_urlController.text.trim().isNotEmpty) {
         draftPayload['url'] = _urlController.text.trim();
       }
@@ -464,16 +515,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
             params: {'p_code': _appliedCoupon!['code']});
       }
 
-      // --- 🔥 FIX: 100% DISCOUNT BYPASS (FORCE EDGE FUNCTION INVOCATION) ---
       if (is100PercentFree) {
-        // Guaranteed Edge Function Call!
         try {
-          supabase.functions.invoke('send-push-for-gist', body: {
-            'type': 'gist',
-            'gistId': draftGistId,
-          });
+          supabase.functions.invoke('send-push-for-gist',
+              body: {'type': 'gist', 'gistId': draftGistId});
         } catch (_) {}
-
         if (mounted) {
           setState(() => _isSubmitting = false);
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -537,11 +583,10 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           }
         } catch (err) {
           await supabase.from('gists').delete().eq('id', draftGistId);
-          if (mounted) {
+          if (mounted)
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                 content: Text('Payment gateways offline. Try again later.'),
                 backgroundColor: Colors.red));
-          }
           return;
         }
       }
@@ -556,7 +601,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
             'reference': reference,
             'gateway': gateway,
             'gistId': draftGistId,
-            'numberOfDays': numDays,
+            'numberOfDays': numDays
           }));
 
       if (authUrlString != null) {
@@ -566,13 +611,11 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
               mode: kIsWeb
                   ? LaunchMode.externalApplication
                   : LaunchMode.inAppBrowserView);
-
-          if (mounted) {
+          if (mounted)
             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                 content: Text('Payment opened! Verifying in the background...'),
                 backgroundColor: Colors.blueAccent,
                 duration: Duration(seconds: 6)));
-          }
         }
       }
 
@@ -680,10 +723,7 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
-        title: Image.asset(
-          'assets/images/gist_us.png',
-          height: 90,
-        ),
+        title: Image.asset('assets/images/gist_us.png', height: 90),
       ),
       body: SafeArea(
         child: SingleChildScrollView(
@@ -699,19 +739,17 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                       fontSize: 16,
                       fontFamily: 'SanFrancisco'),
                   decoration: InputDecoration(
-                    labelText: 'Type of Gist',
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    filled: true,
-                    fillColor: fieldFill,
-                    border: OutlineInputBorder(
-                        borderSide: BorderSide(color: widget.themeColor)),
-                  ),
+                      labelText: 'Type of Gist',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      filled: true,
+                      fillColor: fieldFill,
+                      border: OutlineInputBorder(
+                          borderSide: BorderSide(color: widget.themeColor))),
                   items: _typeMap.keys
                       .map((g) => DropdownMenuItem(
-                            value: g,
-                            child: Text(g,
-                                style: const TextStyle(color: Colors.white)),
-                          ))
+                          value: g,
+                          child: Text(g,
+                              style: const TextStyle(color: Colors.white))))
                       .toList(),
                   value: _selectedGistType,
                   onChanged: (v) =>
@@ -720,6 +758,143 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   dropdownColor: Colors.grey[850],
                 ),
                 const SizedBox(height: 12),
+
+                if (_selectedGistType == 'Local Gist') ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: RadioListTile<String>(
+                          title: const Text('University',
+                              style:
+                                  TextStyle(color: Colors.white, fontSize: 14)),
+                          value: 'University',
+                          groupValue: _targetAudience,
+                          activeColor: widget.themeColor,
+                          onChanged: (val) =>
+                              setState(() => _targetAudience = val!),
+                        ),
+                      ),
+                      Expanded(
+                        child: RadioListTile<String>(
+                          title: const Text('State',
+                              style:
+                                  TextStyle(color: Colors.white, fontSize: 14)),
+                          value: 'State',
+                          groupValue: _targetAudience,
+                          activeColor: widget.themeColor,
+                          onChanged: (val) =>
+                              setState(() => _targetAudience = val!),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  if (_targetAudience == 'University')
+                    FutureBuilder<List<Map<String, dynamic>>>(
+                      future: _schoolsFuture,
+                      builder: (ctx, snap) {
+                        if (snap.connectionState == ConnectionState.waiting) {
+                          return const SizedBox(
+                              height: 56,
+                              child:
+                                  Center(child: CircularProgressIndicator()));
+                        }
+                        final schools = snap.data ?? [];
+
+                        // 🔥 THE FIX: Prevent Red Screen Crash!
+                        final safeSchoolId = schools.any(
+                                (s) => s['id'].toString() == _selectedSchoolId)
+                            ? _selectedSchoolId
+                            : null;
+
+                        return DropdownButtonFormField<String>(
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontFamily: 'SanFrancisco'),
+                          decoration: InputDecoration(
+                              labelText: 'Select University',
+                              labelStyle:
+                                  const TextStyle(color: Colors.white70),
+                              filled: true,
+                              fillColor: fieldFill,
+                              border: OutlineInputBorder(
+                                  borderSide:
+                                      BorderSide(color: widget.themeColor))),
+                          items: schools.map((s) {
+                            final id = s['id']?.toString() ?? '';
+                            final name = s['name']?.toString() ?? id;
+                            return DropdownMenuItem(
+                                value: id,
+                                child: Text(name,
+                                    style:
+                                        const TextStyle(color: Colors.white)));
+                          }).toList(),
+                          value: safeSchoolId,
+                          onChanged: (v) => mounted
+                              ? setState(() => _selectedSchoolId = v)
+                              : null,
+                          validator: (v) => (v == null || v.isEmpty)
+                              ? 'Select a university'
+                              : null,
+                          dropdownColor: Colors.grey[850],
+                        );
+                      },
+                    )
+                  else
+                    FutureBuilder<List<Map<String, dynamic>>>(
+                      future: _statesFuture,
+                      builder: (ctx, snap) {
+                        if (snap.connectionState == ConnectionState.waiting) {
+                          return const SizedBox(
+                              height: 56,
+                              child:
+                                  Center(child: CircularProgressIndicator()));
+                        }
+                        final states = snap.data ?? [];
+
+                        // 🔥 THE FIX: Prevent Red Screen Crash!
+                        final safeStateId = states.any(
+                                (s) => s['id'].toString() == _selectedStateId)
+                            ? _selectedStateId
+                            : null;
+
+                        return DropdownButtonFormField<String>(
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontFamily: 'SanFrancisco'),
+                          decoration: InputDecoration(
+                              labelText: 'Select State',
+                              labelStyle:
+                                  const TextStyle(color: Colors.white70),
+                              filled: true,
+                              fillColor: fieldFill,
+                              border: OutlineInputBorder(
+                                  borderSide:
+                                      BorderSide(color: widget.themeColor))),
+                          items: states.map((s) {
+                            final id = s['id']?.toString() ?? '';
+                            final name = s['name']?.toString() ?? id;
+                            return DropdownMenuItem(
+                                value: id,
+                                child: Text(name,
+                                    style:
+                                        const TextStyle(color: Colors.white)));
+                          }).toList(),
+                          value: safeStateId,
+                          onChanged: (v) => mounted
+                              ? setState(() => _selectedStateId = v)
+                              : null,
+                          validator: (v) => (v == null || v.isEmpty)
+                              ? 'Select a state'
+                              : null,
+                          dropdownColor: Colors.grey[850],
+                        );
+                      },
+                    ),
+                  const SizedBox(height: 12),
+                ],
 
                 // Category
                 DropdownButtonFormField<String>(
@@ -730,70 +905,21 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   value: _selectedCategory,
                   items: categories
                       .map((c) => DropdownMenuItem(
-                            value: c,
-                            child: Text(c,
-                                style: const TextStyle(color: Colors.white)),
-                          ))
+                          value: c,
+                          child: Text(c,
+                              style: const TextStyle(color: Colors.white))))
                       .toList(),
                   onChanged: (val) => setState(() => _selectedCategory = val),
                   decoration: InputDecoration(
-                    labelText: 'Category',
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    filled: true,
-                    fillColor: fieldFill,
-                    border: OutlineInputBorder(
-                        borderSide: BorderSide(color: widget.themeColor)),
-                  ),
+                      labelText: 'Category',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      filled: true,
+                      fillColor: fieldFill,
+                      border: OutlineInputBorder(
+                          borderSide: BorderSide(color: widget.themeColor))),
                   dropdownColor: Colors.grey[850],
                 ),
                 const SizedBox(height: 12),
-
-                // School (for Local Gist)
-                if (_selectedGistType == 'Local Gist') ...[
-                  FutureBuilder<List<Map<String, dynamic>>>(
-                    future: _schoolsFuture,
-                    builder: (ctx, snap) {
-                      if (snap.connectionState == ConnectionState.waiting) {
-                        return const SizedBox(
-                            height: 56,
-                            child: Center(child: CircularProgressIndicator()));
-                      }
-                      final schools = snap.data ?? [];
-                      return DropdownButtonFormField<String>(
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontFamily: 'SanFrancisco'),
-                        decoration: InputDecoration(
-                          labelText: 'Select University',
-                          labelStyle: const TextStyle(color: Colors.white70),
-                          filled: true,
-                          fillColor: fieldFill,
-                          border: OutlineInputBorder(
-                              borderSide: BorderSide(color: widget.themeColor)),
-                        ),
-                        items: schools.map((s) {
-                          final id = s['id']?.toString() ?? '';
-                          final name = s['name']?.toString() ?? id;
-                          return DropdownMenuItem(
-                            value: id,
-                            child: Text(name,
-                                style: const TextStyle(color: Colors.white)),
-                          );
-                        }).toList(),
-                        value: _selectedSchoolId,
-                        onChanged: (v) => mounted
-                            ? setState(() => _selectedSchoolId = v)
-                            : null,
-                        validator: (v) => (v == null || v.isEmpty)
-                            ? 'Select a university'
-                            : null,
-                        dropdownColor: Colors.grey[850],
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                ],
 
                 // TITLE
                 TextFormField(
@@ -804,13 +930,12 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   textInputAction: TextInputAction.newline,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
-                    labelText: 'Gist Title',
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    filled: true,
-                    fillColor: fieldFill,
-                    border: OutlineInputBorder(
-                        borderSide: BorderSide(color: widget.themeColor)),
-                  ),
+                      labelText: 'Gist Title',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      filled: true,
+                      fillColor: fieldFill,
+                      border: OutlineInputBorder(
+                          borderSide: BorderSide(color: widget.themeColor))),
                   validator: (v) =>
                       (v == null || v.isEmpty) ? 'Enter a title' : null,
                 ),
@@ -821,20 +946,18 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   controller: _urlController,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
-                    labelText: 'Optional URL (will show on gist)',
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    filled: true,
-                    fillColor: fieldFill,
-                    border: OutlineInputBorder(
-                        borderSide: BorderSide(color: widget.themeColor)),
-                  ),
+                      labelText: 'Optional URL (will show on gist)',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      filled: true,
+                      fillColor: fieldFill,
+                      border: OutlineInputBorder(
+                          borderSide: BorderSide(color: widget.themeColor))),
                   keyboardType: TextInputType.url,
                   validator: (v) {
                     if (v == null || v.trim().isEmpty) return null;
                     final uri = Uri.tryParse(v.trim());
-                    if (uri == null || (!uri.hasScheme)) {
+                    if (uri == null || (!uri.hasScheme))
                       return 'Enter a valid URL (include https://)';
-                    }
                     return null;
                   },
                 ),
@@ -846,13 +969,12 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                   keyboardType: TextInputType.number,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
-                    labelText: 'Duration (days)',
-                    labelStyle: const TextStyle(color: Colors.white70),
-                    filled: true,
-                    fillColor: fieldFill,
-                    border: OutlineInputBorder(
-                        borderSide: BorderSide(color: widget.themeColor)),
-                  ),
+                      labelText: 'Duration (days)',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      filled: true,
+                      fillColor: fieldFill,
+                      border: OutlineInputBorder(
+                          borderSide: BorderSide(color: widget.themeColor))),
                   onChanged: (_) => mounted ? setState(() {}) : null,
                   validator: (v) {
                     final n = int.tryParse(v ?? '');
@@ -861,21 +983,106 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 ),
                 const SizedBox(height: 12),
 
-                // --- NEW: COUPON INPUT (LOCKED FOR FREE USERS) ---
+                // POLL BUILDER UI
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                      color: fieldFill,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                          color: widget.themeColor.withOpacity(0.5))),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SwitchListTile(
+                        title: const Text('Add a Poll to your Gist',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold)),
+                        subtitle: const Text('Ask your audience a question!',
+                            style:
+                                TextStyle(color: Colors.white54, fontSize: 12)),
+                        value: _isPoll,
+                        activeColor: widget.themeColor,
+                        onChanged: (val) => setState(() => _isPoll = val),
+                      ),
+                      if (_isPoll) ...[
+                        const Divider(color: Colors.white24),
+                        SwitchListTile(
+                          title: const Text('Allow Multiple Votes',
+                              style:
+                                  TextStyle(color: Colors.white, fontSize: 14)),
+                          value: _allowMultipleVotes,
+                          activeColor: widget.themeColor,
+                          onChanged: (val) =>
+                              setState(() => _allowMultipleVotes = val),
+                        ),
+                        const SizedBox(height: 8),
+                        ...List.generate(_pollOptionControllers.length, (i) {
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 8.0),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    controller: _pollOptionControllers[i],
+                                    style: const TextStyle(color: Colors.white),
+                                    decoration: InputDecoration(
+                                      hintText: 'Option ${i + 1}',
+                                      hintStyle: const TextStyle(
+                                          color: Colors.white54),
+                                      filled: true,
+                                      fillColor: Colors.black45,
+                                      border: OutlineInputBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(8),
+                                          borderSide: BorderSide.none),
+                                      contentPadding:
+                                          const EdgeInsets.symmetric(
+                                              horizontal: 12, vertical: 8),
+                                    ),
+                                  ),
+                                ),
+                                if (i >= 2)
+                                  IconButton(
+                                      icon: const Icon(Icons.remove_circle,
+                                          color: Colors.redAccent),
+                                      onPressed: () => setState(() {
+                                            _pollOptionControllers[i].dispose();
+                                            _pollOptionControllers.removeAt(i);
+                                          })),
+                              ],
+                            ),
+                          );
+                        }),
+                        if (_pollOptionControllers.length < 6)
+                          TextButton.icon(
+                            icon:
+                                const Icon(Icons.add, color: Colors.blueAccent),
+                            label: const Text('Add Option',
+                                style: TextStyle(color: Colors.blueAccent)),
+                            onPressed: () => setState(() =>
+                                _pollOptionControllers
+                                    .add(TextEditingController())),
+                          )
+                      ]
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+
+                // Coupon
                 TextFormField(
                   controller: _couponController,
                   style: TextStyle(
                       color: _isPlusMember ? Colors.white : Colors.white38),
-                  readOnly:
-                      !_isPlusMember, // <-- Locks keyboard from opening if free
+                  readOnly: !_isPlusMember,
                   onTap: () {
-                    if (!_isPlusMember) {
+                    if (!_isPlusMember)
                       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                        content: Text(
-                            '🔒 Only Allowance Plus ✨ members can use promo codes.'),
-                        backgroundColor: Colors.orange,
-                      ));
-                    }
+                          content: Text(
+                              '🔒 Only Allowance Plus ✨ members can use promo codes.'),
+                          backgroundColor: Colors.orange));
                   },
                   decoration: InputDecoration(
                     labelText: _isPlusMember
@@ -887,14 +1094,12 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                     border: OutlineInputBorder(
                         borderSide: BorderSide(color: widget.themeColor)),
                     suffixIcon: !_isPlusMember
-                        ? const Icon(Icons.lock,
-                            color: Colors.white38) // Show lock icon
+                        ? const Icon(Icons.lock, color: Colors.white38)
                         : _isVerifyingCoupon
                             ? const Padding(
                                 padding: EdgeInsets.all(12.0),
                                 child:
-                                    CircularProgressIndicator(strokeWidth: 2),
-                              )
+                                    CircularProgressIndicator(strokeWidth: 2))
                             : IconButton(
                                 icon: Icon(
                                     _appliedCoupon != null
@@ -913,35 +1118,30 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                                     _verifyAndApplyCoupon(
                                         _couponController.text);
                                   }
-                                },
-                              ),
+                                }),
                   ),
                   onChanged: (val) {
                     if (!_isPlusMember) return;
-                    // Auto-verify if they type exactly 6 chars
                     if (val.trim().length == 6) {
                       _verifyAndApplyCoupon(val);
                     } else if (_appliedCoupon != null &&
                         val.trim().length != 6) {
-                      // Remove coupon if they start deleting the code
                       setState(() => _appliedCoupon = null);
                     }
                   },
                 ),
                 const SizedBox(height: 20),
 
-                // ====================== MEDIA PICKER (Images + Video) ======================
+                // ====================== MEDIA PICKER ======================
                 const Text('Media (Images or 1 Video)',
                     style: TextStyle(color: Colors.white70, fontSize: 16)),
                 const SizedBox(height: 8),
 
-                // Preview area
                 if (_pickedImages.isNotEmpty || _pickedVideos.isNotEmpty)
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
                     children: [
-                      // Images
                       ...List.generate(_pickedImages.length, (i) {
                         return Stack(
                           children: [
@@ -951,65 +1151,53 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                                 : Image.file(File(_pickedImages[i].path),
                                     height: 100, width: 100, fit: BoxFit.cover),
                             Positioned(
-                              top: 4,
-                              right: 4,
-                              child: GestureDetector(
-                                onTap: () => _removeImage(i),
-                                child: const CircleAvatar(
-                                  radius: 12,
-                                  backgroundColor: Colors.red,
-                                  child: Icon(Icons.close,
-                                      size: 16, color: Colors.white),
-                                ),
-                              ),
-                            ),
+                                top: 4,
+                                right: 4,
+                                child: GestureDetector(
+                                    onTap: () => _removeImage(i),
+                                    child: const CircleAvatar(
+                                        radius: 12,
+                                        backgroundColor: Colors.red,
+                                        child: Icon(Icons.close,
+                                            size: 16, color: Colors.white)))),
                           ],
                         );
                       }),
-
-                      // Video preview
                       if (_pickedVideos.isNotEmpty)
                         Stack(
                           children: [
                             Container(
-                              height: 100,
-                              width: 100,
-                              decoration: BoxDecoration(
-                                color: Colors.black,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: const Center(
-                                child: Icon(Icons.play_circle_fill,
-                                    size: 50, color: Colors.white70),
-                              ),
-                            ),
+                                height: 100,
+                                width: 100,
+                                decoration: BoxDecoration(
+                                    color: Colors.black,
+                                    borderRadius: BorderRadius.circular(8)),
+                                child: const Center(
+                                    child: Icon(Icons.play_circle_fill,
+                                        size: 50, color: Colors.white70))),
                             Positioned(
-                              top: 4,
-                              right: 4,
-                              child: GestureDetector(
-                                onTap: () {
-                                  setState(() {
-                                    _pickedVideos.clear();
-                                    _isVideoMode = false;
-                                  });
-                                },
-                                child: const CircleAvatar(
-                                  radius: 12,
-                                  backgroundColor: Colors.red,
-                                  child: Icon(Icons.close,
-                                      size: 16, color: Colors.white),
-                                ),
-                              ),
-                            ),
+                                top: 4,
+                                right: 4,
+                                child: GestureDetector(
+                                    onTap: () {
+                                      setState(() {
+                                        _pickedVideos.clear();
+                                        _isVideoMode = false;
+                                      });
+                                    },
+                                    child: const CircleAvatar(
+                                        radius: 12,
+                                        backgroundColor: Colors.red,
+                                        child: Icon(Icons.close,
+                                            size: 16, color: Colors.white)))),
                             const Positioned(
-                              bottom: 6,
-                              left: 6,
-                              child: Text('VIDEO',
-                                  style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold)),
-                            ),
+                                bottom: 6,
+                                left: 6,
+                                child: Text('VIDEO',
+                                    style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold))),
                           ],
                         ),
                     ],
@@ -1017,48 +1205,40 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
 
                 const SizedBox(height: 12),
 
-                // Buttons
                 Row(
                   children: [
-                    // Add Images Button
                     Expanded(
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.add_photo_alternate,
-                            color: Colors.white),
-                        label: Text(_pickedImages.length >= 3
-                            ? 'Maximum reached (3)'
-                            : 'Add Images (${_pickedImages.length}/3)'),
-                        style: OutlinedButton.styleFrom(
-                            side: BorderSide(color: widget.themeColor),
-                            backgroundColor: Colors.transparent),
-                        onPressed: (_pickedImages.length >= 3 ||
-                                _pickedVideos.isNotEmpty)
-                            ? null
-                            : _pickImages,
-                      ),
-                    ),
+                        child: OutlinedButton.icon(
+                            icon: const Icon(Icons.add_photo_alternate,
+                                color: Colors.white),
+                            label: Text(_pickedImages.length >= 3
+                                ? 'Max reached (3)'
+                                : 'Add Images (${_pickedImages.length}/3)'),
+                            style: OutlinedButton.styleFrom(
+                                side: BorderSide(color: widget.themeColor),
+                                backgroundColor: Colors.transparent),
+                            onPressed: (_pickedImages.length >= 3 ||
+                                    _pickedVideos.isNotEmpty)
+                                ? null
+                                : _pickImages)),
                     const SizedBox(width: 12),
-
-                    // Add Video Button
                     Expanded(
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.videocam, color: Colors.white),
-                        label: const Text('Add Video'),
-                        style: OutlinedButton.styleFrom(
-                            side: BorderSide(color: widget.themeColor),
-                            backgroundColor: Colors.transparent),
-                        onPressed: (_pickedVideos.isNotEmpty ||
-                                _pickedImages.isNotEmpty)
-                            ? null
-                            : _pickVideo,
-                      ),
-                    ),
+                        child: OutlinedButton.icon(
+                            icon:
+                                const Icon(Icons.videocam, color: Colors.white),
+                            label: const Text('Add Video'),
+                            style: OutlinedButton.styleFrom(
+                                side: BorderSide(color: widget.themeColor),
+                                backgroundColor: Colors.transparent),
+                            onPressed: (_pickedVideos.isNotEmpty ||
+                                    _pickedImages.isNotEmpty)
+                                ? null
+                                : _pickVideo)),
                   ],
                 ),
 
                 const SizedBox(height: 24),
 
-                // --- UPDATED: Estimated Price (Shows Discount Slash) ---
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -1087,7 +1267,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 ),
                 const SizedBox(height: 20),
 
-                // Submit Button
                 SizedBox(
                   width: double.infinity,
                   height: 56,
@@ -1103,25 +1282,21 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                         ? Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              const Text('Uploading Media...',
-                                  style: TextStyle(
-                                      color: Colors.white70,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w500)),
-                              const SizedBox(height: 8),
-                              ClipRRect(
-                                borderRadius: BorderRadius.circular(4),
-                                child: const SizedBox(
-                                  width: 140,
-                                  child: LinearProgressIndicator(
-                                    color: Color(0xFF4CAF50),
-                                    backgroundColor: Colors.black45,
-                                    minHeight: 4,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          )
+                                const Text('Uploading Media...',
+                                    style: TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w500)),
+                                const SizedBox(height: 8),
+                                ClipRRect(
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: const SizedBox(
+                                        width: 140,
+                                        child: LinearProgressIndicator(
+                                            color: Color(0xFF4CAF50),
+                                            backgroundColor: Colors.black45,
+                                            minHeight: 4)))
+                              ])
                         : const Text('Advertise',
                             style: TextStyle(
                                 color: Colors.white,

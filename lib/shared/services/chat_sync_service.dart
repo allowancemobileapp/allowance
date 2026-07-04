@@ -184,7 +184,7 @@ class ChatSyncService {
         _savePending();
       }
 
-      Future.delayed(const Duration(seconds: 3), () => cancelMessage(localId));
+      Future.delayed(const Duration(seconds: 15), () => cancelMessage(localId));
 
       try {
         await supabase.from('chats').update({

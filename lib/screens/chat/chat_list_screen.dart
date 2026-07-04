@@ -792,12 +792,16 @@ class _ChatTileState extends State<_ChatTile> {
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: _lastMessageStream,
       builder: (context, msgSnapshot) {
+        int seriousness = 0; // 🔥 Pull seriousness
+
         if (msgSnapshot.hasData && msgSnapshot.data!.isNotEmpty) {
           final msg = msgSnapshot.data!.first;
+          seriousness = msg['seriousness'] as int? ?? 0;
 
-          // 🔥 FIX: Render Sticker UI string instead of generic path text
           String rawContent = msg['content'] ?? '📷 Media';
           if (rawContent == 'Sticker/GIF') rawContent = '🎭 Sticker';
+          if (msg['media_type']?.toString().startsWith('view_once') == true)
+            rawContent = '📷 View once message';
 
           _cachedLastMessage = rawContent;
           _cachedLastMessageTime = _formatTime(msg['created_at']);
@@ -892,8 +896,11 @@ class _ChatTileState extends State<_ChatTile> {
                         myPending.isNotEmpty
                             ? _formatTime(myPending.first['created_at'])
                             : _cachedLastMessageTime,
-                        style: const TextStyle(
-                            color: Colors.white54, fontSize: 12));
+                        style: TextStyle(
+                            color: (widget.unreadCount > 0 && seriousness > 0)
+                                ? Colors.redAccent
+                                : Colors.white54,
+                            fontSize: 12));
                   }),
             ],
           ),
@@ -928,10 +935,12 @@ class _ChatTileState extends State<_ChatTile> {
                                 lastMsg['content'].toString().trim().isEmpty
                                     ? '📷 Media'
                                     : lastMsg['content'];
-
-                            // 🔥 FIX: Formats the pending message UI nicely on the list view
                             if (displayMsg == 'Sticker/GIF')
                               displayMsg = '🎭 Sticker';
+                            if (lastMsg['media_type']
+                                    ?.toString()
+                                    .startsWith('view_once') ==
+                                true) displayMsg = '📷 View once message';
 
                             if (lastMsg['is_failed'] == true) {
                               displayMsg = '❌ Failed to send';
@@ -940,7 +949,6 @@ class _ChatTileState extends State<_ChatTile> {
                               displayMsg = '🕒 $displayMsg';
                             }
                           }
-
                           return Text(displayMsg,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -968,10 +976,15 @@ class _ChatTileState extends State<_ChatTile> {
                                   color: Colors.white,
                                   fontSize: 10,
                                   fontWeight: FontWeight.bold))),
+
+                    // 🔥 FIX: Unread bubble turns red if seriousness is high!
                     Container(
                         padding: const EdgeInsets.all(6),
                         decoration: BoxDecoration(
-                            color: widget.themeColor, shape: BoxShape.circle),
+                            color: seriousness > 0
+                                ? Colors.redAccent
+                                : widget.themeColor,
+                            shape: BoxShape.circle),
                         child: Text(widget.unreadCount.toString(),
                             style: const TextStyle(
                                 color: Color(0xFF121212),

@@ -135,68 +135,59 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
   }
 
   // --- 🔥 NEW: WEB-SAFE PRELOAD & CACHE LOGIC ---
-  // --- 🔥 YOUTUBE STYLE RESOLUTION SWITCHER (Backward Compatible!) ---
   Future<void> _initializeAndPreloadVideo(String url,
       {Duration? startAt}) async {
     try {
       String finalUrl = url;
 
-      // If user requested HD, smartly check if an HD file actually exists!
       if (_isHighQuality && url.contains('.mp4')) {
         final tempHdUrl = url.replaceAll('.mp4', '_hd.mp4');
-
         try {
-          // Ping Supabase to see if the HD file exists (takes 0.05 seconds)
           final response = await http.head(Uri.parse(tempHdUrl));
-
-          if (response.statusCode == 200) {
-            // It's a new video with dual-stream! Use the HD file.
+          if (response.statusCode == 200)
             finalUrl = tempHdUrl;
-          } else {
-            // It's an old video. The original URL is already the best quality available.
-            if (mounted && startAt != null) {
-              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          else if (mounted && startAt != null)
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                 content:
                     Text('This older video is already at maximum quality.'),
-                backgroundColor: Colors.black87,
-              ));
-            }
-          }
-        } catch (e) {
-          // If the network ping fails, default to the safe original URL
+                backgroundColor: Colors.black87));
+        } catch (_) {
           finalUrl = url;
         }
       }
 
+      VideoPlayerController? tempController;
       if (kIsWeb) {
-        _videoController =
-            VideoPlayerController.networkUrl(Uri.parse(finalUrl));
+        tempController = VideoPlayerController.networkUrl(Uri.parse(finalUrl));
       } else {
         final fileInfo = await DefaultCacheManager().getFileFromCache(finalUrl);
         if (fileInfo != null) {
-          _videoController = VideoPlayerController.file(fileInfo.file);
+          tempController = VideoPlayerController.file(fileInfo.file);
         } else {
-          _videoController =
+          tempController =
               VideoPlayerController.networkUrl(Uri.parse(finalUrl));
           DefaultCacheManager().downloadFile(finalUrl);
         }
       }
 
-      await _videoController!.initialize();
-      _videoController!.setLooping(true);
+      _videoController = tempController;
 
-      // Seamlessly resume from where the low-quality video left off!
-      if (startAt != null) {
-        await _videoController!.seekTo(startAt);
-      }
+      // 🔥 FIX: Safe initialization. If the user swipes away before this finishes, it won't crash!
+      await _videoController?.initialize();
+      if (!mounted || _videoController == null) return;
 
-      if (mounted && widget.isCurrentPage) {
+      _videoController?.setLooping(true);
+      if (startAt != null) await _videoController?.seekTo(startAt);
+
+      if (!mounted || _videoController == null) return;
+
+      if (widget.isCurrentPage) {
         setState(() {});
         if (kIsWeb) {
-          _videoController!.setVolume(0.0);
+          _videoController?.setVolume(0.0);
           _isMuted = true;
         }
-        _videoController!.play();
+        _videoController?.play();
       }
     } catch (e) {
       debugPrint("Video init error: $e");
@@ -209,25 +200,30 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     super.didUpdateWidget(oldWidget);
 
     if (widget.isCurrentPage && !oldWidget.isCurrentPage) {
-      // Swiped INTO view
-      if (widget.moment['media_type'] == 'video') {
-        if (_videoController == null) {
-          _initializeAndPreloadVideo(widget.moment['media_url']);
-        } else {
-          _videoController!.play();
-        }
+      if (_videoController == null) {
+        _initializeAndPreloadVideo(widget.moment['media_url']);
+      } else {
+        _videoController?.play();
       }
     } else if (!widget.isCurrentPage && oldWidget.isCurrentPage) {
-      // Swiped OUT of view -> DESTROY THE VIDEO TO FREE UP RAM!
+      // 🔥 FIX: The "Delayed Garbage Collector".
+      // Instantly pauses to save CPU/Battery, but waits 300ms to safely destroy it from RAM without throwing a crash exception!
       _videoController?.pause();
-      _videoController?.dispose();
+      final oldController = _videoController;
       _videoController = null;
+
+      Future.delayed(const Duration(milliseconds: 300), () {
+        oldController?.dispose();
+      });
     }
   }
 
   @override
   void dispose() {
-    _videoController?.dispose();
+    // 🔥 FIX: Safe disposal on screen exit
+    final oldController = _videoController;
+    _videoController = null;
+    oldController?.dispose();
     super.dispose();
   }
 

@@ -45,6 +45,7 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
   bool _isUploading = false;
   final PageController _pageController = PageController();
   final ImagePicker _imagePicker = ImagePicker();
+  bool _shareToMoments = false;
 
   // ==================== PICK MEDIA ====================
   Future<void> _pickMedia() async {
@@ -195,107 +196,137 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
   }
 
   // ==================== DURATION PICKER (NEW) ====================
+  // ==================== DURATION PICKER (NEW) ====================
   void _showDurationPicker() {
     final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
 
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true, // Allows sheet to expand fully
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
       ),
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            return Container(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(2))),
-                  const SizedBox(height: 20),
-                  const Text('Story Duration',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  Text(
-                    isPlus
-                        ? 'This story will disappear after ${_selectedDuration.toInt()} days'
-                        : 'Free users can only post 1-day stories.',
-                    style: const TextStyle(color: Colors.white70, fontSize: 14),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 30),
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      activeTrackColor: const Color(0xFF4CAF50),
-                      inactiveTrackColor: Colors.white10,
-                      thumbColor: isPlus ? Colors.white : Colors.grey,
-                      overlayColor: const Color(0xFF4CAF50).withOpacity(0.2),
+            return Padding(
+              // Prevents keyboard overlap and overflow
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom,
+              ),
+              child: DraggableScrollableSheet(
+                initialChildSize: 0.6,
+                minChildSize: 0.4,
+                maxChildSize: 0.9,
+                expand: false,
+                builder: (_, scrollController) => ListView(
+                  controller: scrollController,
+                  padding: const EdgeInsets.all(24.0),
+                  children: [
+                    Center(
+                      child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                              color: Colors.white24,
+                              borderRadius: BorderRadius.circular(2))),
                     ),
-                    child: Slider(
-                      value:
-                          isPlus ? _selectedDuration : 1.0, // Lock to 1 if free
-                      min: 1,
-                      max: 10,
-                      divisions: 9,
-                      label: isPlus
-                          ? '${_selectedDuration.toInt()} Days'
-                          : '1 Day',
-                      onChanged: isPlus
-                          ? (value) {
-                              setModalState(() => _selectedDuration = value);
-                              setState(() {});
-                            }
-                          : null, // Disable slider if free
+                    const SizedBox(height: 20),
+                    const Text('Story Duration',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 10),
+                    Text(
+                      isPlus
+                          ? 'This story will disappear after ${_selectedDuration.toInt()} days'
+                          : 'Free users can only post 1-day stories.',
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 14),
+                      textAlign: TextAlign.center,
                     ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: const [
-                        Text('1 Day',
-                            style:
-                                TextStyle(color: Colors.white54, fontSize: 12)),
-                        Text('10 Days (Plus)',
-                            style: TextStyle(
-                                color: Colors.amber,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 30),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _handleFinalUpload();
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF4CAF50),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
+                    const SizedBox(height: 30),
+                    SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                          activeTrackColor: const Color(0xFF4CAF50),
+                          inactiveTrackColor: Colors.white10,
+                          thumbColor: isPlus ? Colors.white : Colors.grey,
+                          overlayColor:
+                              const Color(0xFF4CAF50).withOpacity(0.2)),
+                      child: Slider(
+                        value: isPlus ? _selectedDuration : 1.0,
+                        min: 1,
+                        max: 10,
+                        divisions: 9,
+                        label: isPlus
+                            ? '${_selectedDuration.toInt()} Days'
+                            : '1 Day',
+                        onChanged: isPlus
+                            ? (value) {
+                                setModalState(() => _selectedDuration = value);
+                                setState(() {});
+                              }
+                            : null,
                       ),
-                      child: const Text('Confirm & Post',
-                          style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.black)),
                     ),
-                  ),
-                  const SizedBox(height: 10),
-                ],
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: const [
+                            Text('1 Day',
+                                style: TextStyle(
+                                    color: Colors.white54, fontSize: 12)),
+                            Text('10 Days (Plus)',
+                                style: TextStyle(
+                                    color: Colors.amber,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold))
+                          ]),
+                    ),
+                    const SizedBox(height: 20),
+                    SwitchListTile(
+                      title: const Text('Share to Moments simultaneously',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
+                      subtitle: const Text(
+                          'When the story expires, it will remain permanently as a Moment on your profile.',
+                          style:
+                              TextStyle(color: Colors.white54, fontSize: 12)),
+                      value: _shareToMoments,
+                      activeColor: const Color(0xFF4CAF50),
+                      onChanged: (val) {
+                        setModalState(() => _shareToMoments = val);
+                        setState(() => _shareToMoments = val);
+                      },
+                    ),
+                    const SizedBox(height: 30),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          _handleFinalUpload();
+                        },
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF4CAF50),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12))),
+                        child: const Text('Confirm & Post',
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.black)),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                ),
               ),
             );
           },
@@ -386,6 +417,15 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
       if (isTextOnly) {
         await _insertDatabaseRow(
             supabase, userId, null, 'text', caption, linkUrl, expiresAt);
+        // 🔥 FIX: Inserts to moments if toggle is ON
+        if (_shareToMoments) {
+          await supabase.from('moments').insert({
+            'user_id': userId,
+            'media_url': null,
+            'media_type': 'text',
+            'caption': caption
+          });
+        }
       } else {
         for (var media in mediaList) {
           final ext = media.file.name.split('.').last;
@@ -398,7 +438,6 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
 
           if (media.type == 'video' && !kIsWeb) {
             try {
-              // 🧠 SMART QUALITY ENGINE
               final mediaInfo =
                   await VideoCompress.getMediaInfo(media.file.path);
               final int width = mediaInfo.width ?? 0;
@@ -406,33 +445,22 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
               final int maxRes = width > height ? width : height;
               final double sizeMb = (mediaInfo.filesize ?? 0) / (1024 * 1024);
 
-              // 1. Skip compression if it's already 720p or lower and under 30MB
               if (maxRes <= 1280 && sizeMb < 30) {
                 bytesToUpload = media.bytes;
               } else {
-                // 2. Compress high-res or large files
-                VideoQuality targetQuality =
-                    VideoQuality.Res1280x720Quality; // Target 720p Default
+                VideoQuality targetQuality = VideoQuality.Res1280x720Quality;
+                if (sizeMb > 50) targetQuality = VideoQuality.Res960x540Quality;
 
-                if (sizeMb > 50) {
-                  // 3. For very large files, drop to 540p to guarantee fast load times (NEVER 360p)
-                  targetQuality = VideoQuality.Res960x540Quality;
-                }
+                final info = await VideoCompress.compressVideo(media.file.path,
+                    quality: targetQuality,
+                    deleteOrigin: false,
+                    includeAudio: true);
 
-                final info = await VideoCompress.compressVideo(
-                  media.file.path,
-                  quality: targetQuality,
-                  deleteOrigin: false,
-                  includeAudio: true,
-                );
-
-                // FINAL DECISION: 50,000 bytes (50KB) minimum size for a valid video
                 if (info != null &&
                     info.file != null &&
                     info.file!.lengthSync() > 50000) {
                   bytesToUpload = await info.file!.readAsBytes();
-                  isHdAvailable =
-                      true; // We made a fast copy, save original for HD toggle
+                  isHdAvailable = true;
                 } else {
                   throw 'Compression returned corrupted/empty file';
                 }
@@ -443,12 +471,10 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
             }
           }
 
-          // Upload Fast/Optimized Version
           await supabase.storage.from(bucket).uploadBinary(path, bytesToUpload,
               fileOptions: const FileOptions(upsert: true));
           final publicUrl = supabase.storage.from(bucket).getPublicUrl(path);
 
-          // Upload Original HD Version (Silent & in Background)
           if (isHdAvailable && media.type == 'video' && !kIsWeb) {
             supabase.storage
                 .from(bucket)
@@ -459,6 +485,16 @@ class _CreateStoryScreenState extends State<CreateStoryScreen> {
 
           await _insertDatabaseRow(supabase, userId, publicUrl, media.type,
               caption, linkUrl, expiresAt);
+
+          // 🔥 FIX: Inserts to moments if toggle is ON
+          if (_shareToMoments) {
+            await supabase.from('moments').insert({
+              'user_id': userId,
+              'media_url': publicUrl,
+              'media_type': media.type,
+              'caption': caption
+            });
+          }
         }
       }
       CreateStoryScreen.pendingStoryUpload.value = {

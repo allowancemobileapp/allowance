@@ -377,7 +377,7 @@ class _HomeScreenState extends State<HomeScreen> {
       final List<Map<String, dynamic>> raw = await supabase
           .from('gists')
           .select('''
-            id, user_id, title, image_url, image_urls, media_type, type, school_id, url, created_at, category,
+            id, user_id, title, image_url, image_urls, media_type, type, school_id, state_id, url, created_at, category, has_poll, poll_options, allow_multiple_votes,
             profiles:user_id (username, avatar_url, bio)
           ''')
           .eq('paid', true)
@@ -391,25 +391,40 @@ class _HomeScreenState extends State<HomeScreen> {
 
       final sidStr = _prefs.schoolId;
       final int? sidInt = sidStr != null ? int.tryParse(sidStr) : null;
-      if (sidStr != null && sidStr.isNotEmpty) {
+      final isPublicMode = sidStr == null || sidStr.isEmpty;
+
+      if (!isPublicMode) {
         list = list.where((g) {
           final type = (g['type'] ?? '').toString().toLowerCase();
           if (type == 'global') return true;
           if (type == 'local') {
             final gSchool = g['school_id'];
-            if (gSchool == null) return false;
-            final int? gsInt = int.tryParse(gSchool.toString());
-            return gsInt != null && sidInt != null
-                ? gsInt == sidInt
-                : gSchool.toString() == sidStr;
+            if (gSchool != null) {
+              final int? gsInt = int.tryParse(gSchool.toString());
+              return gsInt != null && sidInt != null
+                  ? gsInt == sidInt
+                  : gSchool.toString() == sidStr;
+            }
           }
           return false;
         }).toList();
       } else {
-        list = list
-            .where(
-                (g) => (g['type'] ?? '').toString().toLowerCase() == 'global')
-            .toList();
+        // Public mode: Show global + state-specific local gists
+        final stateIdResp = await supabase
+            .from('profiles')
+            .select('state_id')
+            .eq('id', supabase.auth.currentUser!.id)
+            .maybeSingle();
+        final int? userStateId = stateIdResp?['state_id'] as int?;
+
+        list = list.where((g) {
+          final type = (g['type'] ?? '').toString().toLowerCase();
+          if (type == 'global') return true;
+          if (type == 'local' && g['state_id'] != null) {
+            return userStateId != null && g['state_id'] == userStateId;
+          }
+          return false;
+        }).toList();
       }
 
       if (mounted) {
@@ -814,132 +829,106 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // --- 4. PUBLIC MODE STATE PICKER ---
-  // --- UPDATED: SAVES STATE (PUBLIC MODE) PERMANENTLY TO DB ---
-  void _showStatePicker() {
-    final List<String> states = [
-      "Abia",
-      "Adamawa",
-      "Akwa Ibom",
-      "Anambra",
-      "Bauchi",
-      "Bayelsa",
-      "Benue",
-      "Borno",
-      "Cross River",
-      "Delta",
-      "Ebonyi",
-      "Edo",
-      "Ekiti",
-      "Enugu",
-      "FCT - Abuja",
-      "Gombe",
-      "Imo",
-      "Jigawa",
-      "Kaduna",
-      "Kano",
-      "Katsina",
-      "Kebbi",
-      "Kogi",
-      "Kwara",
-      "Lagos",
-      "Nasarawa",
-      "Niger",
-      "Ogun",
-      "Ondo",
-      "Osun",
-      "Oyo",
-      "Plateau",
-      "Rivers",
-      "Sokoto",
-      "Taraba",
-      "Yobe",
-      "Zamfara"
-    ];
-    int selectedIndex = 0;
-
+  void _showStatePicker() async {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF121212),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) {
-        return Container(
-          height: 400,
-          padding: const EdgeInsets.only(top: 24),
-          child: Column(
-            children: [
-              const Text("Select Your State",
-                  style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 4),
-              Text("Public Mode",
-                  style: TextStyle(
-                      color: themeColor,
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              Expanded(
-                child: CupertinoPicker(
-                  itemExtent: 45,
-                  scrollController: FixedExtentScrollController(initialItem: 0),
-                  onSelectedItemChanged: (index) => selectedIndex = index,
-                  children: states
-                      .map((state) => Center(
-                          child: Text(state,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w500))))
-                      .toList(),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: SafeArea(
-                  top: false,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: themeColor,
-                        minimumSize: const Size(double.infinity, 56),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16))),
-                    onPressed: () async {
-                      final selectedState = states[selectedIndex];
-                      // Empty schoolId means "Public Mode".
-                      _prefs.schoolId = "";
-                      _prefs.schoolName = selectedState;
-                      await _prefs.savePreferences();
+        return FutureBuilder<List<dynamic>>(
+            future: supabase.from('states').select('id, name').order('name'),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting)
+                return const SizedBox(
+                    height: 400,
+                    child: Center(
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF4CAF50))));
 
-                      // 🔥 FIX: Save to DB so it persists on next login!
-                      final myId = supabase.auth.currentUser?.id;
-                      if (myId != null) {
-                        supabase
-                            .from('profiles')
-                            .update(
-                                {'school_id': '', 'school_name': selectedState})
-                            .eq('id', myId)
-                            .then((_) {});
-                      }
+              final states = snapshot.data ?? [];
+              int selectedIndex = 0;
 
-                      if (mounted) {
-                        Navigator.pop(ctx);
-                        setState(() => _selectedRestaurants.clear());
-                        _handleRefresh();
-                      }
-                    },
-                    child: const Text('Confirm',
+              return Container(
+                height: 400,
+                padding: const EdgeInsets.only(top: 24),
+                child: Column(
+                  children: [
+                    const Text("Select Your State",
                         style: TextStyle(
-                            color: Colors.black,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16)),
-                  ),
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Text("Public Mode",
+                        style: TextStyle(
+                            color: themeColor,
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 16),
+                    Expanded(
+                      child: CupertinoPicker(
+                        itemExtent: 45,
+                        scrollController:
+                            FixedExtentScrollController(initialItem: 0),
+                        onSelectedItemChanged: (index) => selectedIndex = index,
+                        children: states
+                            .map((state) => Center(
+                                child: Text(state['name'],
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.w500))))
+                            .toList(),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: SafeArea(
+                        top: false,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: themeColor,
+                              minimumSize: const Size(double.infinity, 56),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16))),
+                          onPressed: () async {
+                            final selectedState = states[selectedIndex];
+                            _prefs.schoolId = "";
+                            _prefs.schoolName = selectedState['name'];
+                            await _prefs.savePreferences();
+
+                            final myId = supabase.auth.currentUser?.id;
+                            if (myId != null) {
+                              supabase
+                                  .from('profiles')
+                                  .update({
+                                    'school_id': null,
+                                    'school_name': selectedState['name'],
+                                    'state_id': selectedState['id']
+                                  })
+                                  .eq('id', myId)
+                                  .then((_) {});
+                            }
+
+                            if (mounted) {
+                              Navigator.pop(ctx);
+                              setState(() => _selectedRestaurants.clear());
+                              _handleRefresh();
+                            }
+                          },
+                          child: const Text('Confirm',
+                              style: TextStyle(
+                                  color: Colors.black,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16)),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
-        );
+              );
+            });
       },
     );
   }
@@ -1662,7 +1651,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _globalChatChannel = supabase.channel('global-app-events');
 
-    // Listen for Chats
     _globalChatChannel!.onPostgresChanges(
         event: PostgresChangeEvent.insert,
         schema: 'public',
@@ -1685,17 +1673,26 @@ class _HomeScreenState extends State<HomeScreen> {
           }
         });
 
-    // 🔥 NEW: Listen for Real-Time Gists!
     _globalChatChannel!.onPostgresChanges(
         event: PostgresChangeEvent.insert,
         schema: 'public',
         table: 'gists',
-        callback: (payload) {
-          final newGist = payload.newRecord;
-          if (newGist['status'] == 'active' && mounted) {
-            _handleRefresh(); // Silently pulls the new gist into the feed!
-          }
-        });
+        callback: (_) => _handleRefresh());
+    _globalChatChannel!.onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'gist_likes',
+        callback: (_) => _handleRefresh());
+    _globalChatChannel!.onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'gist_comments',
+        callback: (_) => _handleRefresh());
+    _globalChatChannel!.onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'poll_votes',
+        callback: (_) => _handleRefresh());
 
     _globalChatChannel!.subscribe();
   }
@@ -2016,89 +2013,91 @@ class _HomeScreenState extends State<HomeScreen> {
       () => setState(() => _selectedIndex = 3)
     ];
 
-    return Container(
-      height: 56,
-      decoration: BoxDecoration(
-        color: const Color(0xFF121212),
-        border: Border(top: BorderSide(color: Colors.white.withOpacity(0.05))),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: List.generate(icons.length, (i) {
-          final sel = _selectedIndex == i;
-          final isProfileTab = i == 3;
-          final isChatTab = i == 2;
+    // 🔥 FIX: Added SafeArea to stop taskbar collision!
+    return SafeArea(
+      bottom: true,
+      child: Container(
+        height: 56,
+        decoration: BoxDecoration(
+            color: const Color(0xFF121212),
+            border:
+                Border(top: BorderSide(color: Colors.white.withOpacity(0.05)))),
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: List.generate(icons.length, (i) {
+            final sel = _selectedIndex == i;
+            final isProfileTab = i == 3;
+            final isChatTab = i == 2;
 
-          Widget iconWidget;
-          if (isProfileTab &&
-              _prefs.avatarUrl != null &&
-              _prefs.avatarUrl!.isNotEmpty) {
-            iconWidget = Container(
-              padding: EdgeInsets.all(sel ? 2 : 0),
-              decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: sel ? Border.all(color: themeColor, width: 2) : null),
-              child: CircleAvatar(
-                  radius: 13,
-                  backgroundColor: const Color(0xFF1E1E1E),
-                  backgroundImage: NetworkImage(_prefs.avatarUrl!)),
-            );
-          } else if (isChatTab) {
-            iconWidget = StreamBuilder<List<Map<String, dynamic>>>(
-              stream: supabase.auth.currentUser == null
-                  ? const Stream.empty()
-                  : supabase
-                      .from('messages')
-                      .stream(primaryKey: ['id']).eq('is_read', false),
-              builder: (context, snapshot) {
-                final myId = supabase.auth.currentUser?.id;
-                final allUnread = snapshot.data ?? [];
-                final unreadCount =
-                    allUnread.where((msg) => msg['sender_id'] != myId).length;
-                return Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Icon(icons[i],
-                        size: 26, color: sel ? themeColor : Colors.white54),
-                    if (unreadCount > 0)
-                      Positioned(
-                        top: -4,
-                        right: -6,
-                        child: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: const BoxDecoration(
-                                color: Colors.redAccent,
-                                shape: BoxShape.circle),
-                            child: Text(
-                                unreadCount > 99
-                                    ? '99+'
-                                    : unreadCount.toString(),
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.bold))),
-                      ),
-                  ],
-                );
-              },
-            );
-          } else {
-            iconWidget = Icon(icons[i],
-                size: 28, color: sel ? themeColor : Colors.white54);
-          }
+            Widget iconWidget;
+            if (isProfileTab &&
+                _prefs.avatarUrl != null &&
+                _prefs.avatarUrl!.isNotEmpty) {
+              iconWidget = Container(
+                padding: EdgeInsets.all(sel ? 2 : 0),
+                decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border:
+                        sel ? Border.all(color: themeColor, width: 2) : null),
+                child: CircleAvatar(
+                    radius: 13,
+                    backgroundColor: const Color(0xFF1E1E1E),
+                    backgroundImage: NetworkImage(_prefs.avatarUrl!)),
+              );
+            } else if (isChatTab) {
+              iconWidget = StreamBuilder<List<Map<String, dynamic>>>(
+                stream: supabase.auth.currentUser == null
+                    ? const Stream.empty()
+                    : supabase
+                        .from('messages')
+                        .stream(primaryKey: ['id']).eq('is_read', false),
+                builder: (context, snapshot) {
+                  final myId = supabase.auth.currentUser?.id;
+                  final allUnread = snapshot.data ?? [];
+                  final unreadCount =
+                      allUnread.where((msg) => msg['sender_id'] != myId).length;
+                  return Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Icon(icons[i],
+                          size: 26, color: sel ? themeColor : Colors.white54),
+                      if (unreadCount > 0)
+                        Positioned(
+                            top: -4,
+                            right: -6,
+                            child: Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: const BoxDecoration(
+                                    color: Colors.redAccent,
+                                    shape: BoxShape.circle),
+                                child: Text(
+                                    unreadCount > 99
+                                        ? '99+'
+                                        : unreadCount.toString(),
+                                    style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.bold)))),
+                    ],
+                  );
+                },
+              );
+            } else {
+              iconWidget = Icon(icons[i],
+                  size: 28, color: sel ? themeColor : Colors.white54);
+            }
 
-          return GestureDetector(
-            behavior: HitTestBehavior
-                .opaque, // 🔥 THE FIX: Makes the entire padding area instantly clickable!
-            onTap: acts[i],
-            child: Padding(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 24, vertical: 8), // Increased hit box width
-              child: iconWidget,
-            ),
-          );
-        }),
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: acts[i],
+              child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  child: iconWidget),
+            );
+          }),
+        ),
       ),
     );
   }
@@ -2406,7 +2405,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             .select('*')
                             .eq('user_id', myId!)
                             .count(CountOption.exact);
-                        if ((countResp.count ?? 0) >= 3) {
+                        if ((countResp.count) >= 3) {
                           _showUniversalSubscriptionSheet(
                               customMessage:
                                   "Free users can only post a maximum of 3 moments. Upgrade to post unlimited memories!");
@@ -2667,16 +2666,15 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // --- NEW: REFERRAL LEADERBOARD ---
-  // --- 1. REPLACE: _showReferralLeaderboard ---
   void _showReferralLeaderboard() {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: const Color(0xFF121212), // Match profile BG
+      backgroundColor: const Color(0xFF121212),
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) {
-        int localSegment = 0; // 0 for Users, 1 for Subs
+        int localSegment = 0;
         return StatefulBuilder(
             builder: (BuildContext context, StateSetter setModalState) {
           return DraggableScrollableSheet(
@@ -2694,8 +2692,6 @@ class _HomeScreenState extends State<HomeScreen> {
                         color: Colors.white24,
                         borderRadius: BorderRadius.circular(2))),
                 const SizedBox(height: 16),
-
-                // --- NEW: LEADERBOARD TITLE ADDED HERE ---
                 const Text('LEADERBOARD 🏆',
                     style: TextStyle(
                         color: Colors.white,
@@ -2703,21 +2699,36 @@ class _HomeScreenState extends State<HomeScreen> {
                         fontWeight: FontWeight.bold,
                         letterSpacing: 1.5)),
                 const SizedBox(height: 4),
-                Text('Your Code: ${_prefs.username ?? ''}',
+                // 🔥 FIX: Removed null-aware operator to fix compiler warning
+                Text('Your Code: ${_prefs.username}',
                     style: TextStyle(
                         color: themeColor,
                         fontSize: 16,
                         fontWeight: FontWeight.bold)),
                 const SizedBox(height: 16),
 
-                // --- UPDATED SEGMENTED CONTROL (Matches Profile Screen exactly) ---
+                ElevatedButton.icon(
+                    icon: const Icon(Icons.share, color: Colors.black),
+                    label: const Text('Share Referral Link',
+                        style: TextStyle(
+                            color: Colors.black, fontWeight: FontWeight.bold)),
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: themeColor,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12))),
+                    onPressed: () {
+                      // 🔥 FIX: Removed null-aware operator here too
+                      Share.share(
+                          'Join Allowance! Use my referral code: ${_prefs.username} or click here: https://allowanceapp.org/join?ref=${_prefs.username}');
+                    }),
+                const SizedBox(height: 16),
+
                 Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 60), // Match Profile Screen padding
+                  padding: const EdgeInsets.symmetric(horizontal: 60),
                   child: Container(
                     padding: const EdgeInsets.all(3),
                     decoration: BoxDecoration(
-                        color: const Color(0xFF1E1E1E), // _card color
+                        color: const Color(0xFF1E1E1E),
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(color: Colors.white10)),
                     child: Row(
@@ -2726,14 +2737,12 @@ class _HomeScreenState extends State<HomeScreen> {
                           child: GestureDetector(
                             onTap: () => setModalState(() => localSegment = 0),
                             child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  vertical: 8), // Reduced height
+                              padding: const EdgeInsets.symmetric(vertical: 8),
                               decoration: BoxDecoration(
-                                color: localSegment == 0
-                                    ? themeColor
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                                  color: localSegment == 0
+                                      ? themeColor
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(8)),
                               child: Text("Users",
                                   textAlign: TextAlign.center,
                                   style: TextStyle(
@@ -2749,14 +2758,12 @@ class _HomeScreenState extends State<HomeScreen> {
                           child: GestureDetector(
                             onTap: () => setModalState(() => localSegment = 1),
                             child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  vertical: 8), // Reduced height
+                              padding: const EdgeInsets.symmetric(vertical: 8),
                               decoration: BoxDecoration(
-                                color: localSegment == 1
-                                    ? themeColor
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(8),
-                              ),
+                                  color: localSegment == 1
+                                      ? themeColor
+                                      : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(8)),
                               child: Text("Subscribers",
                                   textAlign: TextAlign.center,
                                   style: TextStyle(
@@ -2773,7 +2780,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 const SizedBox(height: 16),
-
                 Expanded(
                   child: FutureBuilder<List<dynamic>>(
                     future: supabase
@@ -2807,8 +2813,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           final row = filteredData[index];
                           final username =
                               row['referrer_username'] ?? 'Unknown';
-                          final avatarUrl =
-                              row['referrer_avatar_url']; // <-- NEW: AVATAR
+                          final avatarUrl = row['referrer_avatar_url'];
                           final count = localSegment == 0
                               ? row['total_users']
                               : row['total_subs'];
@@ -2826,7 +2831,6 @@ class _HomeScreenState extends State<HomeScreen> {
                           else if (index == 2) prefix = '🥉';
 
                           return ListTile(
-                            // --- UPDATED: ADDED AVATAR TO LEADING ---
                             leading: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -2861,8 +2865,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     },
                   ),
                 ),
-
-                // Fixed Bottom Bar for Benefits
                 Container(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
@@ -3571,6 +3573,283 @@ class _GistItemCardState extends State<_GistItemCard>
     }
   }
 
+  void _showGistOptions() {
+    final myId = Supabase.instance.client.auth.currentUser?.id;
+    final isMe = myId == widget.gist['user_id'];
+
+    final createdAt = DateTime.parse(widget.gist['created_at']).toLocal();
+    final canEdit = DateTime.now().difference(createdAt).inHours < 1;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isMe && canEdit)
+              ListTile(
+                leading: const Icon(Icons.edit, color: Colors.white),
+                title: const Text('Edit Gist',
+                    style: TextStyle(color: Colors.white, fontSize: 16)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _editGist();
+                },
+              ),
+            if (isMe)
+              ListTile(
+                leading:
+                    const Icon(Icons.delete_outline, color: Colors.redAccent),
+                title: const Text('Delete Gist',
+                    style: TextStyle(color: Colors.redAccent, fontSize: 16)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    await Supabase.instance.client
+                        .from('gists')
+                        .delete()
+                        .eq('id', widget.gistId);
+                    if (mounted)
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Gist deleted')));
+                  } catch (e) {
+                    debugPrint('Delete error: $e');
+                  }
+                },
+              ),
+            if (!isMe)
+              const Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Text('No options available for this gist.',
+                    style: TextStyle(color: Colors.white54)),
+              )
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _editGist() {
+    final editController =
+        TextEditingController(text: widget.gist['title'] ?? '');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('Edit Gist', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: editController,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+              hintText: 'Enter new title...',
+              hintStyle: TextStyle(color: Colors.white54)),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel',
+                  style: TextStyle(color: Colors.white54))),
+          TextButton(
+            onPressed: () async {
+              final newText = editController.text.trim();
+              if (newText.isNotEmpty && newText != widget.gist['title']) {
+                Navigator.pop(ctx);
+                try {
+                  await Supabase.instance.client
+                      .from('gists')
+                      .update({'title': newText}).eq('id', widget.gistId);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Gist updated!')));
+                } catch (e) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Failed to update gist.')));
+                }
+              }
+            },
+            child: Text('Save',
+                style: TextStyle(
+                    color: widget.themeColor, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _shareToStory() async {
+    final myId = Supabase.instance.client.auth.currentUser!.id;
+    final String title = widget.gist['title'] ?? '';
+    final String truncatedTitle =
+        title.length > 50 ? '${title.substring(0, 50)}...' : title;
+    final imageUrl = widget.gist['image_url'] ?? '';
+    final mediaUrlToUse = widget.gist['image_urls'] != null &&
+            (widget.gist['image_urls'] as List).isNotEmpty
+        ? widget.gist['image_urls'][0]
+        : imageUrl;
+
+    try {
+      await Supabase.instance.client.from('stories').insert({
+        'user_id': myId,
+        'media_url': mediaUrlToUse,
+        'media_type': widget.gist['media_type'] ?? 'image',
+        'caption': 'Check out this Gist!\n$truncatedTitle',
+        'url':
+            'https://www.allowanceapp.org/share?type=gist&id=${widget.gistId}',
+      });
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Shared to Story!'), backgroundColor: Colors.green));
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Failed to share to story'),
+            backgroundColor: Colors.red));
+    }
+  }
+
+  void _showPollSheet() {
+    final myId = Supabase.instance.client.auth.currentUser?.id;
+    if (myId == null) return;
+
+    final options = List<String>.from(widget.gist['poll_options'] ?? []);
+    final allowMultiple = widget.gist['allow_multiple_votes'] == true;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Poll',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold)),
+              if (allowMultiple)
+                const Text('You can select multiple options',
+                    style: TextStyle(color: Colors.white54, fontSize: 12)),
+              const SizedBox(height: 16),
+
+              // Real-time vote fetcher!
+              StreamBuilder<List<Map<String, dynamic>>>(
+                stream: Supabase.instance.client
+                    .from('poll_votes')
+                    .stream(primaryKey: ['id']).eq('gist_id', widget.gistId),
+                builder: (context, snapshot) {
+                  final votes = snapshot.data ?? [];
+                  final myVotes = votes
+                      .where((v) => v['user_id'] == myId)
+                      .map((v) => v['option'] as String)
+                      .toSet();
+
+                  return Column(
+                    children: options.map((opt) {
+                      final isSelected = myVotes.contains(opt);
+                      final voteCount =
+                          votes.where((v) => v['option'] == opt).length;
+                      final percent = votes.isEmpty
+                          ? 0
+                          : (voteCount / votes.length * 100).toInt();
+
+                      return GestureDetector(
+                        onTap: () async {
+                          if (isSelected) {
+                            await Supabase.instance.client
+                                .from('poll_votes')
+                                .delete()
+                                .match({
+                              'gist_id': widget.gistId,
+                              'user_id': myId,
+                              'option': opt
+                            });
+                          } else {
+                            if (!allowMultiple && myVotes.isNotEmpty) {
+                              await Supabase.instance.client
+                                  .from('poll_votes')
+                                  .delete()
+                                  .match({
+                                'gist_id': widget.gistId,
+                                'user_id': myId
+                              });
+                            }
+                            await Supabase.instance.client
+                                .from('poll_votes')
+                                .insert({
+                              'gist_id': widget.gistId,
+                              'user_id': myId,
+                              'option': opt
+                            });
+                          }
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                              color: isSelected
+                                  ? widget.themeColor.withOpacity(0.2)
+                                  : Colors.white10,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                  color: isSelected
+                                      ? widget.themeColor
+                                      : Colors.transparent)),
+                          child: Row(
+                            children: [
+                              Icon(
+                                  isSelected
+                                      ? Icons.check_circle
+                                      : Icons.circle_outlined,
+                                  color: isSelected
+                                      ? widget.themeColor
+                                      : Colors.white54),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                  child: Text(opt,
+                                      style: const TextStyle(
+                                          color: Colors.white, fontSize: 16))),
+                              Text('$percent%',
+                                  style: TextStyle(
+                                      color: isSelected
+                                          ? widget.themeColor
+                                          : Colors.white54,
+                                      fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // --- NEW: Helper for the colored Tags ---
+  Widget _buildTag(String text, Color color) {
+    return Container(
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+          color: color.withOpacity(0.2),
+          border: Border.all(color: color.withOpacity(0.5)),
+          borderRadius: BorderRadius.circular(12)),
+      child: Text(text,
+          style: TextStyle(
+              color: color, fontSize: 10, fontWeight: FontWeight.bold)),
+    );
+  }
+
   Future<void> _sendGistToFriends(
       Set<String> friendIds, String truncatedTitle, String gistLink) async {
     try {
@@ -3644,44 +3923,50 @@ class _GistItemCardState extends State<_GistItemCard>
                   ),
                   ListTile(
                     leading: Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                          color: Colors.grey[800], shape: BoxShape.circle),
-                      child: const Icon(Icons.share, color: Colors.white),
-                    ),
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                            color: Colors.grey[800], shape: BoxShape.circle),
+                        child: const Icon(Icons.share, color: Colors.white)),
                     title: const Text('Share to other apps',
                         style: TextStyle(color: Colors.white)),
                     onTap: () {
                       Navigator.pop(ctx);
-                      // --- UPDATED GIST SHARE TEXT ---
                       Share.share(
                           'Check out this Gist on Allowance!\n$truncatedTitle\n$gistLink');
                     },
                   ),
                   const Divider(color: Colors.white10),
                   const Padding(
-                    padding: EdgeInsets.all(8.0),
-                    child: Text('Send to friends',
-                        style: TextStyle(color: Colors.white54, fontSize: 14)),
-                  ),
+                      padding: EdgeInsets.all(8.0),
+                      child: Text('Send to friends',
+                          style:
+                              TextStyle(color: Colors.white54, fontSize: 14))),
+
                   Expanded(
                     child: FutureBuilder<List<dynamic>>(
                         future: friendsFuture,
                         builder: (context, snapshot) {
                           if (snapshot.connectionState ==
-                              ConnectionState.waiting) {
+                              ConnectionState.waiting)
                             return Center(
                                 child: CircularProgressIndicator(
                                     color: widget.themeColor));
-                          }
                           final friends = snapshot.data ?? [];
-                          if (friends.isEmpty) {
+                          if (friends.isEmpty)
                             return const Center(
                                 child: Text("Follow people to see them here",
                                     style: TextStyle(color: Colors.white54)));
-                          }
-                          return ListView.builder(
+
+                          // 🔥 FIX: Render Friends as a cool Instagram-style Grid!
+                          return GridView.builder(
                             controller: scrollController,
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 3,
+                                    mainAxisSpacing: 16,
+                                    crossAxisSpacing: 10,
+                                    childAspectRatio: 0.7),
                             itemCount: friends.length,
                             itemBuilder: (context, index) {
                               final friend = friends[index];
@@ -3689,44 +3974,65 @@ class _GistItemCardState extends State<_GistItemCard>
                               final isSelected =
                                   selectedFriends.contains(friendId);
 
-                              return ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: Colors.grey[800],
-                                  backgroundImage: friend['avatar_url'] != null
-                                      ? CachedNetworkImageProvider(
-                                          friend['avatar_url'])
-                                      : null,
-                                  child: friend['avatar_url'] == null
-                                      ? const Icon(Icons.person,
-                                          color: Colors.white54)
-                                      : null,
+                              // Check if friend is a Plus Member
+                              final bool isPlus =
+                                  friend['subscription_tier'] == 'Membership';
+
+                              return GestureDetector(
+                                onTap: () => setModalState(() => isSelected
+                                    ? selectedFriends.remove(friendId)
+                                    : selectedFriends.add(friendId)),
+                                child: Column(
+                                  children: [
+                                    Stack(
+                                      alignment: Alignment.bottomRight,
+                                      children: [
+                                        CircleAvatar(
+                                          radius: 30,
+                                          backgroundColor: Colors.grey[800],
+                                          backgroundImage:
+                                              friend['avatar_url'] != null
+                                                  ? CachedNetworkImageProvider(
+                                                      friend['avatar_url'])
+                                                  : null,
+                                          child: friend['avatar_url'] == null
+                                              ? const Icon(Icons.person,
+                                                  color: Colors.white54,
+                                                  size: 28)
+                                              : null,
+                                        ),
+                                        if (isSelected)
+                                          const CircleAvatar(
+                                              radius: 10,
+                                              backgroundColor: Colors.white,
+                                              child: Icon(Icons.check_circle,
+                                                  color: Color(0xFF4CAF50),
+                                                  size: 20)),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Flexible(
+                                            child: Text(
+                                                friend['username'] ?? 'User',
+                                                style: const TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 12),
+                                                maxLines: 1,
+                                                overflow:
+                                                    TextOverflow.ellipsis)),
+                                        if (isPlus) ...[
+                                          const SizedBox(width: 2),
+                                          const Icon(Icons.star,
+                                              color: Colors.amber, size: 10)
+                                        ]
+                                      ],
+                                    ),
+                                  ],
                                 ),
-                                title: Text(friend['username'] ?? 'User',
-                                    style:
-                                        const TextStyle(color: Colors.white)),
-                                trailing: Checkbox(
-                                  value: isSelected,
-                                  activeColor: widget.themeColor,
-                                  checkColor: Colors.black,
-                                  onChanged: (bool? value) {
-                                    setModalState(() {
-                                      if (value == true) {
-                                        selectedFriends.add(friendId);
-                                      } else {
-                                        selectedFriends.remove(friendId);
-                                      }
-                                    });
-                                  },
-                                ),
-                                onTap: () {
-                                  setModalState(() {
-                                    if (isSelected) {
-                                      selectedFriends.remove(friendId);
-                                    } else {
-                                      selectedFriends.add(friendId);
-                                    }
-                                  });
-                                },
                               );
                             },
                           );
@@ -3739,11 +4045,10 @@ class _GistItemCardState extends State<_GistItemCard>
                         width: double.infinity,
                         child: ElevatedButton(
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: widget.themeColor,
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                            shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12)),
-                          ),
+                              backgroundColor: widget.themeColor,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12))),
                           onPressed: isSending
                               ? null
                               : () async {
@@ -3754,11 +4059,10 @@ class _GistItemCardState extends State<_GistItemCard>
                                   if (mounted) {
                                     Navigator.pop(ctx);
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                          content: Text(
-                                              'Sent to ${selectedFriends.length} friend(s)!'),
-                                          backgroundColor: Colors.green),
-                                    );
+                                        SnackBar(
+                                            content: Text(
+                                                'Sent to ${selectedFriends.length} friend(s)!'),
+                                            backgroundColor: Colors.green));
                                   }
                                 },
                           child: isSending
@@ -3774,7 +4078,39 @@ class _GistItemCardState extends State<_GistItemCard>
                                       fontSize: 16)),
                         ),
                       ),
-                    )
+                    ),
+
+                  // 🔥 FIX: Immovable "Share to My Story" Bar at the bottom
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                        color: Colors.black,
+                        border: Border(
+                            top: BorderSide(
+                                color: Colors.white.withOpacity(0.05)))),
+                    child: SafeArea(
+                      top: false,
+                      child: ElevatedButton.icon(
+                        icon:
+                            const Icon(Icons.amp_stories, color: Colors.black),
+                        label: const Text('Add to my Story',
+                            style: TextStyle(
+                                color: Colors.black,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16)),
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12))),
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _shareToStory();
+                        },
+                      ),
+                    ),
+                  )
                 ],
               ),
             );
@@ -3786,14 +4122,18 @@ class _GistItemCardState extends State<_GistItemCard>
 
   @override
   Widget build(BuildContext context) {
-    super.build(context); // <-- REQUIRED BY KEEPALIVE MIXIN
+    super.build(context);
 
-    final imageUrl = (widget.gist['image_url'] as String?) ?? '';
-    final imageUrls =
-        (widget.gist['image_urls'] as List?)?.cast<String>() ?? [];
-    final mediaType = (widget.gist['media_type'] as String?) ?? 'image';
-    final gistUrl = (widget.gist['url'] as String?) ?? '';
-    final String fullTitle = widget.gist['title'] as String? ?? '';
+    // 🔥 FIX: Safe toString() prevents the "Null is not a subtype of String" error
+    final imageUrl = widget.gist['image_url']?.toString() ?? '';
+    final imageUrls = (widget.gist['image_urls'] as List?)
+            ?.map((e) => e.toString())
+            .toList() ??
+        [];
+    final mediaType = widget.gist['media_type']?.toString() ?? 'image';
+    final gistUrl = widget.gist['url']?.toString() ?? '';
+    final String fullTitle = widget.gist['title']?.toString() ?? '';
+
     final imagesToShow = imageUrls.isNotEmpty
         ? imageUrls
         : (imageUrl.isNotEmpty ? [imageUrl] : []);
@@ -3804,9 +4144,31 @@ class _GistItemCardState extends State<_GistItemCard>
         (profileData is Map ? profileData['username']?.toString() : null) ??
             'User';
     final avatarUrl =
-        (profileData is Map) ? profileData['avatar_url'] as String? : null;
+        (profileData is Map) ? profileData['avatar_url']?.toString() : null;
 
-    // --- 1. MEDIA WIDGET ---
+    final isLocal = widget.gist['type'] == 'local';
+    final hasPoll = widget.gist['has_poll'] == true;
+
+    final String createdAtStr = widget.gist['created_at']?.toString() ?? '';
+    final datePosted = createdAtStr.isNotEmpty
+        ? DateFormat('dd MMM, yyyy')
+            .format(DateTime.parse(createdAtStr).toLocal())
+        : 'Recently';
+
+    // 🔥 NEW: Tags Row extracted to sit ABOVE the media
+    Widget tagsRow = Padding(
+      padding: const EdgeInsets.only(left: 16.0, top: 12.0, bottom: 12.0),
+      child: Row(
+        children: [
+          _buildTag(isLocal ? 'Local' : 'Global', Colors.blueAccent),
+          if (widget.gist['category'] != null &&
+              widget.gist['category'].toString().isNotEmpty)
+            _buildTag(widget.gist['category'].toString(), Colors.orangeAccent),
+          if (hasPoll) _buildTag('Poll', Colors.purpleAccent),
+        ],
+      ),
+    );
+
     Widget mediaWidget;
     if (mediaType == 'video') {
       final controller = widget.videoController;
@@ -3823,6 +4185,7 @@ class _GistItemCardState extends State<_GistItemCard>
                           controller.value.isPlaying
                               ? controller.pause()
                               : controller.play();
+                          setState(() {});
                         },
                         onDoubleTap: _triggerDoubleTapLike,
                         child: Stack(
@@ -3836,14 +4199,12 @@ class _GistItemCardState extends State<_GistItemCard>
                                 if (value.isPlaying)
                                   return const SizedBox.shrink();
                                 return Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    color: Colors.black.withOpacity(0.6),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(Icons.play_arrow_rounded,
-                                      color: Colors.white, size: 54),
-                                );
+                                    padding: const EdgeInsets.all(16),
+                                    decoration: BoxDecoration(
+                                        color: Colors.black.withOpacity(0.6),
+                                        shape: BoxShape.circle),
+                                    child: const Icon(Icons.play_arrow_rounded,
+                                        color: Colors.white, size: 54));
                               },
                             ),
                           ],
@@ -3861,28 +4222,12 @@ class _GistItemCardState extends State<_GistItemCard>
                             widget.onToggleMute(_isMuted);
                           },
                           child: CircleAvatar(
-                            backgroundColor: Colors.black54,
-                            radius: 14,
-                            child: Icon(
-                                _isMuted ? Icons.volume_off : Icons.volume_up,
-                                color: Colors.white,
-                                size: 16),
-                          ),
-                        ),
-                      ),
-                      Center(
-                        child: IgnorePointer(
-                          child: AnimatedOpacity(
-                            opacity: _showHeartOverlay ? 0.9 : 0.0,
-                            duration: const Duration(milliseconds: 200),
-                            child: AnimatedScale(
-                              scale: _showHeartOverlay ? 1.0 : 0.3,
-                              duration: const Duration(milliseconds: 400),
-                              curve: Curves.elasticOut,
-                              child: const Icon(Icons.favorite,
-                                  color: Colors.white, size: 100),
-                            ),
-                          ),
+                              backgroundColor: Colors.black54,
+                              radius: 14,
+                              child: Icon(
+                                  _isMuted ? Icons.volume_off : Icons.volume_up,
+                                  color: Colors.white,
+                                  size: 16)),
                         ),
                       ),
                     ],
@@ -3892,7 +4237,8 @@ class _GistItemCardState extends State<_GistItemCard>
                     allowScrubbing: true,
                     colors: const VideoProgressColors(
                         playedColor: Color(0xFF4CAF50),
-                        bufferedColor: Colors.white24)),
+                        bufferedColor: Colors.white24,
+                        backgroundColor: Colors.transparent)),
               ],
             )
           : Container(
@@ -3912,67 +4258,46 @@ class _GistItemCardState extends State<_GistItemCard>
                     itemCount: imagesToShow.length,
                     onPageChanged: (p) => setState(() => _localPageIndex = p),
                     itemBuilder: (ctx, i) => GestureDetector(
-                      onTap: () => _expandMedia(imagesToShow[i]),
-                      onDoubleTap: _triggerDoubleTapLike,
-                      child: CachedNetworkImage(
-                        imageUrl: imagesToShow[i],
-                        fit: BoxFit.cover,
-                        // FIX: Limits the image size in RAM, drastically reducing OOM crashes!
-                        memCacheWidth: 600,
-                      ),
-                    ),
+                        onTap: () => _expandMedia(imagesToShow[i]),
+                        onDoubleTap: _triggerDoubleTapLike,
+                        child: CachedNetworkImage(
+                            imageUrl: imagesToShow[i],
+                            fit: BoxFit.cover,
+                            memCacheWidth: 600)),
                   ),
                   Positioned(
                     top: 12,
                     left: 12,
                     child: GestureDetector(
-                      onTap: () => _expandMedia(imagesToShow[_localPageIndex]),
-                      child: Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: const BoxDecoration(
-                            color: Colors.black54, shape: BoxShape.circle),
-                        child: const Icon(Icons.fullscreen,
-                            color: Colors.white, size: 20),
-                      ),
-                    ),
+                        onTap: () =>
+                            _expandMedia(imagesToShow[_localPageIndex]),
+                        child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: const BoxDecoration(
+                                color: Colors.black54, shape: BoxShape.circle),
+                            child: const Icon(Icons.fullscreen,
+                                color: Colors.white, size: 20))),
                   ),
                   if (imagesToShow.length > 1)
                     Positioned(
                       top: 12,
                       right: 12,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                            color: Colors.black54,
-                            borderRadius: BorderRadius.circular(20)),
-                        child: Text(
-                            "${_localPageIndex + 1}/${imagesToShow.length}",
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 12)),
-                      ),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                              color: Colors.black54,
+                              borderRadius: BorderRadius.circular(20)),
+                          child: Text(
+                              "${_localPageIndex + 1}/${imagesToShow.length}",
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 12))),
                     ),
-                  Center(
-                    child: IgnorePointer(
-                      child: AnimatedOpacity(
-                        opacity: _showHeartOverlay ? 0.9 : 0.0,
-                        duration: const Duration(milliseconds: 200),
-                        child: AnimatedScale(
-                          scale: _showHeartOverlay ? 1.0 : 0.3,
-                          duration: const Duration(milliseconds: 400),
-                          curve: Curves.elasticOut,
-                          child: const Icon(Icons.favorite,
-                              color: Colors.white, size: 100),
-                        ),
-                      ),
-                    ),
-                  ),
                 ],
               ),
             );
     }
 
-    // --- 2. ACTION BAR ---
     Widget actionBar = Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
       child: Row(
@@ -3981,12 +4306,11 @@ class _GistItemCardState extends State<_GistItemCard>
           GestureDetector(
             onTap: widget.onToggleLike,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Icon(
-                  widget.isLiked ? Icons.favorite : Icons.favorite_border,
-                  color: widget.isLiked ? Colors.red : Colors.white,
-                  size: 28),
-            ),
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Icon(
+                    widget.isLiked ? Icons.favorite : Icons.favorite_border,
+                    color: widget.isLiked ? Colors.red : Colors.white,
+                    size: 28)),
           ),
           GestureDetector(
             onTap: () async {
@@ -3994,18 +4318,24 @@ class _GistItemCardState extends State<_GistItemCard>
               _fetchCommentCount();
             },
             child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Icon(CupertinoIcons.chat_bubble,
-                  color: Colors.white, size: 26),
-            ),
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Icon(CupertinoIcons.chat_bubble,
+                    color: Colors.white, size: 26)),
           ),
           GestureDetector(
             onTap: () => _showShipSheet(context),
             child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Text('🚀', style: TextStyle(fontSize: 22)),
-            ),
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text('🚀', style: TextStyle(fontSize: 22))),
           ),
+          if (hasPoll)
+            GestureDetector(
+              onTap: _showPollSheet,
+              child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child:
+                      Icon(Icons.poll, color: Colors.purpleAccent, size: 28)),
+            ),
           GestureDetector(
             onTap: () {
               final target = imagesToShow.isNotEmpty
@@ -4014,16 +4344,14 @@ class _GistItemCardState extends State<_GistItemCard>
               if (target.isNotEmpty) widget.onDownload(target);
             },
             child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: Icon(Icons.download_for_offline_outlined,
-                  color: Colors.white, size: 26),
-            ),
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Icon(Icons.download_for_offline_outlined,
+                    color: Colors.white, size: 26)),
           ),
         ],
       ),
     );
 
-    // --- 3. CAPTION AREA ---
     Widget captionArea = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12.0),
       child: Column(
@@ -4033,19 +4361,17 @@ class _GistItemCardState extends State<_GistItemCard>
             Padding(
               padding: const EdgeInsets.only(bottom: 8.0),
               child: Text(
-                '${widget.likeCount} likes${_commentCount > 0 ? ' • $_commentCount replies' : ''}',
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13),
-              ),
+                  '${widget.likeCount} likes${_commentCount > 0 ? ' • $_commentCount replies' : ''}',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13)),
             ),
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () {
-              if (userId.isNotEmpty) {
+              if (userId.isNotEmpty)
                 UniversalProfileCard.show(context, userId, widget.prefs);
-              }
             },
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -4097,40 +4423,43 @@ class _GistItemCardState extends State<_GistItemCard>
                                   borderRadius: BorderRadius.vertical(
                                       top: Radius.circular(24))),
                               builder: (context) => Padding(
-                                padding: const EdgeInsets.all(24),
-                                child: SingleChildScrollView(
-                                  child: Text(fullTitle,
-                                      style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 16,
-                                          height: 1.5)),
-                                ),
-                              ),
+                                  padding: const EdgeInsets.all(24),
+                                  child: SingleChildScrollView(
+                                      child: Text(fullTitle,
+                                          style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 16,
+                                              height: 1.5)))),
                             );
                           },
                           child: const Padding(
-                            padding: EdgeInsets.only(top: 4),
-                            child: Text("see more...",
-                                style: TextStyle(
-                                    color: Color(0xFF4CAF50),
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 13)),
-                          ),
+                              padding: EdgeInsets.only(top: 4),
+                              child: Text("see more...",
+                                  style: TextStyle(
+                                      color: Color(0xFF4CAF50),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13))),
                         ),
                     ],
                   ),
                 ),
+                IconButton(
+                  icon: const Icon(Icons.more_vert, color: Colors.white54),
+                  onPressed: _showGistOptions,
+                )
               ],
             ),
           ),
+          const SizedBox(height: 6),
+          Text('$datePosted',
+              style: const TextStyle(color: Colors.white54, fontSize: 11)),
           if (gistUrl.isNotEmpty) ...[
             const SizedBox(height: 12),
             GestureDetector(
               onTap: () async {
                 final uri = Uri.tryParse(gistUrl);
-                if (uri != null && await canLaunchUrl(uri)) {
+                if (uri != null && await canLaunchUrl(uri))
                   await launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
               },
               child: Row(
                 children: [
@@ -4151,10 +4480,10 @@ class _GistItemCardState extends State<_GistItemCard>
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 24.0),
+      // 🔥 FIX: Render Tags, then Media, then Actions
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [mediaWidget, actionBar, captionArea],
-      ),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [tagsRow, mediaWidget, actionBar, captionArea]),
     );
   }
 } // <--- THIS CLOSING BRACKET FIXES YOUR ERROR
