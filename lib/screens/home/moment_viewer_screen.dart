@@ -33,6 +33,7 @@ class MomentViewerScreen extends StatefulWidget {
 class _MomentViewerScreenState extends State<MomentViewerScreen> {
   late PageController _pageController;
   late int _currentIndex;
+  bool _globalMomentMuted = true; // Starts muted by default
 
   @override
   void initState() {
@@ -99,6 +100,7 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
   bool _isMuted = false;
   bool _authorIsPlus = false;
   bool _showHeartOverlay = false;
+  bool _globalMomentMuted = false;
 
   // 🔥 NEW: Controls Image Loading Speed vs Quality to prevent crashes
   bool _isHighQuality = false;
@@ -144,16 +146,8 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
         final tempHdUrl = url.replaceAll('.mp4', '_hd.mp4');
         try {
           final response = await http.head(Uri.parse(tempHdUrl));
-          if (response.statusCode == 200)
-            finalUrl = tempHdUrl;
-          else if (mounted && startAt != null)
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                content:
-                    Text('This older video is already at maximum quality.'),
-                backgroundColor: Colors.black87));
-        } catch (_) {
-          finalUrl = url;
-        }
+          if (response.statusCode == 200) finalUrl = tempHdUrl;
+        } catch (_) {}
       }
 
       VideoPlayerController? tempController;
@@ -171,8 +165,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
       }
 
       _videoController = tempController;
-
-      // 🔥 FIX: Safe initialization. If the user swipes away before this finishes, it won't crash!
       await _videoController?.initialize();
       if (!mounted || _videoController == null) return;
 
@@ -183,9 +175,12 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
 
       if (widget.isCurrentPage) {
         setState(() {});
+        // 🔥 FIX: Apply the persistent global mute state here!
         if (kIsWeb) {
           _videoController?.setVolume(0.0);
-          _isMuted = true;
+          _globalMomentMuted = true;
+        } else {
+          _videoController?.setVolume(_globalMomentMuted ? 0.0 : 1.0);
         }
         _videoController?.play();
       }
@@ -376,6 +371,33 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
     }
   }
 
+  Future<void> _shareToStory() async {
+    final myId = Supabase.instance.client.auth.currentUser!.id;
+    final String caption = widget.moment['caption'] ?? '';
+    final String truncatedCaption =
+        caption.length > 50 ? '${caption.substring(0, 50)}...' : caption;
+
+    try {
+      await Supabase.instance.client.from('stories').insert({
+        'user_id': myId,
+        'media_url': widget.moment['media_url'],
+        'media_type': widget.moment['media_type'] ?? 'image',
+        'caption': 'Check out this Moment!\n$truncatedCaption',
+        'url':
+            'https://www.allowanceapp.org/share?type=moment&id=${widget.moment['id']}',
+      });
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Shared to your Story!'),
+            backgroundColor: Colors.green));
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Failed to share to story'),
+            backgroundColor: Colors.red));
+    }
+  }
+
   Future<void> _sendMomentToFriends(
       Set<String> friendIds, String caption, String momentLink) async {
     final myId = supabase.auth.currentUser!.id;
@@ -456,6 +478,20 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                     Navigator.pop(ctx);
                     Share.share(
                         'Check out this Moment on Allowance!\n$caption\n$momentLink');
+                  },
+                ),
+                ListTile(
+                  leading: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                          color: Colors.grey[800], shape: BoxShape.circle),
+                      child:
+                          const Icon(Icons.amp_stories, color: Colors.white)),
+                  title: const Text('Add to my Story',
+                      style: TextStyle(color: Colors.white)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _shareToStory();
                   },
                 ),
                 const Divider(color: Colors.white10),
@@ -692,7 +728,7 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                           if (isVideo)
                             IconButton(
                                 icon: Icon(
-                                    _isMuted
+                                    _globalMomentMuted
                                         ? Icons.volume_off
                                         : Icons.volume_up,
                                     color: Colors.white,
@@ -701,9 +737,9 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                                     ]),
                                 onPressed: () {
                                   setState(() {
-                                    _isMuted = !_isMuted;
-                                    _videoController
-                                        ?.setVolume(_isMuted ? 0.0 : 1.0);
+                                    _globalMomentMuted = !_globalMomentMuted;
+                                    _videoController?.setVolume(
+                                        _globalMomentMuted ? 0.0 : 1.0);
                                   });
                                 }),
                           IconButton(

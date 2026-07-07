@@ -7,7 +7,9 @@ import 'package:allowance/screens/chat/explore_screen.dart';
 import 'package:allowance/screens/home/create_story_screen.dart';
 import 'package:allowance/screens/home/gist_submission_screen.dart';
 import 'package:allowance/screens/home/media_editor_screen.dart';
+import 'package:allowance/screens/home/moment_viewer_screen.dart';
 import 'package:allowance/screens/home/ticket_submission_screen.dart';
+import 'package:allowance/screens/library/library_screen.dart';
 import 'package:allowance/shared/services/fcm_service.dart';
 import 'package:allowance/widgets/stories_bar.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
@@ -38,6 +40,8 @@ import 'package:video_player/video_player.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'dart:math';
+import 'package:visibility_detector/visibility_detector.dart';
 
 class HomeScreen extends StatefulWidget {
   final UserPreferences? userPreferences;
@@ -89,9 +93,10 @@ class _HomeScreenState extends State<HomeScreen> {
   RealtimeChannel? _globalChatChannel;
   bool _isProcessingSubscription = false;
 
-  String _gistFilter = 'All';
+  String _gistFilter = 'Moments & Gists';
   final Map<int, int> _gistLikeCounts = {};
   final Set<int> _likedGistIds = {};
+  final Set<int> _likedMomentIds = {};
   final ScrollController _scrollController = ScrollController(); // The listener
 // The visibility state
 
@@ -263,8 +268,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _initializeVideoControllers() async {
     int count = 0;
     for (var gist in _fetchedGists) {
-      if (count >= 2)
-        break; // <--- FIX: Limit to 2 videos to prevent Memory Crash on startup!
+      if (count >= 2) break; // Limit to 2 videos to prevent Memory Crash!
       final mediaType = gist['media_type'] as String?;
 
       if (mediaType == 'video') {
@@ -282,7 +286,6 @@ class _HomeScreenState extends State<HomeScreen> {
             } else {
               controller =
                   VideoPlayerController.networkUrl(Uri.parse(videoUrl));
-              // Removed the aggressive background download here to save memory
             }
 
             await controller.initialize();
@@ -290,6 +293,9 @@ class _HomeScreenState extends State<HomeScreen> {
             _videoControllers[gistId] = controller;
             _isVideoMuted[gistId] = true;
             count++;
+
+            // 🔥 CRITICAL FIX: Tell the UI the video is ready so it drops the black screen!
+            if (mounted) setState(() {});
           } catch (e) {
             debugPrint("Video caching error: $e");
           }
@@ -313,57 +319,93 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ── NEW: Load like counts and whether current user liked each gist ──
-  // ── NEW: Load like counts and whether current user liked each gist ──
-  Future<void> _loadGistLikes() async {
+  Future<void> _loadGistLikes(List<Map<String, dynamic>> gists,
+      List<Map<String, dynamic>> moments) async {
     final user = supabase.auth.currentUser;
     if (user == null) return;
 
     try {
-      final gistIds = _fetchedGists.map((g) => g['id'] as int).toList();
-      if (gistIds.isEmpty) return;
-
-      final likesResponse = await supabase
-          .from('gist_likes')
-          .select('gist_id, user_id')
-          .inFilter('gist_id', gistIds);
+      final gistIds = gists.map((g) => g['id'] as int).toList();
+      final momentIds = moments.map((m) => m['real_moment_id'] as int).toList();
 
       _likedGistIds.clear();
       _gistLikeCounts.clear();
+      _likedMomentIds.clear();
 
-      final Map<int, int> countsMap = {};
-      for (var like in likesResponse) {
-        final gid = like['gist_id'] as int;
-        countsMap[gid] = (countsMap[gid] ?? 0) + 1;
-        if (like['user_id'] == user.id) {
-          _likedGistIds.add(gid);
+      if (gistIds.isNotEmpty) {
+        final likesResponse = await supabase
+            .from('gist_likes')
+            .select('gist_id, user_id')
+            .inFilter('gist_id', gistIds);
+        final Map<int, int> countsMap = {};
+        for (var like in likesResponse) {
+          final gid = like['gist_id'] as int;
+          countsMap[gid] = (countsMap[gid] ?? 0) + 1;
+          if (like['user_id'] == user.id) _likedGistIds.add(gid);
+        }
+        _gistLikeCounts.addAll(countsMap);
+      }
+
+      if (momentIds.isNotEmpty) {
+        final momentLikesResponse = await supabase
+            .from('moment_likes')
+            .select('moment_id, user_id')
+            .inFilter('moment_id', momentIds);
+        for (var like in momentLikesResponse) {
+          if (like['user_id'] == user.id)
+            _likedMomentIds.add(like['moment_id'] as int);
         }
       }
-      _gistLikeCounts.addAll(countsMap);
     } catch (_) {}
   }
 
   // ── NEW: Toggle like ──
-  Future<void> _toggleGistLike(int gistId) async {
+  Future<void> _toggleLike(int id, bool isMoment) async {
     final user = supabase.auth.currentUser;
     if (user == null) return;
 
-    final isLiked = _likedGistIds.contains(gistId);
-
     try {
-      if (isLiked) {
-        await supabase
-            .from('gist_likes')
-            .delete()
-            .eq('gist_id', gistId)
-            .eq('user_id', user.id);
-        _likedGistIds.remove(gistId);
-        _gistLikeCounts[gistId] = (_gistLikeCounts[gistId] ?? 1) - 1;
+      if (isMoment) {
+        final isLiked = _likedMomentIds.contains(id);
+        final gistIndex = _fetchedGists.indexWhere(
+            (g) => g['is_moment'] == true && g['real_moment_id'] == id);
+
+        if (isLiked) {
+          await supabase
+              .from('moment_likes')
+              .delete()
+              .eq('moment_id', id)
+              .eq('user_id', user.id);
+          _likedMomentIds.remove(id);
+          if (gistIndex != -1)
+            _fetchedGists[gistIndex]['likes_count'] =
+                (_fetchedGists[gistIndex]['likes_count'] ?? 1) - 1;
+        } else {
+          await supabase
+              .from('moment_likes')
+              .insert({'moment_id': id, 'user_id': user.id});
+          _likedMomentIds.add(id);
+          if (gistIndex != -1)
+            _fetchedGists[gistIndex]['likes_count'] =
+                (_fetchedGists[gistIndex]['likes_count'] ?? 0) + 1;
+        }
       } else {
-        await supabase
-            .from('gist_likes')
-            .insert({'gist_id': gistId, 'user_id': user.id});
-        _likedGistIds.add(gistId);
-        _gistLikeCounts[gistId] = (_gistLikeCounts[gistId] ?? 0) + 1;
+        final isLiked = _likedGistIds.contains(id);
+        if (isLiked) {
+          await supabase
+              .from('gist_likes')
+              .delete()
+              .eq('gist_id', id)
+              .eq('user_id', user.id);
+          _likedGistIds.remove(id);
+          _gistLikeCounts[id] = (_gistLikeCounts[id] ?? 1) - 1;
+        } else {
+          await supabase
+              .from('gist_likes')
+              .insert({'gist_id': id, 'user_id': user.id});
+          _likedGistIds.add(id);
+          _gistLikeCounts[id] = (_gistLikeCounts[id] ?? 0) + 1;
+        }
       }
       if (mounted) setState(() {});
     } catch (e) {
@@ -374,104 +416,154 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _fetchGistsAndStartSlideshow() async {
     setState(() => _isGistsLoading = true);
     try {
-      final List<Map<String, dynamic>> raw = await supabase
+      final sidStr = _prefs.schoolId;
+      final myId = supabase.auth.currentUser?.id;
+
+      List<String> mutedCats = [];
+      if (myId != null) {
+        final profile = await supabase
+            .from('profiles')
+            .select('muted_categories')
+            .eq('id', myId)
+            .maybeSingle();
+        if (profile != null && profile['muted_categories'] != null) {
+          mutedCats = List<String>.from(profile['muted_categories']);
+        }
+      }
+
+      final List<Map<String, dynamic>> rawGists = await supabase
           .from('gists')
           .select('''
             id, user_id, title, image_url, image_urls, media_type, type, school_id, state_id, url, created_at, category, has_poll, poll_options, allow_multiple_votes,
-            profiles:user_id (username, avatar_url, bio)
+            profiles:user_id (username, avatar_url, bio, school_name) 
           ''')
           .eq('paid', true)
           .eq('status', 'active')
           .order('created_at', ascending: false)
-          .limit(50);
+          .limit(30);
 
-      if (!mounted) return;
+      final List<Map<String, dynamic>> rawMoments =
+          await supabase.from('moments').select('''
+            id, user_id, caption, media_url, media_type, created_at, category, likes_count, comments_count,
+            profiles:user_id (username, avatar_url, bio, school_id, school_name)
+          ''').order('created_at', ascending: false).limit(30);
 
-      List<Map<String, dynamic>> list = raw;
+      List<Map<String, dynamic>> finalGists = [];
+      List<Map<String, dynamic>> finalMoments = [];
 
-      final sidStr = _prefs.schoolId;
-      final int? sidInt = sidStr != null ? int.tryParse(sidStr) : null;
-      final isPublicMode = sidStr == null || sidStr.isEmpty;
-
-      if (!isPublicMode) {
-        list = list.where((g) {
-          final type = (g['type'] ?? '').toString().toLowerCase();
-          if (type == 'global') return true;
-          if (type == 'local') {
-            final gSchool = g['school_id'];
-            if (gSchool != null) {
-              final int? gsInt = int.tryParse(gSchool.toString());
-              return gsInt != null && sidInt != null
-                  ? gsInt == sidInt
-                  : gSchool.toString() == sidStr;
-            }
-          }
-          return false;
-        }).toList();
-      } else {
-        // Public mode: Show global + state-specific local gists
-        final stateIdResp = await supabase
-            .from('profiles')
-            .select('state_id')
-            .eq('id', supabase.auth.currentUser!.id)
-            .maybeSingle();
-        final int? userStateId = stateIdResp?['state_id'] as int?;
-
-        list = list.where((g) {
-          final type = (g['type'] ?? '').toString().toLowerCase();
-          if (type == 'global') return true;
-          if (type == 'local' && g['state_id'] != null) {
-            return userStateId != null && g['state_id'] == userStateId;
-          }
-          return false;
-        }).toList();
+      for (var g in rawGists) {
+        bool match = false;
+        final type = (g['type'] ?? '').toString().toLowerCase();
+        if (type == 'global') match = true;
+        if (type == 'local' && g['school_id']?.toString() == sidStr)
+          match = true;
+        if (match && !mutedCats.contains(g['category'])) finalGists.add(g);
       }
+
+      for (var m in rawMoments) {
+        final mSchoolId = m['profiles']?['school_id']?.toString();
+        if (mSchoolId == sidStr && !mutedCats.contains(m['category'])) {
+          finalMoments.add({
+            'id': -(m['id'] as int),
+            'is_moment': true,
+            'real_moment_id': m['id'],
+            'user_id': m['user_id'],
+            'title': m['caption'],
+            'image_url': m['media_url'],
+            'image_urls': [],
+            'media_type': m['media_type'],
+            'type': 'local',
+            'created_at': m['created_at'],
+            'category': m['category'] ?? 'Random',
+            'profiles': m['profiles'],
+            'likes_count': m['likes_count'] ?? 0,
+            'comments_count': m['comments_count'] ?? 0,
+          });
+        }
+      }
+
+      // 🔥 1. Load likes BEFORE scattering so we know which ones you've seen/liked
+      await _loadGistLikes(finalGists, finalMoments);
+
+      // 🔥 2. Separate moments into "Fresh" and "Seen/Liked"
+      List<Map<String, dynamic>> unlikedMoments = [];
+      List<Map<String, dynamic>> likedMoments = [];
+
+      for (var m in finalMoments) {
+        if (_likedMomentIds.contains(m['real_moment_id'])) {
+          likedMoments.add(m);
+        } else {
+          unlikedMoments.add(m);
+        }
+      }
+
+      // 3. Sort Gists by date normally
+      finalGists.sort((a, b) => DateTime.parse(b['created_at'])
+          .compareTo(DateTime.parse(a['created_at'])));
+
+      // 4. Shuffle moments independently
+      unlikedMoments.shuffle(Random());
+      likedMoments.shuffle(Random());
+
+      // 5. Scatter UNLIKED (Fresh) moments randomly among the Gists
+      List<Map<String, dynamic>> combined = List.from(finalGists);
+      for (var m in unlikedMoments) {
+        // Insert in the top 70% of the feed
+        int maxInsertIndex = (combined.length * 0.7).toInt();
+        if (maxInsertIndex < 1) maxInsertIndex = combined.length;
+        final randomPos =
+            combined.isEmpty ? 0 : Random().nextInt(maxInsertIndex + 1);
+        combined.insert(randomPos, m);
+      }
+
+      // 6. Push LIKED (Seen) moments to the very bottom
+      combined.addAll(likedMoments);
 
       if (mounted) {
         setState(() {
-          _fetchedGists = list;
+          _fetchedGists = combined;
           _isGistsLoading = false;
         });
       }
 
-      await _loadGistLikes();
+      // 7. Initialize videos (This will now trigger the thumbnail to show!)
       await _initializeVideoControllers();
 
-      if (_fetchedGists.isEmpty) {
+      if (_fetchedGists.isEmpty)
         setState(() => _fetchedGists = List.from(_fallbackGists));
-      }
     } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isGistsLoading = false;
-        _fetchedGists = List.from(_fallbackGists);
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Failed to load gists. Showing defaults instead.')),
-      );
+      if (mounted)
+        setState(() {
+          _isGistsLoading = false;
+          _fetchedGists = List.from(_fallbackGists);
+        });
     }
   }
 
   // 3. ULTIMATE PERFORMANCE SLIDESHOW
   Widget _buildGistSlideshow() {
-    final filteredGists = _gistFilter == 'All'
-        ? _fetchedGists
-        : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
+    List<Map<String, dynamic>> filteredGists;
+    if (_gistFilter == 'Moments & Gists' || _gistFilter == 'All') {
+      filteredGists = _fetchedGists;
+    } else if (_gistFilter == 'Just Gists') {
+      filteredGists =
+          _fetchedGists.where((g) => g['is_moment'] != true).toList();
+    } else {
+      filteredGists =
+          _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
+    }
 
     if (_isGistsLoading) {
       return const SliverToBoxAdapter(
         child: Padding(
-          padding: EdgeInsets.only(top: 40.0),
-          child: Center(
-              child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
-        ),
+            padding: EdgeInsets.only(top: 40.0),
+            child: Center(
+                child: CircularProgressIndicator(color: Color(0xFF4CAF50)))),
       );
     }
 
-    if (filteredGists.isEmpty) {
+    if (filteredGists.isEmpty)
       return const SliverToBoxAdapter(child: SizedBox());
-    }
 
     return SliverPadding(
       padding: const EdgeInsets.only(bottom: 40, top: 0),
@@ -483,21 +575,30 @@ class _HomeScreenState extends State<HomeScreen> {
               ? gist['id'] as int
               : int.tryParse(gist['id'].toString()) ?? 0;
 
-          // FIX: RepaintBoundary REMOVED. Let Flutter handle rendering natively.
+          final isMoment = gist['is_moment'] == true;
+          final realId = isMoment ? gist['real_moment_id'] as int : gistId;
+
           return _GistItemCard(
             key: ValueKey(gistId),
             gist: gist,
-            gistId: gistId,
+            gistId: realId,
             videoController: _videoControllers[gistId],
             isMutedInitial: _isVideoMuted[gistId] ?? true,
-            likeCount: _gistLikeCounts[gistId] ?? 0,
-            isLiked: _likedGistIds.contains(gistId),
-            onToggleLike: () => _toggleGistLike(gistId),
-            onShowComments: () => _showCommentsSheet(gistId.toString()),
+            likeCount: isMoment
+                ? (gist['likes_count'] ?? 0)
+                : (_gistLikeCounts[realId] ?? 0),
+            isLiked: isMoment
+                ? _likedMomentIds.contains(realId)
+                : _likedGistIds.contains(realId),
+            onToggleLike: () => _toggleLike(realId, isMoment),
+            onShowComments: () => isMoment
+                ? _showMomentCommentsSheet(realId.toString())
+                : _showCommentsSheet(realId.toString()),
             onDownload: _downloadGistImage,
             onToggleMute: (muted) => _isVideoMuted[gistId] = muted,
             themeColor: themeColor,
             prefs: _prefs,
+            allFeedItems: filteredGists,
           );
         },
       ),
@@ -837,14 +938,19 @@ class _HomeScreenState extends State<HomeScreen> {
           borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) {
         return FutureBuilder<List<dynamic>>(
-            future: supabase.from('states').select('id, name').order('name'),
+            // 🔥 FIX: Sorted A to Z
+            future: supabase
+                .from('states')
+                .select('id, name')
+                .order('name', ascending: true),
             builder: (context, snapshot) {
-              if (snapshot.connectionState == ConnectionState.waiting)
+              if (snapshot.connectionState == ConnectionState.waiting) {
                 return const SizedBox(
                     height: 400,
                     child: Center(
                         child: CircularProgressIndicator(
                             color: Color(0xFF4CAF50))));
+              }
 
               final states = snapshot.data ?? [];
               int selectedIndex = 0;
@@ -894,7 +1000,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   borderRadius: BorderRadius.circular(16))),
                           onPressed: () async {
                             final selectedState = states[selectedIndex];
-                            _prefs.schoolId = "";
+
+                            // 🔥 FIX: Saves it explicitly so it is remembered forever!
+                            _prefs.schoolId = "STATE_${selectedState['id']}";
                             _prefs.schoolName = selectedState['name'];
                             await _prefs.savePreferences();
 
@@ -1077,6 +1185,39 @@ class _HomeScreenState extends State<HomeScreen> {
   void _showRestaurantSelection() async {
     final sid = _prefs.schoolId;
     setState(() => _vendorBarTapped = true);
+
+    // 🔥 FIX: Trap State Users and show "Coming Soon" immediately
+    if (sid != null && sid.startsWith('STATE_')) {
+      showModalBottomSheet(
+          context: context,
+          backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.grey[100],
+          shape: const RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+          builder: (ctx) {
+            return SizedBox(
+              height: 350,
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.storefront,
+                        color: Colors.white24, size: 80),
+                    const SizedBox(height: 16),
+                    const Text("State Vendors Coming Soon! 🚀",
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    const Text("We're expanding food delivery to states soon.",
+                        style: TextStyle(color: Colors.white54, fontSize: 14)),
+                  ],
+                ),
+              ),
+            );
+          });
+      return;
+    }
 
     if (sid != null && sid.isNotEmpty) {
       List<dynamic> vendors = [];
@@ -1335,43 +1476,11 @@ class _HomeScreenState extends State<HomeScreen> {
               MaterialPageRoute(
                   builder: (_) => OrderScreen(userPreferences: _prefs)));
         } else if (tab["label"] == "Library") {
+          // 🔥 NEW: Navigates to the Library Screen!
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => Scaffold(
-                backgroundColor: const Color(0xFF121212),
-                appBar: AppBar(
-                    backgroundColor: Colors.transparent,
-                    elevation: 0,
-                    iconTheme: const IconThemeData(color: Colors.white)),
-                body: Center(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(24),
-                    child: Image.asset(
-                      'assets/images/coming_soon.jpg',
-                      width: 220,
-                      fit: BoxFit.contain,
-                      errorBuilder: (context, error, stackTrace) => Container(
-                        width: 220,
-                        height: 220,
-                        decoration: BoxDecoration(
-                            color: Colors.grey[900],
-                            borderRadius: BorderRadius.circular(24)),
-                        child: const Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.image_not_supported,
-                                  color: Colors.white24, size: 50),
-                              SizedBox(height: 12),
-                              Text('coming_soon.jpg',
-                                  style: TextStyle(
-                                      color: Colors.white54, fontSize: 12))
-                            ]),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+              builder: (_) => LibraryScreen(userPreferences: _prefs),
             ),
           );
         }
@@ -1389,23 +1498,75 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 2. New method: _showGistFilterSheet()
-  void _showGistFilterSheet() {
+  // ── NEW: Sticky Gist Filter Bar (used by the SliverPersistentHeader) ──
+  Widget _buildGistFilterBar() {
+    final String label = _isGistsLoading ? "Loading..." : _gistFilter;
+    final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
+
+    return GestureDetector(
+      onTap: _showGistFilterSheet,
+      child: Container(
+        width: horizontalBarWidth, // 🔥 Full width restored
+        height: 44,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        decoration: BoxDecoration(
+            color: Colors.grey[800], borderRadius: BorderRadius.circular(25)),
+        child: Row(
+          children: [
+            Icon(BoxIcons.bxs_megaphone, color: themeColor, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+                child: Text(label,
+                    style: const TextStyle(
+                        color: Color(0xFF4CAF50),
+                        fontWeight: FontWeight.bold))),
+            Icon(Icons.keyboard_arrow_down, color: themeColor, size: 24),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showGistFilterSheet() async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    final profile = await supabase
+        .from('profiles')
+        .select('muted_categories')
+        .eq('id', myId)
+        .maybeSingle();
+    List<String> mutedCats = profile?['muted_categories'] != null
+        ? List<String>.from(profile!['muted_categories'])
+        : [];
+
     final categories = [
-      'All',
+      'Moments & Gists',
+      'Just Gists',
       'Sports',
       'Entertainment',
       'Official',
-      'Religion'
+      'Religion',
+      'Random',
+      'Tech'
     ];
+    final notificableCats = [
+      'Sports',
+      'Entertainment',
+      'Official',
+      'Religion',
+      'Random',
+      'Tech'
+    ];
+
+    if (!mounted) return;
 
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.grey[900],
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (_) => DraggableScrollableSheet(
         initialChildSize: 0.6,
         maxChildSize: 0.9,
@@ -1416,14 +1577,11 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text(
-                  'Filter Gists',
-                  style: TextStyle(
-                    color: themeColor,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                child: Text('Filter & Alerts',
+                    style: TextStyle(
+                        color: themeColor,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold)),
               ),
               Expanded(
                 child: ListView.builder(
@@ -1431,17 +1589,49 @@ class _HomeScreenState extends State<HomeScreen> {
                   itemCount: categories.length,
                   itemBuilder: (_, i) {
                     final cat = categories[i];
-                    return RadioListTile<String>(
-                      title: Text(
-                        cat,
-                        style:
-                            const TextStyle(color: Colors.white, fontSize: 18),
+                    final isMuted = mutedCats.contains(cat);
+                    final canMute = notificableCats.contains(cat);
+
+                    return ListTile(
+                      leading: Radio<String>(
+                        value: cat,
+                        groupValue: _gistFilter,
+                        activeColor: themeColor,
+                        onChanged: (val) {
+                          setState(() => _gistFilter = val!);
+                          _handleRefresh();
+                          Navigator.pop(context);
+                        },
                       ),
-                      value: cat,
-                      groupValue: _gistFilter,
-                      activeColor: themeColor,
-                      onChanged: (val) {
-                        setState(() => _gistFilter = val!);
+                      title: Text(cat,
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 18)),
+                      trailing: canMute
+                          ? IconButton(
+                              icon: Icon(
+                                  isMuted
+                                      ? Icons.notifications_off
+                                      : Icons.notifications_active,
+                                  color:
+                                      isMuted ? Colors.redAccent : themeColor),
+                              onPressed: () async {
+                                setSheetState(() {
+                                  if (isMuted)
+                                    mutedCats.remove(cat);
+                                  else
+                                    mutedCats.add(cat);
+                                });
+                                await supabase
+                                    .from('profiles')
+                                    .update({'muted_categories': mutedCats}).eq(
+                                        'id', myId);
+                                _handleRefresh(); // Refresh feed immediately behind the scenes
+                              },
+                            )
+                          : null,
+                      onTap: () {
+                        setState(() => _gistFilter = cat);
+                        _handleRefresh();
                         Navigator.pop(context);
                       },
                     );
@@ -1450,52 +1640,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-
-  // ── NEW: Sticky Gist Filter Bar (used by the SliverPersistentHeader) ──
-  Widget _buildGistFilterBar() {
-    final filteredGists = _gistFilter == 'All'
-        ? _fetchedGists
-        : _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
-
-    final String label = _isGistsLoading
-        ? "Gist"
-        : filteredGists.isEmpty
-            ? "Gist"
-            : (_gistFilter == 'All' ? "All Gists" : "$_gistFilter Gists");
-
-    final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
-
-    return GestureDetector(
-      onTap: _showGistFilterSheet,
-      child: Container(
-        width: horizontalBarWidth,
-        height: 44,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          color: Colors.grey[800],
-          borderRadius: BorderRadius.circular(25),
-        ),
-        child: Row(
-          children: [
-            Icon(BoxIcons.bxs_megaphone, color: themeColor, size: 20),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  fontFamily: 'SanFrancisco',
-                  fontSize: 18,
-                  color: Color(0xFF4CAF50), // themeColor
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-            Icon(Icons.chevron_right, color: themeColor, size: 24),
-          ],
         ),
       ),
     );
@@ -1512,6 +1656,20 @@ class _HomeScreenState extends State<HomeScreen> {
         gistId: gistId,
         themeColor: themeColor,
         userPreferences: _prefs,
+      ),
+    );
+  }
+
+  Future<void> _showMomentCommentsSheet(String momentId) async {
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF111111),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => MomentCommentsSheet(
+        momentId: momentId,
+        themeColor: themeColor,
       ),
     );
   }
@@ -1930,12 +2088,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // --- UPDATED: REAL-TIME NOTIFICATION BADGE ---
-  // --- FIXED: REAL-TIME NOTIFICATION BADGE ---
   PreferredSizeWidget _buildAppBar() {
-    final isPublicMode = _prefs.schoolId == "" &&
-        _prefs.schoolName != null &&
-        _prefs.schoolName!.isNotEmpty;
-    final hasLocation = _prefs.schoolId?.isNotEmpty == true || isPublicMode;
+    // 🔥 FIX: Safe detection of State IDs
+    final isPublicMode = _prefs.schoolId?.startsWith('STATE_') == true;
+    final hasLocation = _prefs.schoolId?.isNotEmpty == true;
     final myId = supabase.auth.currentUser?.id ?? '';
 
     return AppBar(
@@ -1945,14 +2101,12 @@ class _HomeScreenState extends State<HomeScreen> {
       elevation: 0,
       centerTitle: true,
       leading: StreamBuilder<List<Map<String, dynamic>>>(
-        // 🔥 FIX: Only uses one .eq() here to prevent the SupabaseStreamBuilder error
         stream: myId.isEmpty
             ? const Stream.empty()
             : supabase
                 .from('notifications')
                 .stream(primaryKey: ['id']).eq('user_id', myId),
         builder: (context, snapshot) {
-          // 🔥 FIX: Filters the 'read == false' locally so the stream never breaks!
           final unreadCount =
               snapshot.data?.where((n) => n['read'] == false).length ?? 0;
           return IconButton(
@@ -2398,20 +2552,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     subtitle: 'Post memories permanently to your profile',
                     onTap: () async {
                       Navigator.pop(ctx);
-                      if (!isPlus) {
-                        final myId = supabase.auth.currentUser?.id;
-                        final countResp = await supabase
-                            .from('moments')
-                            .select('*')
-                            .eq('user_id', myId!)
-                            .count(CountOption.exact);
-                        if ((countResp.count) >= 3) {
-                          _showUniversalSubscriptionSheet(
-                              customMessage:
-                                  "Free users can only post a maximum of 3 moments. Upgrade to post unlimited memories!");
-                          return;
-                        }
-                      }
+                      // LIMIT REMOVED: Everyone can post unlimited moments now!
                       _pickMemoryFlow(context);
                     },
                   ),
@@ -3438,6 +3579,8 @@ class _GistBarHeaderDelegate extends SliverPersistentHeaderDelegate {
 
 class _GistItemCard extends StatefulWidget {
   final Map<String, dynamic> gist;
+  final List<dynamic>
+      allFeedItems; // 🔥 FIXED: Strongly typed to prevent errors
   final int gistId;
   final VideoPlayerController? videoController;
   final bool isMutedInitial;
@@ -3453,6 +3596,7 @@ class _GistItemCard extends StatefulWidget {
   const _GistItemCard({
     super.key,
     required this.gist,
+    required this.allFeedItems, // 🔥 FIXED: Will stop the compiler error on line 516
     required this.gistId,
     this.videoController,
     required this.isMutedInitial,
@@ -3477,8 +3621,14 @@ class _GistItemCardState extends State<_GistItemCard>
   int _commentCount = 0;
   bool _isDisposed = false;
   bool _showHeartOverlay = false;
+  bool _userPaused = false;
 
-  // --- NEW: THIS FIXES THE SCROLLING LAG! ---
+  // 🔥 NEW: Lazy Video Loading Variables
+  VideoPlayerController? _localVideoController;
+  bool _isVideoInitialized = false;
+  bool _isInitializing = false;
+  bool _isLocallyOwned = false;
+
   @override
   bool get wantKeepAlive => true;
 
@@ -3486,6 +3636,13 @@ class _GistItemCardState extends State<_GistItemCard>
   void initState() {
     super.initState();
     _isMuted = widget.isMutedInitial;
+
+    // Grab the pre-loaded controller if it was in the top 2, otherwise wait for scroll
+    if (widget.videoController != null) {
+      _localVideoController = widget.videoController;
+      _isVideoInitialized = _localVideoController!.value.isInitialized;
+      _isLocallyOwned = false;
+    }
 
     Future.delayed(const Duration(milliseconds: 600), () {
       if (mounted && !_isDisposed) _fetchCommentCount();
@@ -3495,7 +3652,47 @@ class _GistItemCardState extends State<_GistItemCard>
   @override
   void dispose() {
     _isDisposed = true;
+    // Only dispose if we created it locally during scroll to prevent breaking the pre-loader
+    if (_isLocallyOwned) {
+      _localVideoController?.dispose();
+    }
     super.dispose();
+  }
+
+  // 🔥 NEW: Method to initialize the video ONLY when it scrolls onto the screen
+  Future<void> _initializeLocalVideoIfNeeded() async {
+    if (_localVideoController != null ||
+        _isInitializing ||
+        widget.gist['media_type'] != 'video') return;
+
+    _isInitializing = true;
+    final videoUrl = widget.gist['image_url']?.toString() ?? '';
+    if (videoUrl.isEmpty) return;
+
+    try {
+      final fileInfo = await DefaultCacheManager().getFileFromCache(videoUrl);
+      if (fileInfo != null) {
+        _localVideoController = VideoPlayerController.file(fileInfo.file);
+      } else {
+        _localVideoController =
+            VideoPlayerController.networkUrl(Uri.parse(videoUrl));
+      }
+
+      await _localVideoController!.initialize();
+      _localVideoController!.setLooping(true);
+      _localVideoController!.setVolume(_isMuted ? 0.0 : 1.0);
+      _isLocallyOwned = true; // Mark as owned so we dispose it properly
+
+      if (mounted) {
+        setState(() {
+          _isVideoInitialized = true;
+          _isInitializing = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Local video init error: $e');
+      if (mounted) setState(() => _isInitializing = false);
+    }
   }
 
   void _triggerDoubleTapLike() {
@@ -3511,10 +3708,14 @@ class _GistItemCardState extends State<_GistItemCard>
 
   Future<void> _fetchCommentCount() async {
     try {
+      final isMoment = widget.gist['is_moment'] == true;
+      final table = isMoment ? 'moment_comments' : 'gist_comments';
+      final column = isMoment ? 'moment_id' : 'gist_id';
+
       final res = await Supabase.instance.client
-          .from('gist_comments')
+          .from(table)
           .select('id')
-          .eq('gist_id', widget.gistId)
+          .eq(column, widget.gistId)
           .count(CountOption.exact);
       if (mounted && !_isDisposed) setState(() => _commentCount = res.count);
     } catch (_) {}
@@ -3552,6 +3753,35 @@ class _GistItemCardState extends State<_GistItemCard>
     );
   }
 
+  void _routeToMomentViewer() {
+    final momentsOnly = widget.allFeedItems
+        .where((g) => g['is_moment'] == true)
+        .map((g) => {
+              'id': g['real_moment_id'],
+              'user_id': g['user_id'],
+              'media_url': g['image_url'],
+              'media_type': g['media_type'],
+              'caption': g['title'],
+              'created_at': g['created_at'],
+              'category': g['category'],
+              'profiles': g['profiles'],
+              'likes_count': widget.likeCount,
+              'comments_count': _commentCount,
+            })
+        .toList();
+
+    final index =
+        momentsOnly.indexWhere((m) => m['id'] == widget.gist['real_moment_id']);
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => MomentViewerScreen(
+                  moments: momentsOnly,
+                  initialIndex: index == -1 ? 0 : index,
+                  userPreferences: widget.prefs,
+                )));
+  }
+
   Future<List<dynamic>> _fetchFriends(String myId) async {
     try {
       final res = await Supabase.instance.client
@@ -3562,12 +3792,10 @@ class _GistItemCardState extends State<_GistItemCard>
       final followingIds = res.map((e) => e['following_id']).toList();
       if (followingIds.isEmpty) return [];
 
-      final profilesRes = await Supabase.instance.client
+      return await Supabase.instance.client
           .from('profiles')
           .select('id, username, avatar_url')
           .inFilter('id', followingIds);
-
-      return profilesRes;
     } catch (e) {
       return [];
     }
@@ -3612,9 +3840,10 @@ class _GistItemCardState extends State<_GistItemCard>
                         .from('gists')
                         .delete()
                         .eq('id', widget.gistId);
-                    if (mounted)
+                    if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Gist deleted')));
+                    }
                   } catch (e) {
                     debugPrint('Delete error: $e');
                   }
@@ -3736,95 +3965,113 @@ class _GistItemCardState extends State<_GistItemCard>
                 const Text('You can select multiple options',
                     style: TextStyle(color: Colors.white54, fontSize: 12)),
               const SizedBox(height: 16),
-
-              // Real-time vote fetcher!
               StreamBuilder<List<Map<String, dynamic>>>(
                 stream: Supabase.instance.client
                     .from('poll_votes')
                     .stream(primaryKey: ['id']).eq('gist_id', widget.gistId),
                 builder: (context, snapshot) {
                   final votes = snapshot.data ?? [];
-                  final myVotes = votes
-                      .where((v) => v['user_id'] == myId)
-                      .map((v) => v['option'] as String)
-                      .toSet();
 
-                  return Column(
-                    children: options.map((opt) {
-                      final isSelected = myVotes.contains(opt);
-                      final voteCount =
-                          votes.where((v) => v['option'] == opt).length;
-                      final percent = votes.isEmpty
-                          ? 0
-                          : (voteCount / votes.length * 100).toInt();
+                  return StatefulBuilder(
+                    builder: (BuildContext context, StateSetter setModalState) {
+                      final myVotes = votes
+                          .where((v) => v['user_id'] == myId)
+                          .map((v) => v['option'] as String)
+                          .toSet();
 
-                      return GestureDetector(
-                        onTap: () async {
-                          if (isSelected) {
-                            await Supabase.instance.client
-                                .from('poll_votes')
-                                .delete()
-                                .match({
-                              'gist_id': widget.gistId,
-                              'user_id': myId,
-                              'option': opt
-                            });
-                          } else {
-                            if (!allowMultiple && myVotes.isNotEmpty) {
-                              await Supabase.instance.client
-                                  .from('poll_votes')
-                                  .delete()
-                                  .match({
-                                'gist_id': widget.gistId,
-                                'user_id': myId
+                      return Column(
+                        children: options.map((opt) {
+                          final isSelected = myVotes.contains(opt);
+                          final voteCount =
+                              votes.where((v) => v['option'] == opt).length;
+                          final percent = votes.isEmpty
+                              ? 0
+                              : (voteCount / votes.length * 100).toInt();
+
+                          return GestureDetector(
+                            onTap: () async {
+                              setModalState(() {
+                                if (isSelected) {
+                                  votes.removeWhere((v) =>
+                                      v['user_id'] == myId &&
+                                      v['option'] == opt);
+                                } else {
+                                  if (!allowMultiple) {
+                                    votes.removeWhere(
+                                        (v) => v['user_id'] == myId);
+                                  }
+                                  votes.add({'user_id': myId, 'option': opt});
+                                }
                               });
-                            }
-                            await Supabase.instance.client
-                                .from('poll_votes')
-                                .insert({
-                              'gist_id': widget.gistId,
-                              'user_id': myId,
-                              'option': opt
-                            });
-                          }
-                        },
-                        child: Container(
-                          margin: const EdgeInsets.only(bottom: 12),
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                              color: isSelected
-                                  ? widget.themeColor.withOpacity(0.2)
-                                  : Colors.white10,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(
+
+                              if (isSelected) {
+                                await Supabase.instance.client
+                                    .from('poll_votes')
+                                    .delete()
+                                    .match({
+                                  'gist_id': widget.gistId,
+                                  'user_id': myId,
+                                  'option': opt
+                                });
+                              } else {
+                                if (!allowMultiple) {
+                                  await Supabase.instance.client
+                                      .from('poll_votes')
+                                      .delete()
+                                      .match({
+                                    'gist_id': widget.gistId,
+                                    'user_id': myId
+                                  });
+                                }
+                                await Supabase.instance.client
+                                    .from('poll_votes')
+                                    .insert({
+                                  'gist_id': widget.gistId,
+                                  'user_id': myId,
+                                  'option': opt
+                                });
+                              }
+                            },
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
                                   color: isSelected
-                                      ? widget.themeColor
-                                      : Colors.transparent)),
-                          child: Row(
-                            children: [
-                              Icon(
-                                  isSelected
-                                      ? Icons.check_circle
-                                      : Icons.circle_outlined,
-                                  color: isSelected
-                                      ? widget.themeColor
-                                      : Colors.white54),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                  child: Text(opt,
-                                      style: const TextStyle(
-                                          color: Colors.white, fontSize: 16))),
-                              Text('$percent%',
-                                  style: TextStyle(
+                                      ? widget.themeColor.withOpacity(0.2)
+                                      : Colors.white10,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
                                       color: isSelected
                                           ? widget.themeColor
-                                          : Colors.white54,
-                                      fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                        ),
+                                          : Colors.transparent)),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                      isSelected
+                                          ? Icons.check_circle
+                                          : Icons.circle_outlined,
+                                      color: isSelected
+                                          ? widget.themeColor
+                                          : Colors.white54),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                      child: Text(opt,
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 16))),
+                                  Text('$percent%',
+                                      style: TextStyle(
+                                          color: isSelected
+                                              ? widget.themeColor
+                                              : Colors.white54,
+                                          fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
                       );
-                    }).toList(),
+                    },
                   );
                 },
               ),
@@ -3859,19 +4106,18 @@ class _GistItemCardState extends State<_GistItemCard>
               (widget.gist['image_urls'] as List).isNotEmpty
           ? widget.gist['image_urls'][0]
           : imageUrl;
+      final isMoment = widget.gist['is_moment'] == true;
+      final typeName = isMoment ? 'Moment' : 'Gist';
 
       for (String friendId in friendIds) {
         final response = await Supabase.instance.client.rpc(
             'get_or_create_personal_chat',
             params: {'user_a': myId, 'user_b': friendId});
-        final chatId = response.toString();
-
         await Supabase.instance.client.from('messages').insert({
-          'chat_id': chatId,
+          'chat_id': response.toString(),
           'sender_id': myId,
-          // --- UPDATED GIST SHARE TEXT ---
           'content':
-              'Check out this Gist on Allowance!\n$truncatedTitle\n$gistLink',
+              'Check out this $typeName on Allowance!\n$truncatedTitle\n$gistLink',
           'media_url': mediaUrlToUse,
           'media_type': widget.gist['media_type'] ?? 'image',
           'is_read': false,
@@ -3889,8 +4135,11 @@ class _GistItemCardState extends State<_GistItemCard>
     final String title = widget.gist['title'] ?? '';
     final String truncatedTitle =
         title.length > 50 ? '${title.substring(0, 50)}...' : title;
+
+    final isMoment = widget.gist['is_moment'] == true;
+    final String typeName = isMoment ? 'Moment' : 'Gist';
     final String gistLink =
-        'https://www.allowanceapp.org/share?type=gist&id=${widget.gistId}';
+        'https://www.allowanceapp.org/share?type=${typeName.toLowerCase()}&id=${widget.gistId}';
 
     final friendsFuture = _fetchFriends(myId);
 
@@ -3913,10 +4162,10 @@ class _GistItemCardState extends State<_GistItemCard>
               expand: false,
               builder: (_, scrollController) => Column(
                 children: [
-                  const Padding(
-                    padding: EdgeInsets.all(16.0),
-                    child: Text('Share Gist',
-                        style: TextStyle(
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Text('Share $typeName',
+                        style: const TextStyle(
                             color: Colors.white,
                             fontSize: 18,
                             fontWeight: FontWeight.bold)),
@@ -3932,10 +4181,11 @@ class _GistItemCardState extends State<_GistItemCard>
                     onTap: () {
                       Navigator.pop(ctx);
                       Share.share(
-                          'Check out this Gist on Allowance!\n$truncatedTitle\n$gistLink');
+                          'Check out this $typeName on Allowance!\n$truncatedTitle\n$gistLink');
                     },
                   ),
                   const Divider(color: Colors.white10),
+                  // ... Keep the rest of your Friends grid exactly the same here!
                   const Padding(
                       padding: EdgeInsets.all(8.0),
                       child: Text('Send to friends',
@@ -4124,7 +4374,6 @@ class _GistItemCardState extends State<_GistItemCard>
   Widget build(BuildContext context) {
     super.build(context);
 
-    // 🔥 FIX: Safe toString() prevents the "Null is not a subtype of String" error
     final imageUrl = widget.gist['image_url']?.toString() ?? '';
     final imageUrls = (widget.gist['image_urls'] as List?)
             ?.map((e) => e.toString())
@@ -4137,7 +4386,6 @@ class _GistItemCardState extends State<_GistItemCard>
     final imagesToShow = imageUrls.isNotEmpty
         ? imageUrls
         : (imageUrl.isNotEmpty ? [imageUrl] : []);
-
     final profileData = widget.gist['profiles'];
     final userId = widget.gist['user_id']?.toString() ?? '';
     final String username =
@@ -4148,6 +4396,7 @@ class _GistItemCardState extends State<_GistItemCard>
 
     final isLocal = widget.gist['type'] == 'local';
     final hasPoll = widget.gist['has_poll'] == true;
+    final isMoment = widget.gist['is_moment'] == true;
 
     final String createdAtStr = widget.gist['created_at']?.toString() ?? '';
     final datePosted = createdAtStr.isNotEmpty
@@ -4155,97 +4404,151 @@ class _GistItemCardState extends State<_GistItemCard>
             .format(DateTime.parse(createdAtStr).toLocal())
         : 'Recently';
 
-    // 🔥 NEW: Tags Row extracted to sit ABOVE the media
     Widget tagsRow = Padding(
       padding: const EdgeInsets.only(left: 16.0, top: 12.0, bottom: 12.0),
       child: Row(
         children: [
-          _buildTag(isLocal ? 'Local' : 'Global', Colors.blueAccent),
+          if (!isMoment)
+            _buildTag(isLocal ? 'Local' : 'Global', Colors.blueAccent),
           if (widget.gist['category'] != null &&
               widget.gist['category'].toString().isNotEmpty)
             _buildTag(widget.gist['category'].toString(), Colors.orangeAccent),
           if (hasPoll) _buildTag('Poll', Colors.purpleAccent),
+          if (isMoment) _buildTag('Moment', Colors.amber),
         ],
       ),
     );
 
     Widget mediaWidget;
     if (mediaType == 'video') {
-      final controller = widget.videoController;
-      mediaWidget = controller != null && controller.value.isInitialized
-          ? Column(
-              children: [
-                AspectRatio(
-                  aspectRatio: controller.value.aspectRatio,
-                  child: Stack(
-                    alignment: Alignment.bottomCenter,
-                    children: [
-                      GestureDetector(
-                        onTap: () {
-                          controller.value.isPlaying
-                              ? controller.pause()
-                              : controller.play();
-                          setState(() {});
-                        },
-                        onDoubleTap: _triggerDoubleTapLike,
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            VideoPlayer(controller),
-                            ValueListenableBuilder(
-                              valueListenable: controller,
-                              builder:
-                                  (context, VideoPlayerValue value, child) {
-                                if (value.isPlaying)
-                                  return const SizedBox.shrink();
-                                return Container(
-                                    padding: const EdgeInsets.all(16),
-                                    decoration: BoxDecoration(
-                                        color: Colors.black.withOpacity(0.6),
-                                        shape: BoxShape.circle),
-                                    child: const Icon(Icons.play_arrow_rounded,
-                                        color: Colors.white, size: 54));
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-                      Positioned(
-                        bottom: 12,
-                        right: 12,
-                        child: GestureDetector(
+      final controller = _localVideoController;
+
+      mediaWidget = VisibilityDetector(
+        key: Key('video_vis_${widget.gistId}'),
+        onVisibilityChanged: (info) {
+          if (!mounted) return;
+          // When 40% of the video is visible on screen
+          if (info.visibleFraction > 0.4) {
+            if (controller == null && !_isInitializing) {
+              _initializeLocalVideoIfNeeded(); // 🔥 Lazy load the video!
+            } else if (_isVideoInitialized && controller != null) {
+              if (!controller.value.isPlaying && !_userPaused) {
+                controller.play(); // 🔥 Auto-play!
+                setState(() {});
+              }
+            }
+          } else {
+            // Pause when scrolled away
+            if (controller != null && controller.value.isPlaying) {
+              controller.pause();
+              setState(() {});
+            }
+          }
+        },
+        child: controller != null && _isVideoInitialized
+            ? Column(
+                children: [
+                  AspectRatio(
+                    aspectRatio: controller.value.aspectRatio,
+                    child: Stack(
+                      alignment: Alignment.bottomCenter,
+                      children: [
+                        GestureDetector(
                           onTap: () {
-                            setState(() {
-                              _isMuted = !_isMuted;
-                              controller.setVolume(_isMuted ? 0.0 : 1.0);
-                            });
-                            widget.onToggleMute(_isMuted);
+                            if (isMoment) {
+                              _routeToMomentViewer();
+                            } else {
+                              if (controller.value.isPlaying) {
+                                controller.pause();
+                                _userPaused = true;
+                              } else {
+                                controller.play();
+                                _userPaused = false;
+                              }
+                              setState(() {});
+                            }
                           },
-                          child: CircleAvatar(
-                              backgroundColor: Colors.black54,
-                              radius: 14,
-                              child: Icon(
-                                  _isMuted ? Icons.volume_off : Icons.volume_up,
-                                  color: Colors.white,
-                                  size: 16)),
+                          onDoubleTap: _triggerDoubleTapLike,
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              VideoPlayer(controller),
+                              ValueListenableBuilder(
+                                valueListenable: controller,
+                                builder:
+                                    (context, VideoPlayerValue value, child) {
+                                  if (value.isPlaying)
+                                    return const SizedBox.shrink();
+                                  return Container(
+                                      padding: const EdgeInsets.all(16),
+                                      decoration: BoxDecoration(
+                                          color: Colors.black.withOpacity(0.6),
+                                          shape: BoxShape.circle),
+                                      child: const Icon(
+                                          Icons.play_arrow_rounded,
+                                          color: Colors.white,
+                                          size: 54));
+                                },
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
+                        Positioned(
+                          bottom: 12,
+                          right: 12,
+                          child: GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                _isMuted = !_isMuted;
+                                controller.setVolume(_isMuted ? 0.0 : 1.0);
+                              });
+                              widget.onToggleMute(_isMuted);
+                            },
+                            child: CircleAvatar(
+                                backgroundColor: Colors.black54,
+                                radius: 14,
+                                child: Icon(
+                                    _isMuted
+                                        ? Icons.volume_off
+                                        : Icons.volume_up,
+                                    color: Colors.white,
+                                    size: 16)),
+                          ),
+                        ),
+                        Center(
+                          child: IgnorePointer(
+                            child: AnimatedOpacity(
+                              opacity: _showHeartOverlay ? 0.9 : 0.0,
+                              duration: const Duration(milliseconds: 200),
+                              child: AnimatedScale(
+                                scale: _showHeartOverlay ? 1.0 : 0.3,
+                                duration: const Duration(milliseconds: 400),
+                                curve: Curves.elasticOut,
+                                child: const Icon(Icons.favorite,
+                                    color: Colors.white, size: 100),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                VideoProgressIndicator(controller,
-                    allowScrubbing: true,
-                    colors: const VideoProgressColors(
-                        playedColor: Color(0xFF4CAF50),
-                        bufferedColor: Colors.white24,
-                        backgroundColor: Colors.transparent)),
-              ],
-            )
-          : Container(
-              height: 300,
-              color: Colors.black,
-              child: const Center(
-                  child: CircularProgressIndicator(color: Color(0xFF4CAF50))));
+                  VideoProgressIndicator(controller,
+                      allowScrubbing: true,
+                      colors: const VideoProgressColors(
+                          playedColor: Color(0xFF4CAF50),
+                          bufferedColor: Colors.white24,
+                          backgroundColor: Colors.transparent)),
+                ],
+              )
+            : Container(
+                height: 300,
+                width: double.infinity,
+                color: Colors.black,
+                child: const Center(
+                    child:
+                        CircularProgressIndicator(color: Color(0xFF4CAF50)))),
+      );
     } else {
       mediaWidget = imagesToShow.isEmpty
           ? Container(height: 300, color: Colors.grey[900])
@@ -4258,12 +4561,38 @@ class _GistItemCardState extends State<_GistItemCard>
                     itemCount: imagesToShow.length,
                     onPageChanged: (p) => setState(() => _localPageIndex = p),
                     itemBuilder: (ctx, i) => GestureDetector(
-                        onTap: () => _expandMedia(imagesToShow[i]),
+                        onTap: () {
+                          if (isMoment) {
+                            _routeToMomentViewer();
+                          } else {
+                            _expandMedia(imagesToShow[i]);
+                          }
+                        },
                         onDoubleTap: _triggerDoubleTapLike,
                         child: CachedNetworkImage(
                             imageUrl: imagesToShow[i],
                             fit: BoxFit.cover,
-                            memCacheWidth: 600)),
+                            placeholder: (context, url) => Container(
+                                color: Colors.grey[900],
+                                child: const Center(
+                                    child: CircularProgressIndicator(
+                                        color: Color(0xFF4CAF50)))),
+                            errorWidget: (context, url, error) => Container(
+                                color: Colors.grey[900],
+                                child: const Center(
+                                  child: Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.broken_image,
+                                          color: Colors.white54, size: 40),
+                                      SizedBox(height: 8),
+                                      Text("Image unavailable",
+                                          style: TextStyle(
+                                              color: Colors.white54,
+                                              fontSize: 12)),
+                                    ],
+                                  ),
+                                )))),
                   ),
                   Positioned(
                     top: 12,
@@ -4293,6 +4622,21 @@ class _GistItemCardState extends State<_GistItemCard>
                               style: const TextStyle(
                                   color: Colors.white, fontSize: 12))),
                     ),
+                  Center(
+                    child: IgnorePointer(
+                      child: AnimatedOpacity(
+                        opacity: _showHeartOverlay ? 0.9 : 0.0,
+                        duration: const Duration(milliseconds: 200),
+                        child: AnimatedScale(
+                          scale: _showHeartOverlay ? 1.0 : 0.3,
+                          duration: const Duration(milliseconds: 400),
+                          curve: Curves.elasticOut,
+                          child: const Icon(Icons.favorite,
+                              color: Colors.white, size: 100),
+                        ),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             );
@@ -4451,7 +4795,7 @@ class _GistItemCardState extends State<_GistItemCard>
             ),
           ),
           const SizedBox(height: 6),
-          Text('$datePosted',
+          Text(datePosted,
               style: const TextStyle(color: Colors.white54, fontSize: 11)),
           if (gistUrl.isNotEmpty) ...[
             const SizedBox(height: 12),
@@ -4480,7 +4824,6 @@ class _GistItemCardState extends State<_GistItemCard>
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 24.0),
-      // 🔥 FIX: Render Tags, then Media, then Actions
       child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [tagsRow, mediaWidget, actionBar, captionArea]),

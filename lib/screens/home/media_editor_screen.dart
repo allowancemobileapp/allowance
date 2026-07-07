@@ -130,7 +130,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   // GLOBAL BACKGROUND POSTING (SMART COMPRESSION)
   // =====================================
   // --- UPDATED: VIDEO COMPRESSION FAIL-SAFE ---
-  void _startBackgroundUpload() async {
+  void _startBackgroundUpload(String selectedTag) async {
     cancelUploadFlag = false;
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser!.id;
@@ -246,6 +246,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
         'user_id': userId,
         'media_url': publicUrl,
         'caption': caption,
+        'category': selectedTag, // <--- ADD THIS LINE
         'media_type': isVideo ? 'video' : 'image',
         'created_at': DateTime.now().toUtc().toIso8601String(),
       });
@@ -295,7 +296,6 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
-          // 🔥 FIX: Removed `if (!kIsWeb)` so the buttons show everywhere!
           if (!widget.isVideo)
             IconButton(
               icon: const Icon(Icons.crop, color: Colors.white),
@@ -325,7 +325,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                   end: Alignment.bottomCenter,
                   colors: [
                     Colors.transparent,
-                    Color(0xFF121212).withOpacity(0.8)
+                    const Color(0xFF121212).withOpacity(0.8)
                   ],
                 ),
               ),
@@ -335,7 +335,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       decoration: BoxDecoration(
-                        color: Color(0xFF121212),
+                        color: const Color(0xFF121212),
                         borderRadius: BorderRadius.circular(25),
                         border: Border.all(color: Colors.white10),
                       ),
@@ -351,8 +351,61 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
+
+                  // 🔥 THE FIX: The Tag Selector Bottom Sheet
                   GestureDetector(
-                    onTap: _startBackgroundUpload, // Triggers background post
+                    onTap: () {
+                      final tags = [
+                        'Random',
+                        'Tech',
+                        'Food',
+                        'Football',
+                        'Wildlife',
+                        'Deep Sea',
+                        'Religion',
+                        'Relationship',
+                        'Comics',
+                        'Anime',
+                        'Wealth'
+                      ];
+                      showModalBottomSheet(
+                        context: context,
+                        backgroundColor: const Color(0xFF1E1E1E),
+                        shape: const RoundedRectangleBorder(
+                            borderRadius: BorderRadius.vertical(
+                                top: Radius.circular(20))),
+                        builder: (ctx) => Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Padding(
+                              padding: EdgeInsets.all(16.0),
+                              child: Text('Select a Tag',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold)),
+                            ),
+                            Expanded(
+                              child: ListView.builder(
+                                itemCount: tags.length,
+                                itemBuilder: (context, index) => ListTile(
+                                  title: Text(tags[index],
+                                      style:
+                                          const TextStyle(color: Colors.white)),
+                                  trailing: const Icon(Icons.chevron_right,
+                                      color: Colors.white54),
+                                  onTap: () {
+                                    Navigator.pop(ctx);
+                                    // 🔥 Passes the tag into your updated function!
+                                    _startBackgroundUpload(tags[index]);
+                                  },
+                                ),
+                              ),
+                            )
+                          ],
+                        ),
+                      );
+                    },
                     child: CircleAvatar(
                       backgroundColor: themeColor,
                       radius: 24,

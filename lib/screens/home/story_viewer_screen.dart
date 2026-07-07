@@ -107,18 +107,14 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
         _preloadedController = null;
         _preloadedIndex = null;
       } else {
-        // Use cache for fallback or backward navigation
-        var fileInfo = await DefaultCacheManager().getFileFromCache(url);
-        if (fileInfo != null) {
-          _videoController = VideoPlayerController.file(fileInfo.file);
-        } else {
-          _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
-          DefaultCacheManager().downloadFile(url);
-        }
+        // 🔥 FIX: Bypass DefaultCacheManager entirely for videos! It causes the 1-second freeze and infinite load bugs.
+        _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
         await _videoController!.initialize();
       }
 
-      if (mounted && !_isPaused) _videoController!.play();
+      if (mounted && !_isPaused) {
+        _videoController!.play();
+      }
       _videoController!.addListener(_videoProgressListener);
     }
 
@@ -834,6 +830,25 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     super.dispose();
   }
 
+  Future<Map<String, dynamic>?> _fetchSharedItemData(String urlStr) async {
+    try {
+      final parsedIdStr = Uri.tryParse(urlStr)?.queryParameters['id'];
+      final intId = int.tryParse(parsedIdStr ?? '');
+      if (intId == null) return null;
+
+      final table = urlStr.contains('type=moment') ? 'moments' : 'gists';
+      final res = await Supabase.instance.client
+          .from(table)
+          .select('user_id, profiles:user_id(username, school_name)')
+          .eq('id', intId)
+          .maybeSingle();
+      return res;
+    } catch (e) {
+      debugPrint("Fetch Shared Gist Error: $e");
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final story = _sortedStories[_currentIndex];
@@ -845,7 +860,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
     final bool isPlus = story['profiles']?['subscription_tier'] == 'Membership';
     final bool isSharedGist =
-        story['url'] != null && story['url'].toString().contains('type=gist');
+        story['url'] != null && story['url'].toString().contains('type=');
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -853,6 +868,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
+          // 1. THE MAIN BACKGROUND MEDIA
           PageView.builder(
             controller: _pageController,
             onPageChanged: (index) {
@@ -919,13 +935,12 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                                   size: 60))),
                     if (!isText && caption.isNotEmpty)
                       Positioned(
-                        bottom: 85, // 🔥 Pushed down right above the input bar!
+                        bottom: 85,
                         left: 16,
                         right: 16,
                         child: Container(
                           padding: const EdgeInsets.symmetric(
-                              vertical: 8,
-                              horizontal: 12), // 🔥 Smaller padding
+                              vertical: 8, horizontal: 12),
                           decoration: BoxDecoration(
                             color: Colors.black.withOpacity(0.65),
                             borderRadius: BorderRadius.circular(12),
@@ -934,7 +949,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                             caption,
                             style: const TextStyle(
                               color: Colors.white,
-                              fontSize: 13, // 🔥 Smaller font size
+                              fontSize: 13,
                               fontWeight: FontWeight.w500,
                               height: 1.3,
                             ),
@@ -947,6 +962,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               );
             },
           ),
+
+          // 2. THE TOP PROGRESS BAR
           Positioned(
             top: MediaQuery.of(context).padding.top + 8,
             left: 16,
@@ -975,6 +992,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               ),
             ),
           ),
+
+          // 3. PAGE GESTURE DETECTORS (Left/Right Tap)
           Positioned.fill(
             child: Row(
               children: [
@@ -989,6 +1008,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               ],
             ),
           ),
+
+          // 4. VIDEO PLAYER CONTROLS
           if (story['media_type'] == 'video' &&
               _videoController != null &&
               _videoController!.value.isInitialized)
@@ -1041,7 +1062,11 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 ],
               ),
             ),
-          if (story['url'] != null && story['url'].toString().trim().isNotEmpty)
+
+          // 5. EXTERNAL LINK BUTTON
+          if (story['url'] != null &&
+              story['url'].toString().trim().isNotEmpty &&
+              !isSharedGist)
             Positioned(
               bottom: 140,
               right: 24,
@@ -1061,50 +1086,14 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 ),
               ),
             ),
-          if (isSharedGist)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 100,
-              left: 16,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                    color: Colors.black54,
-                    borderRadius: BorderRadius.circular(12),
-                    border:
-                        Border.all(color: Colors.blueAccent.withOpacity(0.5))),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(children: [
-                      Icon(Icons.campaign, color: Colors.blueAccent, size: 18),
-                      SizedBox(width: 6),
-                      Text('Shared Gist',
-                          style: TextStyle(
-                              color: Colors.blueAccent,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12))
-                    ]),
-                    const SizedBox(height: 4),
-                    Text('@${story['profiles']?['username'] ?? 'User'}',
-                        style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14)),
-                    Text('${story['profiles']?['school_name'] ?? 'Allowance'}',
-                        style: const TextStyle(
-                            color: Colors.white70, fontSize: 10)),
-                  ],
-                ),
-              ),
-            ),
+
+          // 🔥 6. RESTORED: THE TOP HEADER BAR (AVATAR, USERNAME, CLOSE BUTTON) 🔥
           Positioned(
-            top: MediaQuery.of(context).padding.top + 45,
+            top: MediaQuery.of(context).padding.top + 25,
             left: 16,
             right: 16,
             child: Row(
               children: [
-                // 🔥 FIX: Removed the void .then() call
                 GestureDetector(
                   onTap: () {
                     UniversalProfileCard.show(
@@ -1128,7 +1117,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                                   '@${story['profiles']?['username'] ?? 'user'}',
                                   style: const TextStyle(
                                       color: Colors.white,
-                                      fontWeight: FontWeight.bold)),
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16)),
                               if (isPlus) ...[
                                 const SizedBox(width: 4),
                                 const Icon(Icons.star,
@@ -1145,7 +1135,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                                       .isNotEmpty) ...[
                                 Text(story['profiles']!['school_name'],
                                     style: TextStyle(
-                                        color: Colors.white.withOpacity(0.6),
+                                        color: Colors.white.withOpacity(0.8),
                                         fontSize: 12)),
                                 const Text(' • ',
                                     style: TextStyle(
@@ -1164,15 +1154,95 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 const Spacer(),
                 if (isOwnStory)
                   IconButton(
-                      icon:
-                          const Icon(Icons.delete, color: Colors.red, size: 28),
+                      icon: const Icon(Icons.delete,
+                          color: Colors.redAccent, size: 28),
                       onPressed: _deleteStory),
                 IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon:
+                        const Icon(Icons.close, color: Colors.white, size: 30),
                     onPressed: () => Navigator.pop(context)),
               ],
             ),
           ),
+
+          // 🔥 7. SHARED GIST / MOMENT PREVIEW TAG (Properly positioned BELOW header) 🔥
+          if (isSharedGist)
+            Positioned(
+              top: MediaQuery.of(context).padding.top +
+                  90, // Positioned safely below the header
+              left: 16,
+              child: FutureBuilder<Map<String, dynamic>?>(
+                future: _fetchSharedItemData(story['url'].toString()),
+                builder: (context, snapshot) {
+                  final data = snapshot.data;
+                  final profile =
+                      data?['profiles'] as Map<String, dynamic>? ?? {};
+                  final originalUser = profile['username'] ?? 'User';
+                  final originalSchool = profile['school_name'] ?? 'Allowance';
+                  final isMoment =
+                      story['url'].toString().contains('type=moment');
+
+                  return GestureDetector(
+                    onTap: () {
+                      final parsedIdStr = Uri.tryParse(story['url'].toString())
+                          ?.queryParameters['id'];
+                      if (parsedIdStr != null) {
+                        _pauseStory();
+                        if (isMoment) {
+                          // Note: A full moment viewer routing helper would go here if needed
+                        } else {
+                          Navigator.pushNamed(context, '/gist',
+                                  arguments: {'id': parsedIdStr})
+                              .then((_) => _resumeStory());
+                        }
+                      }
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                              color:
+                                  (isMoment ? Colors.amber : Colors.blueAccent)
+                                      .withOpacity(0.5))),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(children: [
+                            Icon(
+                                isMoment ? Icons.photo_library : Icons.campaign,
+                                color:
+                                    isMoment ? Colors.amber : Colors.blueAccent,
+                                size: 18),
+                            const SizedBox(width: 6),
+                            Text(isMoment ? 'Shared Moment' : 'Shared Gist',
+                                style: TextStyle(
+                                    color: isMoment
+                                        ? Colors.amber
+                                        : Colors.blueAccent,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12))
+                          ]),
+                          const SizedBox(height: 4),
+                          Text('@$originalUser',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14)),
+                          Text(originalSchool,
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 10)),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+
+          // 8. THE BOTTOM INPUT BAR (REPLY / ACTIONS)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
             bottom: MediaQuery.of(context).viewInsets.bottom > 0
