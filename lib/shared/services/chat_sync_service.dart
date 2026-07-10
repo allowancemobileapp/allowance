@@ -105,7 +105,9 @@ class ChatSyncService {
           Uint8List fileBytes;
           String fileName;
 
-          // 🔥 FIXED: Keeps your http import alive, but rescues 'blob:' URLs from crashing!
+          // 🔥 FIX 1: Safely extract the media type
+          final String mType = msg['media_type']?.toString() ?? 'image';
+
           if (kIsWeb) {
             if (path.startsWith('blob:')) {
               final xfile = XFile(path);
@@ -114,9 +116,12 @@ class ChatSyncService {
               final response = await http.get(Uri.parse(path));
               fileBytes = response.bodyBytes;
             }
-            final ext = msg['media_type'] == 'video'
+
+            // 🔥 FIX 2: Correctly identifies View Once videos so they don't get saved as JPGs!
+            final ext = (mType == 'video' || mType == 'view_once_video')
                 ? 'mp4'
-                : (msg['media_type'] == 'sticker' ? 'png' : 'jpg');
+                : (mType == 'sticker' ? 'png' : 'jpg');
+
             fileName =
                 '${DateTime.now().millisecondsSinceEpoch}_${path.hashCode}.$ext';
           } else {

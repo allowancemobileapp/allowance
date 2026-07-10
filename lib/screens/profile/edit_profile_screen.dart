@@ -4,6 +4,7 @@ import 'package:allowance/screens/home/home_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'package:allowance/models/user_preferences.dart';
@@ -175,7 +176,6 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     try {
       final String? newAvatarUrl = await _uploadAvatarIfPicked();
 
-      // Calculate Age to maintain DB Schema
       int? computedAge = widget.userPreferences.age;
       if (_selectedDob != null) {
         computedAge = DateTime.now().year - _selectedDob!.year;
@@ -186,14 +186,12 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         }
       }
 
-      // Update UserPreferences locally
       widget.userPreferences.fullName = _displayNameController.text.trim();
       widget.userPreferences.username = _usernameController.text.trim();
       widget.userPreferences.phoneNumber = _phoneController.text.trim();
       widget.userPreferences.bio = _bioController.text.trim();
       widget.userPreferences.age = computedAge;
 
-      // Nullify old fields locally
       widget.userPreferences.weight = null;
       widget.userPreferences.height = null;
       widget.userPreferences.bloodGroup = null;
@@ -205,7 +203,27 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       widget.userPreferences.hasCompletedProfile = true;
       await widget.userPreferences.savePreferences();
 
-      // Upsert to Supabase
+      // 🔥 FIX: Also checks the UUID memory cache created during the Google flow!
+      final prefs = await SharedPreferences.getInstance();
+      final refUsername = prefs.getString('pending_referral_code');
+      String? referrerId = prefs.getString('pending_referrer_uuid');
+
+      if (referrerId == null && refUsername != null && refUsername.isNotEmpty) {
+        try {
+          final referrerData = await supabase
+              .from('profiles')
+              .select('id')
+              .eq('username', refUsername.toLowerCase())
+              .maybeSingle();
+
+          if (referrerData != null) {
+            referrerId = referrerData['id'];
+          }
+        } catch (e) {
+          debugPrint("Failed to find referrer: $e");
+        }
+      }
+
       if (user != null) {
         final Map<String, dynamic> updates = {
           'id': user.id,
@@ -215,14 +233,14 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           'phone_number': widget.userPreferences.phoneNumber,
           'age': widget.userPreferences.age,
           'bio': widget.userPreferences.bio,
-          // Explicitly clear old unused fields from the DB
           'weight': null,
           'height': null,
           'blood_group': null,
           'updated_at': DateTime.now().toUtc().toIso8601String(),
+          if (referrerId != null)
+            'referred_by': referrerId, // 🔥 SAVES REFERRAL
         };
 
-        // Remove nulls EXCEPT for the ones we explicitly want to erase
         updates.removeWhere((key, value) =>
             value == null &&
             key != 'weight' &&
@@ -231,6 +249,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
         try {
           await supabase.from('profiles').upsert(updates);
+
+          // Clear all memory codes
+          await prefs.remove('pending_referral_code');
+          await prefs.remove('pending_referrer_uuid');
         } catch (e) {
           debugPrint('Supabase upsert failed (non-fatal): $e');
         }

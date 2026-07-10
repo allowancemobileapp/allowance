@@ -849,6 +849,16 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     }
   }
 
+  // 🔥 FIX: Cache to store the Future so it doesn't reload infinitely during the progress bar animation
+  final Map<String, Future<Map<String, dynamic>?>> _sharedDataCache = {};
+
+  Future<Map<String, dynamic>?> _getCachedSharedItemData(String urlStr) {
+    if (!_sharedDataCache.containsKey(urlStr)) {
+      _sharedDataCache[urlStr] = _fetchSharedItemData(urlStr);
+    }
+    return _sharedDataCache[urlStr]!;
+  }
+
   @override
   Widget build(BuildContext context) {
     final story = _sortedStories[_currentIndex];
@@ -1073,8 +1083,9 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               child: GestureDetector(
                 onTap: () async {
                   final uri = Uri.parse(story['url'] as String);
-                  if (await canLaunchUrl(uri))
+                  if (await canLaunchUrl(uri)) {
                     await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
                 },
                 child: Container(
                   padding: const EdgeInsets.all(10),
@@ -1087,7 +1098,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               ),
             ),
 
-          // 🔥 6. RESTORED: THE TOP HEADER BAR (AVATAR, USERNAME, CLOSE BUTTON) 🔥
+          // 6. THE TOP HEADER BAR (AVATAR, USERNAME, CLOSE BUTTON)
           Positioned(
             top: MediaQuery.of(context).padding.top + 25,
             left: 16,
@@ -1165,22 +1176,44 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          // 🔥 7. SHARED GIST / MOMENT PREVIEW TAG (Properly positioned BELOW header) 🔥
+          // 🔥 7. SHARED GIST / MOMENT PREVIEW TAG 🔥
           if (isSharedGist)
             Positioned(
-              top: MediaQuery.of(context).padding.top +
-                  90, // Positioned safely below the header
+              top: MediaQuery.of(context).padding.top + 90,
               left: 16,
               child: FutureBuilder<Map<String, dynamic>?>(
-                future: _fetchSharedItemData(story['url'].toString()),
+                future: _getCachedSharedItemData(
+                    story['url'].toString()), // 🔥 FIX: Using Cached Future!
                 builder: (context, snapshot) {
+                  final isMoment =
+                      story['url'].toString().contains('type=moment');
+                  final tagColor = isMoment ? Colors.amber : Colors.blueAccent;
+
+                  if (snapshot.connectionState == ConnectionState.waiting) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: tagColor.withOpacity(0.5))),
+                      child: const SizedBox(
+                        width: 120,
+                        height: 38,
+                        child: Center(
+                            child:
+                                LinearProgressIndicator(color: Colors.white24)),
+                      ),
+                    );
+                  }
+
                   final data = snapshot.data;
                   final profile =
                       data?['profiles'] as Map<String, dynamic>? ?? {};
-                  final originalUser = profile['username'] ?? 'User';
-                  final originalSchool = profile['school_name'] ?? 'Allowance';
-                  final isMoment =
-                      story['url'].toString().contains('type=moment');
+
+                  final originalUser = profile['username'] ?? 'Unknown User';
+                  final originalSchool =
+                      profile['school_name'] ?? 'Unknown Location';
 
                   return GestureDetector(
                     onTap: () {
@@ -1189,7 +1222,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                       if (parsedIdStr != null) {
                         _pauseStory();
                         if (isMoment) {
-                          // Note: A full moment viewer routing helper would go here if needed
+                          // Note: If you have a deep link for moment, put it here, else it just pauses
                         } else {
                           Navigator.pushNamed(context, '/gist',
                                   arguments: {'id': parsedIdStr})
@@ -1199,41 +1232,42 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                     },
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
+                          horizontal: 16, vertical: 10),
                       decoration: BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                              color:
-                                  (isMoment ? Colors.amber : Colors.blueAccent)
-                                      .withOpacity(0.5))),
+                          color: Colors.black.withOpacity(0.85),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: tagColor, width: 1.5),
+                          boxShadow: [
+                            BoxShadow(
+                                color: tagColor.withOpacity(0.2),
+                                blurRadius: 8,
+                                spreadRadius: 1)
+                          ]),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(children: [
                             Icon(
                                 isMoment ? Icons.photo_library : Icons.campaign,
-                                color:
-                                    isMoment ? Colors.amber : Colors.blueAccent,
+                                color: tagColor,
                                 size: 18),
                             const SizedBox(width: 6),
                             Text(isMoment ? 'Shared Moment' : 'Shared Gist',
                                 style: TextStyle(
-                                    color: isMoment
-                                        ? Colors.amber
-                                        : Colors.blueAccent,
+                                    color: tagColor,
                                     fontWeight: FontWeight.bold,
-                                    fontSize: 12))
+                                    fontSize: 12,
+                                    letterSpacing: 0.5))
                           ]),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 6),
                           Text('@$originalUser',
                               style: const TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.bold,
-                                  fontSize: 14)),
+                                  fontSize: 15)),
                           Text(originalSchool,
                               style: const TextStyle(
-                                  color: Colors.white70, fontSize: 10)),
+                                  color: Colors.white70, fontSize: 12)),
                         ],
                       ),
                     ),

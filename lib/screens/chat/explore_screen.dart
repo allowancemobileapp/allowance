@@ -362,7 +362,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
       return;
     }
 
-    final reference = 'sub_${DateTime.now().millisecondsSinceEpoch}';
+    // 🔥 FIX 1: Embed user.id directly into the reference string for Webhook safety
+    final reference = 'sub_${user.id}_${DateTime.now().millisecondsSinceEpoch}';
     final int amountNaira = 700;
     String gateway = 'paystack';
     String? authUrlString;
@@ -375,7 +376,12 @@ class _ExploreScreenState extends State<ExploreScreen> {
           'email': user.email ?? 'user@allowance.com',
           'reference': reference,
           'plan': 'PLN_2tgtzyaurt8qz0d',
-          'metadata': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id}
+          // 🔥 FIX 2: Ensure plan_type is passed so Webhook strictly sets 'Membership'
+          'metadata': {
+            'plan_code': 'PLN_2tgtzyaurt8qz0d',
+            'user_id': user.id,
+            'plan_type': 'Membership'
+          }
         },
       );
 
@@ -398,7 +404,12 @@ class _ExploreScreenState extends State<ExploreScreen> {
             'redirect_url': 'https://allowanceapp.org',
             'customer': {'email': user.email ?? 'user@allowance.com'},
             'payment_plan': dotenv.env['FLW_PLAN_ID'] ?? '',
-            'meta': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id},
+            // 🔥 FIX 3: Ensure plan_type is passed here as well
+            'meta': {
+              'plan_code': 'PLN_2tgtzyaurt8qz0d',
+              'user_id': user.id,
+              'plan_type': 'Membership'
+            },
             'customizations': {
               'title': 'Allowance Plus',
               'description': 'Subscription payment'
@@ -458,10 +469,12 @@ class _ExploreScreenState extends State<ExploreScreen> {
         Navigator.pop(context);
       }
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text(
-              'Payment taking a while. You can close this; we will check again when you return.'),
-          backgroundColor: Colors.orange));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Payment taking a while. You can close this; we will check again when you return.'),
+            backgroundColor: Colors.orange));
+      }
     }
     if (mounted) setModalState(() => _isProcessingSubscription = false);
   }

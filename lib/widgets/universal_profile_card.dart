@@ -60,48 +60,61 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   }
 
   // --- UPDATED: LAZY LOADING PREVENTS LAG SPIKES ---
-  Future<void> _loadProfileData() async {
+  // --- UPDATED: ULTRA-FAST LAZY LOADING ---
+  void _loadProfileData() {
     final currentUserId = supabase.auth.currentUser?.id;
     if (currentUserId == null) return;
 
-    try {
-      final String safeId = widget.targetUserId.toString().trim();
+    final String safeId = widget.targetUserId.toString().trim();
 
-      // 1. Fetch ONLY the Profile First to render UI instantly
-      final profileResp = await supabase
-          .from('profiles')
-          .select()
-          .eq('id', safeId)
-          .maybeSingle();
-
+    // 1. Fetch ONLY the Profile instantly and independently
+    supabase
+        .from('profiles')
+        .select()
+        .eq('id', safeId)
+        .maybeSingle()
+        .then((profileResp) {
       if (mounted) {
         setState(() {
           _profile = profileResp;
-          _isLoading = false; // Render immediately!
+          _isLoading = false; // 🔥 Card UI appears instantly!
         });
-      }
 
-      // 2. Fetch the heavy stuff asynchronously without blocking the UI
+        // 2. Offload the heavy counts and moments to a background task so it doesn't freeze the animation
+        Future.microtask(
+            () => _loadHeavyProfileData(currentUserId, safeId, profileResp));
+      }
+    }).catchError((e) {
+      debugPrint("Profile load error: $e");
+      if (mounted) setState(() => _isLoading = false);
+    });
+  }
+
+  // --- NEW: FETCH HEAVY DATA IN THE BACKGROUND ---
+  Future<void> _loadHeavyProfileData(String currentUserId, String safeId,
+      Map<String, dynamic>? profileResp) async {
+    try {
+      // 🔥 FIX: Using .select('id') instead of .select('*') stops downloading massive lists of data just to count them!
       final results = await Future.wait<dynamic>([
         supabase
             .from('followers')
-            .select('*')
+            .select('follower_id')
             .eq('following_id', safeId)
             .count(CountOption.exact),
         supabase
             .from('followers')
-            .select()
+            .select('follower_id')
             .eq('follower_id', currentUserId)
             .eq('following_id', safeId)
             .maybeSingle(),
         supabase
             .from('moments')
-            .select('*')
+            .select('id')
             .eq('user_id', safeId)
             .count(CountOption.exact),
         supabase
             .from('followers')
-            .select('*')
+            .select('following_id')
             .eq('follower_id', safeId)
             .count(CountOption.exact),
         supabase
@@ -126,10 +139,12 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
       if (profileResp != null && (!isPrivate || isFollowingStatus || isMe)) {
         fetchedMoments = await supabase
             .from('moments')
-            .select('*, profiles:user_id(username, avatar_url, school_name)')
+            // 🔥 Reduced columns to only what is absolutely needed for the grid to prevent memory crash
+            .select(
+                'id, user_id, media_url, media_type, category, created_at, likes_count, comments_count, profiles:user_id(username, avatar_url, school_name)')
             .eq('user_id', safeId)
             .order('created_at', ascending: false)
-            .limit(30); // 🔥 Limit prevents RAM crash
+            .limit(15); // 🔥 Limit reduced to 15 for instant rendering
       }
 
       if (mounted) {
@@ -144,8 +159,7 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
         });
       }
     } catch (e) {
-      debugPrint("Profile load error: $e");
-      if (mounted) setState(() => _isLoading = false);
+      debugPrint("Heavy Profile data load error: $e");
     }
   }
 

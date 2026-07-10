@@ -416,11 +416,38 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
     bool paymentLaunched = false;
 
     try {
-      // 1. UPLOAD MEDIA
+      // 1. UPLOAD MEDIA (🔥 WITH RETRY AND BYTE-STREAM FIX FOR MOBILE NETWORKS)
       const bucket = 'gist-images';
       final List<String> uploadedUrls = [];
       final List<String> uploadedPaths = [];
       String mediaType = 'image';
+
+      Future<void> uploadWithRetry(
+          XFile file, String path, String contentType) async {
+        int maxRetries = 3;
+        for (int i = 0; i < maxRetries; i++) {
+          try {
+            // 🔥 Fix for "Connection reset by peer" on mobile:
+            // Convert images to bytes first instead of streaming File to prevent socket timeouts
+            if (kIsWeb || contentType.startsWith('image/')) {
+              final bytes = await file.readAsBytes();
+              await supabase.storage.from(bucket).uploadBinary(path, bytes,
+                  fileOptions:
+                      FileOptions(contentType: contentType, upsert: true));
+            } else {
+              // Videos are large, use File stream to avoid RAM crashes (OOM)
+              final f = File(file.path);
+              await supabase.storage.from(bucket).upload(path, f,
+                  fileOptions:
+                      FileOptions(contentType: contentType, upsert: true));
+            }
+            return; // Success!
+          } catch (e) {
+            if (i == maxRetries - 1) throw e;
+            await Future.delayed(const Duration(seconds: 2)); // Wait and retry
+          }
+        }
+      }
 
       if (_pickedVideos.isNotEmpty) {
         mediaType = 'video';
@@ -428,14 +455,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         final ext = video.name.split('.').last.toLowerCase();
         final filePath = 'gists/${const Uuid().v4()}.$ext';
 
-        if (kIsWeb) {
-          final bytes = await video.readAsBytes();
-          await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
-              fileOptions: FileOptions(contentType: 'video/$ext'));
-        } else {
-          final file = File(video.path);
-          await supabase.storage.from(bucket).upload(filePath, file);
-        }
+        await uploadWithRetry(video, filePath, 'video/$ext');
+
         uploadedUrls.add(supabase.storage.from(bucket).getPublicUrl(filePath));
         uploadedPaths.add(filePath);
       } else {
@@ -444,14 +465,8 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
           final ext = image.name.split('.').last;
           final filePath = 'gists/${const Uuid().v4()}.$ext';
 
-          if (kIsWeb) {
-            final bytes = await image.readAsBytes();
-            await supabase.storage.from(bucket).uploadBinary(filePath, bytes,
-                fileOptions: const FileOptions(contentType: 'image/*'));
-          } else {
-            final file = File(image.path);
-            await supabase.storage.from(bucket).upload(filePath, file);
-          }
+          await uploadWithRetry(image, filePath, 'image/*');
+
           uploadedUrls
               .add(supabase.storage.from(bucket).getPublicUrl(filePath));
           uploadedPaths.add(filePath);
@@ -483,8 +498,6 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
         'category': _selectedCategory,
         'payment_reference':
             is100PercentFree ? 'coupon_${_appliedCoupon!['code']}' : reference,
-
-        // 🔥 NEW: Poll and State Engine logic!
         'has_poll': _isPoll,
         'poll_options': _isPoll
             ? _pollOptionControllers
@@ -493,9 +506,16 @@ class _GistSubmissionScreenState extends State<GistSubmissionScreen> {
                 .toList()
             : [],
         'allow_multiple_votes': _allowMultipleVotes,
-        if (_targetAudience == 'State' && _selectedStateId != null)
+
+        // 🔥 CRITICAL FIX: Only attach school/state if it's actually a LOCAL gist!
+        // (This prevents Global Gists from crashing at the database level)
+        if (dbType == 'local' &&
+            _targetAudience == 'State' &&
+            _selectedStateId != null)
           'state_id': int.tryParse(_selectedStateId!),
-        if (_targetAudience == 'University' && _selectedSchoolId != null)
+        if (dbType == 'local' &&
+            _targetAudience == 'University' &&
+            _selectedSchoolId != null)
           'school_id': int.tryParse(_selectedSchoolId!),
       };
 

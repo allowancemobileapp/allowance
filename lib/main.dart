@@ -5,6 +5,7 @@ import 'package:allowance/screens/introduction/reset_password_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
@@ -162,6 +163,19 @@ class _AllowanceAppState extends State<AllowanceApp> {
         });
       }
       return;
+    }
+
+    // 🔥 NEW: Catch Referral Links!
+    if (uri.pathSegments.contains('join')) {
+      final refCode = uri.queryParameters['ref'];
+      if (refCode != null && refCode.isNotEmpty) {
+        // Save the referral code to local storage so the Signup screen can use it
+        SharedPreferences.getInstance().then((prefs) {
+          prefs.setString('pending_referral_code', refCode);
+          developer.log('Saved referral code: $refCode', name: 'DeepLink');
+        });
+      }
+      return; // App will naturally continue to the Introduction/Signup screen
     }
 
     // 2. Handle standard fallback links

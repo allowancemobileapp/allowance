@@ -3,6 +3,7 @@ import 'package:allowance/screens/settings/terms_screen.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/home/home_screen.dart';
@@ -32,6 +33,24 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   bool _obscurePassword = true;
   bool _acceptedTerms = false; // <-- ADD THIS
 
+  @override
+  void initState() {
+    super.initState();
+    _checkPendingReferral();
+  }
+
+  // 🔥 NEW: Checks if they opened the app via a referral link!
+  Future<void> _checkPendingReferral() async {
+    final prefs = await SharedPreferences.getInstance();
+    final code = prefs.getString('pending_referral_code');
+    if (code != null && code.isNotEmpty && mounted) {
+      setState(() {
+        _referralCtl.text = code; // Auto-fill the box!
+        _isSignUp = true; // Auto-flip to the Sign Up screen!
+      });
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // RESTORED: YOUR COMPLETE ORIGINAL LOGIC
   // ---------------------------------------------------------------------------
@@ -49,7 +68,13 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     final supabase = Supabase.instance.client;
     final usernameVal = _usernameCtl.text.trim();
     final emailVal = _emailCtl.text.trim();
-    final referralCode = _referralCtl.text.trim().toLowerCase();
+    final prefs = await SharedPreferences.getInstance();
+
+    // 🔥 FIX: Now automatically pulls from memory if they clicked a link!
+    final referralCode = _referralCtl.text.trim().isNotEmpty
+        ? _referralCtl.text.trim().toLowerCase()
+        : prefs.getString('pending_referral_code')?.toLowerCase() ?? '';
+
     String? referrerId;
 
     try {
@@ -66,7 +91,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           return;
         }
 
-        // 2) CHECK REFERRAL CODE (If provided)
+        // 2) CHECK REFERRAL CODE (If provided via UI or Deep Link)
         if (referralCode.isNotEmpty) {
           final referrer = await supabase
               .from('profiles')
@@ -84,7 +109,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         // 3) SIGN UP
         final signUpRes =
             await supabase.auth.signUp(email: emailVal, password: _pwCtl.text);
-        if (signUpRes.user == null) throw AuthException('Sign up failed');
+        if (signUpRes.user == null) throw const AuthException('Sign up failed');
 
         // 4) UPSERT PROFILE WITH REFERRAL
         await supabase.from('profiles').upsert({
@@ -95,6 +120,9 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           'created_at': DateTime.now().toUtc().toIso8601String(),
           'updated_at': DateTime.now().toUtc().toIso8601String(),
         });
+
+        // Clear memory code since it's now safely in the DB
+        await prefs.remove('pending_referral_code');
 
         await widget.userPreferences.loadPreferences();
         if (mounted) {
@@ -118,10 +146,11 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
       }
     } on AuthException catch (e) {
       String message = e.message;
-      if (message.contains('Invalid login credentials'))
+      if (message.contains('Invalid login credentials')) {
         message = 'Incorrect email or password.';
-      else if (message.contains('User already registered'))
+      } else if (message.contains('User already registered')) {
         message = 'An account with this email already exists.';
+      }
       _showError(message);
     } on PostgrestException catch (e) {
       if (e.code == '23505' || e.message.contains('profiles_username_unique')) {
@@ -139,7 +168,13 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   }
 
   Future<void> _signInWithGoogle() async {
-    final referralCode = _referralCtl.text.trim().toLowerCase();
+    final prefs = await SharedPreferences.getInstance();
+
+    // 🔥 FIX: Pull from memory as fallback
+    final referralCode = _referralCtl.text.trim().isNotEmpty
+        ? _referralCtl.text.trim().toLowerCase()
+        : prefs.getString('pending_referral_code')?.toLowerCase() ?? '';
+
     String? referrerId;
     final supabase = Supabase.instance.client;
 
@@ -159,19 +194,19 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           return;
         }
         referrerId = referrer['id'];
+
+        // Save the ID securely so Edit Profile screen can attach it later
+        if (referrerId != null) {
+          await prefs.setString('pending_referrer_uuid', referrerId);
+        }
       }
 
-      // === 🔥 FIX APPLIED HERE 🔥 ===
       if (kIsWeb) {
-        // Uri.base.origin automatically detects if you are on localhost OR allowanceapp.org
         await supabase.auth.signInWithOAuth(OAuthProvider.google,
             redirectTo: Uri.base.origin,
             queryParams: {'prompt': 'select_account'});
-        // Note: On Web, the browser leaves the app to go to Google.
-        // When it returns, the app restarts and main.dart catches the login!
         return;
       }
-      // ==============================
 
       const webClientId =
           '463313212619-b0fl0uekmftif09otfpnj27cqm9cgrp7.apps.googleusercontent.com';
@@ -203,6 +238,10 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
             .from('profiles')
             .update({'referred_by': referrerId}).eq('id', authRes.user!.id);
       }
+
+      // Clear memory code since it's now safely in the DB
+      await prefs.remove('pending_referral_code');
+      await prefs.remove('pending_referrer_uuid');
 
       await widget.userPreferences.loadPreferences();
       widget.onFinishIntro();

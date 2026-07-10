@@ -38,7 +38,6 @@ import 'dart:developer' as developer;
 import 'package:gal/gal.dart';
 import 'package:video_player/video_player.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
-import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'dart:math';
 import 'package:visibility_detector/visibility_detector.dart';
@@ -92,12 +91,26 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isGistsLoading = true;
   RealtimeChannel? _globalChatChannel;
   bool _isProcessingSubscription = false;
+  // 🔥 NEW: Endless Scroll Variables
+  bool _isLoadingMore = false;
+  bool _hasMoreGists = true;
+  bool _hasMoreMoments = true;
+  int _gistOffset = 0;
+  int _momentOffset = 0;
+  final int _pageSize = 15;
 
   String _gistFilter = 'Moments & Gists';
   final Map<int, int> _gistLikeCounts = {};
   final Set<int> _likedGistIds = {};
   final Set<int> _likedMomentIds = {};
   final ScrollController _scrollController = ScrollController(); // The listener
+  final Set<String> _loadedContentKeys = {};
+  final List<int> _sentContentIds = [];
+  int _currentPage = 1;
+  // 🔥 NEW: Suggested users state
+  List<Map<String, dynamic>> _suggestedUsers = [];
+  bool _isLoadingSuggested = false;
+  final Set<String> _followedUserIds = {};
 // The visibility state
 
   // Fallback images (replace with your own public URLs or storage links)
@@ -137,25 +150,32 @@ class _HomeScreenState extends State<HomeScreen> {
     _prefs = widget.userPreferences ?? UserPreferences();
 
     _scrollController.addListener(() {
+      // Back to top button logic
       if (_scrollController.offset > 300 && !_showBackToTopButton.value) {
         _showBackToTopButton.value = true;
       } else if (_scrollController.offset <= 300 &&
           _showBackToTopButton.value) {
         _showBackToTopButton.value = false;
       }
+
+      // 🔥 FIXED: Endless Scroll Logic - Trigger when 2000 pixels from bottom
+      if (!_isLoadingMore &&
+          _hasMoreGists &&
+          _scrollController.position.pixels >=
+              _scrollController.position.maxScrollExtent - 2000) {
+        developer.log('🔄 Triggering load more...', name: 'scroll');
+        _loadMoreItems();
+      }
     });
 
     _budgetFocusNode.addListener(() => setState(() {}));
     _pageController = PageController(viewportFraction: 0.85);
     _budgetController.text = _prefs.budget?.toString() ?? "";
+
     _fetchGistsAndStartSlideshow();
     _setupGlobalChatListener();
     _recoverPendingSubscription();
-
-    // 🔥 Web App Prompt
     _checkWebInstallPrompt();
-
-    // 🔥 NEW: Check if the user belongs to a school or state yet
     _checkLocationPrompt();
   }
 
@@ -262,48 +282,6 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  // ==========================================
-  // SPEED HACK: CACHE VIDEOS TO PHONE STORAGE
-  // ==========================================
-  Future<void> _initializeVideoControllers() async {
-    int count = 0;
-    for (var gist in _fetchedGists) {
-      if (count >= 2) break; // Limit to 2 videos to prevent Memory Crash!
-      final mediaType = gist['media_type'] as String?;
-
-      if (mediaType == 'video') {
-        final gistId = gist['id'] as int;
-        final videoUrl = (gist['image_url'] as String?) ?? '';
-
-        if (videoUrl.isNotEmpty) {
-          try {
-            var fileInfo =
-                await DefaultCacheManager().getFileFromCache(videoUrl);
-            VideoPlayerController controller;
-
-            if (fileInfo != null) {
-              controller = VideoPlayerController.file(fileInfo.file);
-            } else {
-              controller =
-                  VideoPlayerController.networkUrl(Uri.parse(videoUrl));
-            }
-
-            await controller.initialize();
-            controller.setLooping(true);
-            _videoControllers[gistId] = controller;
-            _isVideoMuted[gistId] = true;
-            count++;
-
-            // 🔥 CRITICAL FIX: Tell the UI the video is ready so it drops the black screen!
-            if (mounted) setState(() {});
-          } catch (e) {
-            debugPrint("Video caching error: $e");
-          }
-        }
-      }
-    }
-  }
-
   // Dispose all video controllers
   void _disposeVideoControllers() {
     for (var controller in _videoControllers.values) {
@@ -314,8 +292,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _handleRefresh() async {
-    await _fetchGistsAndStartSlideshow(); // Refreshes Gists
-    _storiesBarKey.currentState?.refresh(); // Refreshes Stories
+    // Reset everything and start fresh
+    _sentContentIds.clear();
+    _currentPage = 1;
+
+    setState(() {
+      _fetchedGists.clear();
+      _hasMoreGists = true;
+      _hasMoreMoments = true;
+    });
+
+    await _fetchGistsAndStartSlideshow();
+    _storiesBarKey.currentState?.refresh();
   }
 
   // ── NEW: Load like counts and whether current user liked each gist ──
@@ -325,25 +313,39 @@ class _HomeScreenState extends State<HomeScreen> {
     if (user == null) return;
 
     try {
-      final gistIds = gists.map((g) => g['id'] as int).toList();
-      final momentIds = moments.map((m) => m['real_moment_id'] as int).toList();
+      final gistIds = gists
+          .where((g) => g['id'] != null && (g['id'] as int) > 0)
+          .map((g) => g['id'] as int)
+          .toList();
 
-      _likedGistIds.clear();
-      _gistLikeCounts.clear();
-      _likedMomentIds.clear();
+      final momentIds = moments
+          .where((m) => m['real_moment_id'] != null)
+          .map((m) => m['real_moment_id'] as int)
+          .toList();
+
+      // Clear ONLY the entries for items we're about to display
+      // Don't clear everything — that causes flicker
+      for (final id in gistIds) {
+        _gistLikeCounts.remove(id);
+        _likedGistIds.remove(id);
+      }
+      for (final id in momentIds) {
+        _likedMomentIds.remove(id);
+      }
 
       if (gistIds.isNotEmpty) {
         final likesResponse = await supabase
             .from('gist_likes')
             .select('gist_id, user_id')
             .inFilter('gist_id', gistIds);
-        final Map<int, int> countsMap = {};
+
         for (var like in likesResponse) {
           final gid = like['gist_id'] as int;
-          countsMap[gid] = (countsMap[gid] ?? 0) + 1;
-          if (like['user_id'] == user.id) _likedGistIds.add(gid);
+          _gistLikeCounts[gid] = (_gistLikeCounts[gid] ?? 0) + 1;
+          if (like['user_id'].toString() == user.id) {
+            _likedGistIds.add(gid);
+          }
         }
-        _gistLikeCounts.addAll(countsMap);
       }
 
       if (momentIds.isNotEmpty) {
@@ -351,72 +353,490 @@ class _HomeScreenState extends State<HomeScreen> {
             .from('moment_likes')
             .select('moment_id, user_id')
             .inFilter('moment_id', momentIds);
+
         for (var like in momentLikesResponse) {
-          if (like['user_id'] == user.id)
-            _likedMomentIds.add(like['moment_id'] as int);
+          final mid = like['moment_id'] as int;
+          if (like['user_id'].toString() == user.id) {
+            _likedMomentIds.add(mid);
+          }
         }
       }
-    } catch (_) {}
+    } catch (e) {
+      developer.log('Like load error: $e', name: 'likes');
+    }
   }
 
-  // ── NEW: Toggle like ──
+  // ── NEW: Toggle like (Optimistic UI Update for Instant Feedback) ──
   Future<void> _toggleLike(int id, bool isMoment) async {
     final user = supabase.auth.currentUser;
     if (user == null) return;
 
+    final bool wasLiked =
+        isMoment ? _likedMomentIds.contains(id) : _likedGistIds.contains(id);
+
+    // 1. OPTIMISTIC UPDATE — update UI immediately
+    setState(() {
+      if (isMoment) {
+        final momentIndex = _fetchedGists.indexWhere(
+            (g) => g['is_moment'] == true && g['real_moment_id'] == id);
+        if (wasLiked) {
+          _likedMomentIds.remove(id);
+          if (momentIndex != -1) {
+            final current = _fetchedGists[momentIndex]['likes_count'] ?? 1;
+            _fetchedGists[momentIndex]['likes_count'] =
+                (current - 1).clamp(0, 999999);
+          }
+        } else {
+          _likedMomentIds.add(id);
+          if (momentIndex != -1) {
+            final current = _fetchedGists[momentIndex]['likes_count'] ?? 0;
+            _fetchedGists[momentIndex]['likes_count'] = current + 1;
+          }
+        }
+      } else {
+        if (wasLiked) {
+          _likedGistIds.remove(id);
+          _gistLikeCounts[id] =
+              ((_gistLikeCounts[id] ?? 1) - 1).clamp(0, 999999);
+        } else {
+          _likedGistIds.add(id);
+          _gistLikeCounts[id] = (_gistLikeCounts[id] ?? 0) + 1;
+        }
+      }
+    });
+
+    // 2. NETWORK CALL — do it quietly in background
     try {
       if (isMoment) {
-        final isLiked = _likedMomentIds.contains(id);
-        final gistIndex = _fetchedGists.indexWhere(
-            (g) => g['is_moment'] == true && g['real_moment_id'] == id);
-
-        if (isLiked) {
+        if (wasLiked) {
           await supabase
               .from('moment_likes')
               .delete()
               .eq('moment_id', id)
               .eq('user_id', user.id);
-          _likedMomentIds.remove(id);
-          if (gistIndex != -1)
-            _fetchedGists[gistIndex]['likes_count'] =
-                (_fetchedGists[gistIndex]['likes_count'] ?? 1) - 1;
         } else {
           await supabase
               .from('moment_likes')
               .insert({'moment_id': id, 'user_id': user.id});
-          _likedMomentIds.add(id);
-          if (gistIndex != -1)
-            _fetchedGists[gistIndex]['likes_count'] =
-                (_fetchedGists[gistIndex]['likes_count'] ?? 0) + 1;
         }
       } else {
-        final isLiked = _likedGistIds.contains(id);
-        if (isLiked) {
+        if (wasLiked) {
           await supabase
               .from('gist_likes')
               .delete()
               .eq('gist_id', id)
               .eq('user_id', user.id);
-          _likedGistIds.remove(id);
-          _gistLikeCounts[id] = (_gistLikeCounts[id] ?? 1) - 1;
         } else {
           await supabase
               .from('gist_likes')
               .insert({'gist_id': id, 'user_id': user.id});
-          _likedGistIds.add(id);
-          _gistLikeCounts[id] = (_gistLikeCounts[id] ?? 0) + 1;
         }
       }
-      if (mounted) setState(() {});
     } catch (e) {
-      debugPrint('Like error: $e');
+      developer.log('Like error: $e', name: 'likes');
+      // Rollback on error
+      if (mounted) {
+        setState(() {
+          if (isMoment) {
+            final momentIndex = _fetchedGists.indexWhere(
+                (g) => g['is_moment'] == true && g['real_moment_id'] == id);
+            if (wasLiked) {
+              _likedMomentIds.add(id);
+              if (momentIndex != -1) {
+                final current = _fetchedGists[momentIndex]['likes_count'] ?? 0;
+                _fetchedGists[momentIndex]['likes_count'] = current + 1;
+              }
+            } else {
+              _likedMomentIds.remove(id);
+              if (momentIndex != -1) {
+                final current = _fetchedGists[momentIndex]['likes_count'] ?? 1;
+                _fetchedGists[momentIndex]['likes_count'] =
+                    (current - 1).clamp(0, 999999);
+              }
+            }
+          } else {
+            if (wasLiked) {
+              _likedGistIds.add(id);
+              _gistLikeCounts[id] = (_gistLikeCounts[id] ?? 0) + 1;
+            } else {
+              _likedGistIds.remove(id);
+              _gistLikeCounts[id] =
+                  ((_gistLikeCounts[id] ?? 1) - 1).clamp(0, 999999);
+            }
+          }
+        });
+      }
     }
   }
 
   Future<void> _fetchGistsAndStartSlideshow() async {
-    setState(() => _isGistsLoading = true);
+    // Reset pagination state
+    _sentContentIds.clear();
+    _currentPage = 1;
+
+    setState(() {
+      _isGistsLoading = true;
+      _hasMoreGists = true;
+      _hasMoreMoments = true;
+      _fetchedGists.clear();
+    });
+
+    await _loadMoreItems(isInitialLoad: true);
+  }
+
+  // 🔥 NEW: Endless Scroll Data Fetcher
+
+  // Track which content IDs we've already sent to the server to exclude
+
+  Future<void> _loadMoreItems({bool isInitialLoad = false}) async {
+    if (_isLoadingMore) return;
+
+    if (mounted && !isInitialLoad) {
+      setState(() => _isLoadingMore = true);
+    }
+    if (mounted && isInitialLoad) {
+      setState(() {
+        _isGistsLoading = true;
+        _sentContentIds.clear();
+        _currentPage = 1;
+      });
+    }
+
+    try {
+      final user = supabase.auth.currentUser;
+
+      // 🔥 FIX: Handle null user gracefully
+      if (user == null) {
+        await _loadLegacyFeed(isInitialLoad: isInitialLoad);
+        return;
+      }
+
+      final sidStr = _prefs.schoolId;
+      final isStateMode = sidStr != null && sidStr.startsWith('STATE_');
+      final actualStateId =
+          isStateMode ? sidStr.replaceAll('STATE_', '') : null;
+      final actualSchoolId = !isStateMode ? sidStr : null;
+
+      // Get muted categories
+      List<String> mutedCats = [];
+      try {
+        final profile = await supabase
+            .from('profiles')
+            .select('muted_categories')
+            .eq('id', user.id)
+            .maybeSingle();
+        if (profile != null && profile['muted_categories'] != null) {
+          mutedCats = List<String>.from(profile['muted_categories']);
+        }
+      } catch (_) {
+        // Ignore profile fetch errors
+      }
+
+      // Call smart feed edge function
+      final response = await supabase.functions.invoke(
+        'smart-feed',
+        body: {
+          'user_id': user.id,
+          'school_id':
+              actualSchoolId != null ? int.tryParse(actualSchoolId) : null,
+          'state_id':
+              actualStateId != null ? int.tryParse(actualStateId) : null,
+          'is_state_mode': isStateMode,
+          'page': _currentPage,
+          'page_size': _pageSize,
+          'muted_categories': mutedCats,
+          'gist_filter': _gistFilter,
+          'exclude_ids': _sentContentIds,
+        },
+      );
+
+      if (response.status != 200 || response.data == null) {
+        throw Exception('Smart feed failed: status=${response.status}');
+      }
+
+      final data = response.data as Map<String, dynamic>;
+      final List<dynamic> feed = data['feed'] ?? [];
+      final bool hasMore = data['has_more'] ?? false;
+
+      developer.log(
+        '🎯 Smart Feed | page=$_currentPage | returned=${feed.length} | hasMore=$hasMore',
+        name: 'smart_feed',
+      );
+
+      // Convert feed items
+      final List<Map<String, dynamic>> newItems = [];
+      for (final rawItem in feed) {
+        final g = rawItem as Map<String, dynamic>;
+        _sentContentIds.add(g['id'] as int);
+
+        final rawProfiles = g['profiles'];
+        Map<String, dynamic> profiles = {
+          'username': 'User',
+          'avatar_url': '',
+          'bio': '',
+          'school_name': '',
+        };
+
+        if (rawProfiles is Map) {
+          final rp = Map<String, dynamic>.from(rawProfiles);
+          profiles = {
+            'username': rp['username']?.toString() ?? 'User',
+            'avatar_url': rp['avatar_url']?.toString() ?? '',
+            'bio': rp['bio']?.toString() ?? '',
+            'school_name': rp['school_name']?.toString() ?? '',
+          };
+        }
+
+        if (g['is_moment'] == true) {
+          newItems.add({
+            'id': g['id'],
+            'is_moment': true,
+            'real_moment_id': g['real_moment_id'],
+            'user_id': g['user_id'],
+            'title': g['title'] ?? '',
+            'image_url': g['image_url'] ?? '',
+            'image_urls': g['image_urls'] ?? [],
+            'media_type': g['media_type'] ?? 'image',
+            'type': g['type'] ?? 'local',
+            'created_at': g['created_at'],
+            'category': g['category'] ?? 'Random',
+            'profiles': profiles,
+            'likes_count': g['likes_count'] ?? 0,
+            'comments_count': g['comments_count'] ?? 0,
+          });
+        } else {
+          newItems.add({
+            'id': g['id'],
+            'user_id': g['user_id'],
+            'title': g['title'] ?? '',
+            'image_url': g['image_url'] ?? '',
+            'image_urls': g['image_urls'] ?? [],
+            'media_type': g['media_type'] ?? 'image',
+            'type': g['type'] ?? 'global',
+            'school_id': g['school_id'],
+            'state_id': g['state_id'],
+            'url': g['url'],
+            'created_at': g['created_at'],
+            'category': g['category'] ?? 'Random',
+            'has_poll': g['has_poll'] ?? false,
+            'poll_options': g['poll_options'],
+            'allow_multiple_votes': g['allow_multiple_votes'] ?? false,
+            'profiles': profiles,
+          });
+        }
+      }
+
+      // Load like states
+      if (newItems.isNotEmpty) {
+        final gistsList =
+            newItems.where((g) => g['is_moment'] != true).toList();
+        final momentsList =
+            newItems.where((g) => g['is_moment'] == true).toList();
+        await _loadGistLikes(gistsList, momentsList);
+      }
+
+      if (mounted) {
+        setState(() {
+          if (isInitialLoad) {
+            _fetchedGists = newItems;
+          } else {
+            _fetchedGists.addAll(newItems);
+          }
+          _isGistsLoading = false;
+          _isLoadingMore = false;
+          _hasMoreGists = hasMore;
+          _hasMoreMoments = hasMore;
+        });
+      }
+
+      if (hasMore) {
+        _currentPage++;
+      }
+
+      // Fetch suggested users
+      if (mounted && _suggestedUsers.isEmpty) {
+        _fetchSuggestedUsers();
+      }
+
+      // Fallback if completely empty
+      if (isInitialLoad && newItems.isEmpty && mounted) {
+        setState(() => _fetchedGists = List.from(_fallbackGists));
+      }
+    } catch (e, stackTrace) {
+      developer.log('Smart feed error: $e\n$stackTrace', name: 'smart_feed');
+
+      // 🔥 CRITICAL FIX: Always reset loading state on error
+      if (mounted) {
+        setState(() {
+          _isGistsLoading = false;
+          _isLoadingMore = false;
+        });
+      }
+
+      // Try legacy feed as fallback
+      await _loadLegacyFeed(isInitialLoad: isInitialLoad);
+    }
+  }
+
+  // 🔥 NEW: Fetch suggested users (friends of friends / same school / mutuals)
+  // 🔥 NEW: Fetch suggested users (friends of friends / same school / mutuals)
+  Future<void> _fetchSuggestedUsers() async {
+    if (_isLoadingSuggested) return;
+    setState(() => _isLoadingSuggested = true);
+
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) return;
+
+      final myId = user.id;
+      final sidStr = _prefs.schoolId;
+      final isStateMode = sidStr != null && sidStr.startsWith('STATE_');
+      final actualStateId =
+          isStateMode ? sidStr.replaceAll('STATE_', '') : null;
+      final actualSchoolId = !isStateMode ? sidStr : null;
+
+      // Step 1: Get who I follow
+      final myFollowingResp = await supabase
+          .from('followers')
+          .select('following_id')
+          .eq('follower_id', myId);
+
+      final followingIds = (myFollowingResp as List<dynamic>)
+          .map((f) => f['following_id'] as String)
+          .toSet();
+      followingIds.add(myId);
+
+      // Step 2: Get friends of friends
+      List<String> fofIds = [];
+      if (followingIds.isNotEmpty) {
+        // Build the "not in" string for following_ids
+        final notInList = followingIds.toList();
+
+        var fofQuery = supabase
+            .from('followers')
+            .select('following_id')
+            .inFilter('follower_id', followingIds.toList());
+
+        // Use neq to exclude already-followed users
+        if (notInList.isNotEmpty) {
+          fofQuery =
+              fofQuery.not('following_id', 'in', '(${notInList.join(',')})');
+        }
+
+        final fofResp = await fofQuery.limit(50);
+
+        fofIds = (fofResp as List<dynamic>)
+            .map((f) => f['following_id'] as String)
+            .where((id) => !followingIds.contains(id))
+            .toSet()
+            .toList();
+      }
+
+      // Step 3: Get same-school / same-state users if needed
+      List<Map<String, dynamic>> schoolUsers = [];
+      if (fofIds.length < 6) {
+        var schoolQuery = supabase
+            .from('profiles')
+            .select(
+                'id, username, avatar_url, bio, school_name, subscription_tier')
+            .neq('id', myId);
+
+        // Exclude already followed users
+        if (followingIds.isNotEmpty) {
+          schoolQuery =
+              schoolQuery.not('id', 'in', '(${followingIds.join(',')})');
+        }
+
+        if (isStateMode && actualStateId != null) {
+          schoolQuery =
+              schoolQuery.eq('state_id', int.tryParse(actualStateId) ?? 0);
+        } else if (actualSchoolId != null) {
+          schoolQuery = schoolQuery.eq('school_id', actualSchoolId);
+        }
+
+        final su = await schoolQuery.limit(20);
+        schoolUsers = (su as List<dynamic>).cast<Map<String, dynamic>>();
+      }
+
+      // Step 4: Combine and prioritize
+      List<Map<String, dynamic>> suggested = [];
+
+      if (fofIds.isNotEmpty) {
+        final fofProfilesResp = await supabase
+            .from('profiles')
+            .select(
+                'id, username, avatar_url, bio, school_name, subscription_tier')
+            .inFilter('id', fofIds.take(20).toList());
+
+        final fofProfiles =
+            (fofProfilesResp as List<dynamic>).cast<Map<String, dynamic>>();
+
+        // Count mutuals for each
+        for (var profile in fofProfiles) {
+          final pid = profile['id'] as String;
+
+          final mutualsResp = await supabase
+              .from('followers')
+              .select('follower_id')
+              .eq('following_id', pid)
+              .inFilter('follower_id', followingIds.toList());
+
+          final count = (mutualsResp as List<dynamic>).length;
+          profile['mutual_count'] = count;
+          suggested.add(profile);
+        }
+
+        suggested.sort((a, b) =>
+            (b['mutual_count'] ?? 0).compareTo(a['mutual_count'] ?? 0));
+      }
+
+      // Fill remaining slots with same-school users
+      final existingIds = suggested.map((s) => s['id'] as String).toSet();
+      for (var su in schoolUsers) {
+        if (!existingIds.contains(su['id'])) {
+          su['mutual_count'] = 0;
+          suggested.add(su);
+          existingIds.add(su['id'] as String);
+        }
+        if (suggested.length >= 12) break;
+      }
+
+      if (mounted) {
+        setState(() {
+          _suggestedUsers = suggested.take(12).toList();
+          _isLoadingSuggested = false;
+        });
+      }
+    } catch (e) {
+      developer.log('Suggested users error: $e', name: 'suggestions');
+      if (mounted) setState(() => _isLoadingSuggested = false);
+    }
+  }
+
+  // 🔥 NEW: Follow a user from suggestions
+  Future<void> _followUser(String userId) async {
+    try {
+      final user = supabase.auth.currentUser;
+      if (user == null) return;
+
+      await supabase.from('followers').insert({
+        'follower_id': user.id,
+        'following_id': userId,
+      });
+
+      setState(() => _followedUserIds.add(userId));
+    } catch (e) {
+      developer.log('Follow error: $e', name: 'follow');
+    }
+  }
+
+  // 🔥 LEGACY FEED (kept as fallback)
+  Future<void> _loadLegacyFeed({bool isInitialLoad = false}) async {
     try {
       final sidStr = _prefs.schoolId;
+      final isStateMode = sidStr != null && sidStr.startsWith('STATE_');
+      final actualStateId =
+          isStateMode ? sidStr.replaceAll('STATE_', '') : null;
       final myId = supabase.auth.currentUser?.id;
 
       List<String> mutedCats = [];
@@ -431,22 +851,33 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      final List<Map<String, dynamic>> rawGists = await supabase
-          .from('gists')
-          .select('''
-            id, user_id, title, image_url, image_urls, media_type, type, school_id, state_id, url, created_at, category, has_poll, poll_options, allow_multiple_votes,
-            profiles:user_id (username, avatar_url, bio, school_name) 
-          ''')
-          .eq('paid', true)
-          .eq('status', 'active')
-          .order('created_at', ascending: false)
-          .limit(30);
+      List<Map<String, dynamic>> rawGists = [];
+      if (_hasMoreGists) {
+        rawGists = await supabase
+            .from('gists')
+            .select(
+                'id, user_id, title, image_url, image_urls, media_type, type, school_id, state_id, url, created_at, category, has_poll, poll_options, allow_multiple_votes, profiles:user_id (username, avatar_url, bio, school_name)')
+            .eq('paid', true)
+            .eq('status', 'active')
+            .order('created_at', ascending: false)
+            .range(_gistOffset, _gistOffset + _pageSize - 1);
 
-      final List<Map<String, dynamic>> rawMoments =
-          await supabase.from('moments').select('''
-            id, user_id, caption, media_url, media_type, created_at, category, likes_count, comments_count,
-            profiles:user_id (username, avatar_url, bio, school_id, school_name)
-          ''').order('created_at', ascending: false).limit(30);
+        if (rawGists.length < _pageSize) _hasMoreGists = false;
+        _gistOffset += _pageSize;
+      }
+
+      List<Map<String, dynamic>> rawMoments = [];
+      if (_hasMoreMoments) {
+        rawMoments = await supabase
+            .from('moments')
+            .select(
+                'id, user_id, caption, media_url, media_type, created_at, category, likes_count, comments_count, profiles:user_id (username, avatar_url, bio, school_id, school_name, state_id)')
+            .order('created_at', ascending: false)
+            .range(_momentOffset, _momentOffset + _pageSize - 1);
+
+        if (rawMoments.length < _pageSize) _hasMoreMoments = false;
+        _momentOffset += _pageSize;
+      }
 
       List<Map<String, dynamic>> finalGists = [];
       List<Map<String, dynamic>> finalMoments = [];
@@ -455,14 +886,22 @@ class _HomeScreenState extends State<HomeScreen> {
         bool match = false;
         final type = (g['type'] ?? '').toString().toLowerCase();
         if (type == 'global') match = true;
-        if (type == 'local' && g['school_id']?.toString() == sidStr)
-          match = true;
+        if (type == 'local') {
+          if (!isStateMode && g['school_id']?.toString() == sidStr)
+            match = true;
+          if (isStateMode && g['state_id']?.toString() == actualStateId)
+            match = true;
+        }
         if (match && !mutedCats.contains(g['category'])) finalGists.add(g);
       }
 
       for (var m in rawMoments) {
         final mSchoolId = m['profiles']?['school_id']?.toString();
-        if (mSchoolId == sidStr && !mutedCats.contains(m['category'])) {
+        final mStateId = m['profiles']?['state_id']?.toString();
+        bool match = false;
+        if (!isStateMode && mSchoolId == sidStr) match = true;
+        if (isStateMode && mStateId == actualStateId) match = true;
+        if (match && !mutedCats.contains(m['category'])) {
           finalMoments.add({
             'id': -(m['id'] as int),
             'is_moment': true,
@@ -482,10 +921,8 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      // 🔥 1. Load likes BEFORE scattering so we know which ones you've seen/liked
       await _loadGistLikes(finalGists, finalMoments);
 
-      // 🔥 2. Separate moments into "Fresh" and "Seen/Liked"
       List<Map<String, dynamic>> unlikedMoments = [];
       List<Map<String, dynamic>> likedMoments = [];
 
@@ -497,46 +934,40 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      // 3. Sort Gists by date normally
       finalGists.sort((a, b) => DateTime.parse(b['created_at'])
           .compareTo(DateTime.parse(a['created_at'])));
-
-      // 4. Shuffle moments independently
       unlikedMoments.shuffle(Random());
       likedMoments.shuffle(Random());
 
-      // 5. Scatter UNLIKED (Fresh) moments randomly among the Gists
       List<Map<String, dynamic>> combined = List.from(finalGists);
       for (var m in unlikedMoments) {
-        // Insert in the top 70% of the feed
         int maxInsertIndex = (combined.length * 0.7).toInt();
         if (maxInsertIndex < 1) maxInsertIndex = combined.length;
         final randomPos =
             combined.isEmpty ? 0 : Random().nextInt(maxInsertIndex + 1);
         combined.insert(randomPos, m);
       }
-
-      // 6. Push LIKED (Seen) moments to the very bottom
       combined.addAll(likedMoments);
 
       if (mounted) {
         setState(() {
-          _fetchedGists = combined;
+          _fetchedGists.addAll(combined);
           _isGistsLoading = false;
+          _isLoadingMore = false;
         });
       }
 
-      // 7. Initialize videos (This will now trigger the thumbnail to show!)
-      await _initializeVideoControllers();
-
-      if (_fetchedGists.isEmpty)
+      if (isInitialLoad && _fetchedGists.isEmpty) {
         setState(() => _fetchedGists = List.from(_fallbackGists));
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         setState(() {
           _isGistsLoading = false;
-          _fetchedGists = List.from(_fallbackGists);
+          _isLoadingMore = false;
+          if (isInitialLoad) _fetchedGists = List.from(_fallbackGists);
         });
+      }
     }
   }
 
@@ -553,24 +984,74 @@ class _HomeScreenState extends State<HomeScreen> {
           _fetchedGists.where((g) => g['category'] == _gistFilter).toList();
     }
 
-    if (_isGistsLoading) {
+    if (_isGistsLoading && _fetchedGists.isEmpty) {
       return const SliverToBoxAdapter(
         child: Padding(
-            padding: EdgeInsets.only(top: 40.0),
-            child: Center(
-                child: CircularProgressIndicator(color: Color(0xFF4CAF50)))),
+          padding: EdgeInsets.only(top: 40.0),
+          child: Center(
+            child: CircularProgressIndicator(color: Color(0xFF4CAF50)),
+          ),
+        ),
       );
     }
 
-    if (filteredGists.isEmpty)
-      return const SliverToBoxAdapter(child: SizedBox());
+    if (filteredGists.isEmpty) {
+      return SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.only(top: 60.0),
+          child: Center(
+            child: Column(
+              children: [
+                Icon(Icons.inbox, color: Colors.white24, size: 48),
+                const SizedBox(height: 16),
+                Text(
+                  _gistFilter == 'Just Gists'
+                      ? 'No gists available'
+                      : _gistFilter == 'Moments & Gists' || _gistFilter == 'All'
+                          ? 'No content available'
+                          : 'No $_gistFilter content available',
+                  style: const TextStyle(color: Colors.white54, fontSize: 16),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // 🔥 Build the list with suggested users injected every 5 posts
+    final List<dynamic> displayItems = [];
+    for (int i = 0; i < filteredGists.length; i++) {
+      displayItems.add(filteredGists[i]);
+      // After every 5 posts, inject a suggested users row
+      if ((i + 1) % 5 == 0 && _suggestedUsers.isNotEmpty) {
+        displayItems.add({'type': 'suggested_users', 'id': 'suggested_$i'});
+      }
+    }
 
     return SliverPadding(
       padding: const EdgeInsets.only(bottom: 40, top: 0),
       sliver: SliverList.builder(
-        itemCount: filteredGists.length,
+        itemCount: displayItems.length + (_isLoadingMore ? 1 : 0),
         itemBuilder: (ctx, idx) {
-          final gist = filteredGists[idx];
+          // Loading indicator at bottom
+          if (idx == displayItems.length) {
+            return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24.0),
+              child: Center(
+                child: CircularProgressIndicator(color: Color(0xFF4CAF50)),
+              ),
+            );
+          }
+
+          final item = displayItems[idx];
+
+          // 🔥 Render suggested users row
+          if (item is Map && item['type'] == 'suggested_users') {
+            return _buildSuggestedUsersRow();
+          }
+
+          final gist = item as Map<String, dynamic>;
           final gistId = (gist['id'] is int)
               ? gist['id'] as int
               : int.tryParse(gist['id'].toString()) ?? 0;
@@ -578,31 +1059,264 @@ class _HomeScreenState extends State<HomeScreen> {
           final isMoment = gist['is_moment'] == true;
           final realId = isMoment ? gist['real_moment_id'] as int : gistId;
 
-          return _GistItemCard(
-            key: ValueKey(gistId),
-            gist: gist,
-            gistId: realId,
-            videoController: _videoControllers[gistId],
-            isMutedInitial: _isVideoMuted[gistId] ?? true,
-            likeCount: isMoment
-                ? (gist['likes_count'] ?? 0)
-                : (_gistLikeCounts[realId] ?? 0),
-            isLiked: isMoment
-                ? _likedMomentIds.contains(realId)
-                : _likedGistIds.contains(realId),
-            onToggleLike: () => _toggleLike(realId, isMoment),
-            onShowComments: () => isMoment
-                ? _showMomentCommentsSheet(realId.toString())
-                : _showCommentsSheet(realId.toString()),
-            onDownload: _downloadGistImage,
-            onToggleMute: (muted) => _isVideoMuted[gistId] = muted,
-            themeColor: themeColor,
-            prefs: _prefs,
-            allFeedItems: filteredGists,
+          return VisibilityDetector(
+            key: Key('feed_item_$realId'),
+            onVisibilityChanged: (info) {
+              if (info.visibleFraction > 0.5) {
+                _trackContentView(realId, isMoment);
+              }
+            },
+            child: _GistItemCard(
+              key: ValueKey('item_$realId'),
+              gist: gist,
+              gistId: realId,
+              videoController: _videoControllers[gistId],
+              isMutedInitial: _isVideoMuted[gistId] ?? true,
+              likeCount: isMoment
+                  ? (gist['likes_count'] ?? 0)
+                  : (_gistLikeCounts[realId] ?? 0),
+              isLiked: isMoment
+                  ? _likedMomentIds.contains(realId)
+                  : _likedGistIds.contains(realId),
+              onToggleLike: () => _toggleLike(realId, isMoment),
+              onShowComments: () => isMoment
+                  ? _showMomentCommentsSheet(realId.toString())
+                  : _showCommentsSheet(realId.toString()),
+              onDownload: _downloadGistImage,
+              onToggleMute: (muted) => _isVideoMuted[gistId] = muted,
+              themeColor: themeColor,
+              prefs: _prefs,
+              allFeedItems: filteredGists,
+            ),
           );
         },
       ),
     );
+  }
+
+  // 🔥 NEW: Instagram-style suggested users horizontal row
+  // 🔥 NEW: Instagram-style suggested users horizontal row
+  Widget _buildSuggestedUsersRow() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 12),
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E1E1E),
+        border: Border(
+          top: BorderSide(color: Colors.white.withOpacity(0.05)),
+          bottom: BorderSide(color: Colors.white.withOpacity(0.05)),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.people_outline, color: themeColor, size: 18),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Suggested for you',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                GestureDetector(
+                  onTap: () {
+                    setState(() => _selectedIndex = 1);
+                  },
+                  child: Text(
+                    'See All',
+                    style: TextStyle(
+                      color: themeColor,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          // Horizontal scrollable cards
+          SizedBox(
+            height: 185,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              itemCount: _suggestedUsers.length,
+              itemBuilder: (ctx, index) {
+                final user = _suggestedUsers[index];
+                final userId = user['id'] as String;
+                final username = user['username']?.toString() ?? 'User';
+                final avatarUrl = user['avatar_url']?.toString();
+                final schoolName = user['school_name']?.toString() ?? '';
+                final isPlus = user['subscription_tier'] == 'Membership';
+                final mutualCount = user['mutual_count'] ?? 0;
+                final isFollowed = _followedUserIds.contains(userId);
+
+                return Container(
+                  width: 140,
+                  margin: const EdgeInsets.symmetric(horizontal: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2A2A2A),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.white.withOpacity(0.08)),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const SizedBox(height: 12),
+                      // 🔥 AVATAR — now tappable
+                      GestureDetector(
+                        onTap: () {
+                          if (userId.isNotEmpty) {
+                            UniversalProfileCard.show(context, userId, _prefs);
+                          }
+                        },
+                        child: Stack(
+                          children: [
+                            CircleAvatar(
+                              radius: 32,
+                              backgroundColor: Colors.grey[800],
+                              backgroundImage:
+                                  (avatarUrl != null && avatarUrl.isNotEmpty)
+                                      ? CachedNetworkImageProvider(avatarUrl)
+                                      : null,
+                              child: (avatarUrl == null || avatarUrl.isEmpty)
+                                  ? Text(
+                                      username.isNotEmpty
+                                          ? username[0].toUpperCase()
+                                          : '?',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    )
+                                  : null,
+                            ),
+                            if (isPlus)
+                              Positioned(
+                                bottom: 0,
+                                right: 0,
+                                child: Container(
+                                  padding: const EdgeInsets.all(3),
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFF2A2A2A),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(
+                                    Icons.verified,
+                                    color: Colors.amber,
+                                    size: 14,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      // 🔥 USERNAME — now tappable
+                      GestureDetector(
+                        onTap: () {
+                          if (userId.isNotEmpty) {
+                            UniversalProfileCard.show(context, userId, _prefs);
+                          }
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: Text(
+                            '@$username',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      // Mutual friends or school
+                      Text(
+                        mutualCount > 0
+                            ? '$mutualCount mutual friend${mutualCount > 1 ? 's' : ''}'
+                            : (schoolName.isNotEmpty
+                                ? schoolName
+                                : 'Suggested'),
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.5),
+                          fontSize: 10,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                      ),
+                      const SizedBox(height: 10),
+                      // Follow button
+                      GestureDetector(
+                        onTap: isFollowed ? null : () => _followUser(userId),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 20, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: isFollowed
+                                ? Colors.white.withOpacity(0.1)
+                                : themeColor,
+                            borderRadius: BorderRadius.circular(20),
+                            border: isFollowed
+                                ? Border.all(
+                                    color: Colors.white.withOpacity(0.2))
+                                : null,
+                          ),
+                          child: Text(
+                            isFollowed ? 'Following' : 'Follow',
+                            style: TextStyle(
+                              color: isFollowed ? Colors.white70 : Colors.black,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _trackContentView(int contentId, bool isMoment) {
+    final user = supabase.auth.currentUser;
+    if (user == null) return;
+
+    supabase
+        .from('user_views')
+        .upsert({
+          'user_id': user.id,
+          'content_type': isMoment ? 'moment' : 'gist',
+          'content_id': contentId,
+          'viewed_at': DateTime.now().toIso8601String(),
+        }, onConflict: 'user_id,content_type,content_id')
+        .then((_) {})
+        .catchError((_) {});
   }
 
   // --- NEW: MANDATORY LOCATION PROMPT ---
@@ -938,7 +1652,6 @@ class _HomeScreenState extends State<HomeScreen> {
           borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
       builder: (ctx) {
         return FutureBuilder<List<dynamic>>(
-            // 🔥 FIX: Sorted A to Z
             future: supabase
                 .from('states')
                 .select('id, name')
@@ -1001,17 +1714,18 @@ class _HomeScreenState extends State<HomeScreen> {
                           onPressed: () async {
                             final selectedState = states[selectedIndex];
 
-                            // 🔥 FIX: Saves it explicitly so it is remembered forever!
-                            _prefs.schoolId = "STATE_${selectedState['id']}";
+                            final stateCode = "STATE_${selectedState['id']}";
+                            _prefs.schoolId = stateCode;
                             _prefs.schoolName = selectedState['name'];
                             await _prefs.savePreferences();
 
                             final myId = supabase.auth.currentUser?.id;
                             if (myId != null) {
+                              // 🔥 FIX: Save the STATE_ID format to school_id so the database remembers it!
                               supabase
                                   .from('profiles')
                                   .update({
-                                    'school_id': null,
+                                    'school_id': stateCode,
                                     'school_name': selectedState['name'],
                                     'state_id': selectedState['id']
                                   })
@@ -3335,6 +4049,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // --- 2. SUBSCRIBE TO MEMBERSHIP (FAILOVER LOGIC) ---
+  // --- 2. SUBSCRIBE TO MEMBERSHIP (FAILOVER LOGIC) ---
   Future<void> _subscribeToMembership(
       BuildContext context, StateSetter setModalState) async {
     setModalState(() => _isProcessingSubscription = true);
@@ -3346,74 +4061,64 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    final reference = 'sub_${DateTime.now().millisecondsSinceEpoch}';
+    // 🔥 FIX: Embed user.id into reference for webhook safety!
+    final reference = 'sub_${user.id}_${DateTime.now().millisecondsSinceEpoch}';
     final int amountNaira = 700;
     String gateway = 'paystack';
     String? authUrlString;
 
     try {
-      // === ATTEMPT PAYSTACK FIRST ===
-      final paystackPayload = {
-        'amount': amountNaira * 100, // Paystack uses Kobo
-        'email': user.email ?? 'user@allowance.com',
-        'reference': reference,
-        'plan': 'PLN_2tgtzyaurt8qz0d',
-        'metadata': {'plan_code': 'PLN_2tgtzyaurt8qz0d', 'user_id': user.id}
-      };
+      // === ATTEMPT PAYSTACK FIRST VIA EDGE FUNCTION ===
+      final payResp = await supabase.functions.invoke(
+        'paystack-init',
+        body: {
+          'amount': amountNaira * 100, // Paystack uses Kobo
+          'email': user.email ?? 'user@allowance.com',
+          'reference': reference,
+          'metadata': {
+            'plan_code': 'PLN_2tgtzyaurt8qz0d',
+            'user_id': user.id,
+            'plan_type': 'Membership' // Read by paystack-webhook
+          }
+        },
+      );
 
-      final resp = await http
-          .post(
-            Uri.parse('https://api.paystack.co/transaction/initialize'),
-            headers: {
-              'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}',
-              'Content-Type': 'application/json'
-            },
-            body: jsonEncode(paystackPayload),
-          )
-          .timeout(const Duration(seconds: 8));
-
-      if (resp.statusCode == 200) {
-        authUrlString = jsonDecode(resp.body)['data']['authorization_url'];
+      final data =
+          payResp.data is String ? jsonDecode(payResp.data) : payResp.data;
+      if (payResp.status == 200 && data != null && data['data'] != null) {
+        authUrlString = data['data']['authorization_url'];
       } else {
         throw 'Paystack unavailable';
       }
     } catch (e) {
-      // === FAILOVER TO FLUTTERWAVE ===
+      // === FAILOVER TO FLUTTERWAVE VIA EDGE FUNCTION ===
       debugPrint('Paystack failed. Rerouting to Flutterwave... Error: $e');
       gateway = 'flutterwave';
 
-      final flwPayload = {
-        'tx_ref': reference,
-        'amount': amountNaira.toString(),
-        'currency': 'NGN',
-        'redirect_url': 'https://allowanceapp.org',
-        'customer': {'email': user.email ?? 'user@allowance.com'},
-        'payment_plan': dotenv.env['FLW_PLAN_ID'] ?? '',
-        // 🔥 FIX: Added 'plan_code' so the Webhook knows to upgrade the user!
-        'meta': {
-          'user_id': user.id,
-          'plan_code': dotenv.env['FLW_PLAN_ID'] ?? 'Allowance_Plus'
-        },
-        'customizations': {
-          'title': 'Allowance Plus',
-          'description': 'Subscription payment'
-        }
-      };
-
       try {
-        final flwResp = await http.post(
-          Uri.parse('https://api.flutterwave.com/v3/payments'),
-          headers: {
-            'Authorization': 'Bearer ${dotenv.env['FLW_SECRET_KEY']}',
-            'Content-Type': 'application/json'
+        final flwResp = await supabase.functions.invoke(
+          'flutterwave-init',
+          body: {
+            'tx_ref': reference,
+            'amount': amountNaira.toString(),
+            'currency': 'NGN',
+            'redirect_url': 'https://allowanceapp.org',
+            'customer': {'email': user.email ?? 'user@allowance.com'},
+            'payment_plan': dotenv.env['FLW_PLAN_ID'] ?? '',
+            'meta': {'user_id': user.id, 'plan_code': 'Allowance_Plus'},
+            'customizations': {
+              'title': 'Allowance Plus',
+              'description': 'Subscription payment'
+            }
           },
-          body: jsonEncode(flwPayload),
         );
 
-        if (flwResp.statusCode == 200) {
-          authUrlString = jsonDecode(flwResp.body)['data']['link'];
+        final data =
+            flwResp.data is String ? jsonDecode(flwResp.data) : flwResp.data;
+        if (flwResp.status == 200 && data != null && data['data'] != null) {
+          authUrlString = data['data']['link'];
         } else {
-          debugPrint('Flutterwave Error Body: ${flwResp.body}');
+          debugPrint('Flutterwave Error Body: ${flwResp.data}');
           throw 'Flutterwave unavailable';
         }
       } catch (flwErr) {
@@ -3441,10 +4146,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 'Payment opened. Complete it in the browser — we verify automatically...'),
             duration: Duration(seconds: 8)));
       } else {
-        if (mounted) {
+        if (mounted)
           ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Could not launch payment page')));
-        }
       }
     }
 
@@ -3476,44 +4180,38 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) setModalState(() => _isProcessingSubscription = false);
   }
 
+  // --- 🔥 FIX: Now uses the `verify-payment` Edge Function to guarantee stability! ---
   Future<bool> _pollAndProcessVerification(String reference, String gateway,
       {int maxAttempts = 10,
       Duration interval = const Duration(seconds: 3)}) async {
     for (int attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        if (gateway == 'paystack') {
-          final response = await http.get(
-            Uri.parse('https://api.paystack.co/transaction/verify/$reference'),
-            headers: {
-              'Authorization': 'Bearer ${dotenv.env['PAYSTACK_SECRET_KEY']}'
-            },
-          );
-          if (response.statusCode == 200) {
-            final data = jsonDecode(response.body);
-            if (data['status'] == true &&
-                data['data']?['status'] == 'success') {
-              await _activateSubscriptionDb(
-                  data['data']['customer']?['customer_code'],
-                  data['data']['subscription_code']);
-              return true;
-            }
+        final funcResp = await Supabase.instance.client.functions.invoke(
+          'verify-payment',
+          body: {'reference': reference, 'gateway': gateway},
+        );
+
+        final data =
+            funcResp.data is String ? jsonDecode(funcResp.data) : funcResp.data;
+
+        if (funcResp.status == 200 && data != null) {
+          bool isSuccess = false;
+
+          if (gateway == 'paystack' &&
+              data['status'] == true &&
+              data['data']?['status'] == 'success') {
+            isSuccess = true;
+            await _activateSubscriptionDb(
+                data['data']['customer']?['customer_code'],
+                data['data']['subscription_code']);
+          } else if (gateway == 'flutterwave' &&
+              data['status'] == 'success' &&
+              data['data']?['status'] == 'successful') {
+            isSuccess = true;
+            await _activateSubscriptionDb('FLW_NATIVE', 'FLW_SUB');
           }
-        } else if (gateway == 'flutterwave') {
-          final response = await http.get(
-            Uri.parse(
-                'https://api.flutterwave.com/v3/transactions/verify_by_txref?tx_ref=$reference'),
-            headers: {
-              'Authorization': 'Bearer ${dotenv.env['FLW_SECRET_KEY']}'
-            },
-          );
-          if (response.statusCode == 200) {
-            final data = jsonDecode(response.body);
-            if (data['status'] == 'success' &&
-                data['data']?['status'] == 'successful') {
-              await _activateSubscriptionDb('FLW_NATIVE', 'FLW_SUB');
-              return true;
-            }
-          }
+
+          if (isSuccess) return true;
         }
       } catch (e) {
         debugPrint('Verify transaction error: $e');
@@ -3628,9 +4326,20 @@ class _GistItemCardState extends State<_GistItemCard>
   bool _isVideoInitialized = false;
   bool _isInitializing = false;
   bool _isLocallyOwned = false;
+  static const int _maxConcurrentVideos = 2;
+  static int _activeVideoInits = 0;
+  bool _countedActive = false;
+  bool _isCurrentlyVisible = false;
+
+  void _releaseActiveSlot() {
+    if (_countedActive) {
+      _countedActive = false;
+      _activeVideoInits--;
+    }
+  }
 
   @override
-  bool get wantKeepAlive => true;
+  bool get wantKeepAlive => _isVideoInitialized || _isInitializing;
 
   @override
   void initState() {
@@ -3652,9 +4361,11 @@ class _GistItemCardState extends State<_GistItemCard>
   @override
   void dispose() {
     _isDisposed = true;
-    // Only dispose if we created it locally during scroll to prevent breaking the pre-loader
     if (_isLocallyOwned) {
       _localVideoController?.dispose();
+      _releaseActiveSlot(); // was missing — this is what leaked the counter
+    } else if (_isInitializing) {
+      _releaseActiveSlot();
     }
     super.dispose();
   }
@@ -3665,33 +4376,104 @@ class _GistItemCardState extends State<_GistItemCard>
         _isInitializing ||
         widget.gist['media_type'] != 'video') return;
 
-    _isInitializing = true;
     final videoUrl = widget.gist['image_url']?.toString() ?? '';
     if (videoUrl.isEmpty) return;
 
-    try {
-      final fileInfo = await DefaultCacheManager().getFileFromCache(videoUrl);
-      if (fileInfo != null) {
-        _localVideoController = VideoPlayerController.file(fileInfo.file);
-      } else {
-        _localVideoController =
-            VideoPlayerController.networkUrl(Uri.parse(videoUrl));
-      }
+    if (_activeVideoInits >= _maxConcurrentVideos) {
+      Future.delayed(const Duration(milliseconds: 400), () {
+        if (mounted && !_isDisposed && _isCurrentlyVisible) {
+          _initializeLocalVideoIfNeeded();
+        }
+      });
+      return;
+    }
 
-      await _localVideoController!.initialize();
-      _localVideoController!.setLooping(true);
-      _localVideoController!.setVolume(_isMuted ? 0.0 : 1.0);
-      _isLocallyOwned = true; // Mark as owned so we dispose it properly
+    _isInitializing = true;
+    _countedActive = true;
+    _activeVideoInits++;
 
-      if (mounted) {
+    Future.microtask(() async {
+      try {
+        final fileInfo = await DefaultCacheManager().getFileFromCache(videoUrl);
+        final options = VideoPlayerOptions(mixWithOthers: true);
+
+        final newController = fileInfo != null
+            ? VideoPlayerController.file(fileInfo.file,
+                videoPlayerOptions: options)
+            : VideoPlayerController.networkUrl(Uri.parse(videoUrl),
+                videoPlayerOptions: options);
+
+        await newController.initialize();
+
+        if (_isDisposed || !mounted || !_isCurrentlyVisible) {
+          await newController.dispose();
+          _releaseActiveSlot();
+          if (mounted) setState(() => _isInitializing = false);
+          return;
+        }
+
+        newController.setLooping(true);
+        newController.setVolume(_isMuted ? 0.0 : 1.0);
+        _localVideoController = newController;
+        _isLocallyOwned = true;
+
         setState(() {
           _isVideoInitialized = true;
           _isInitializing = false;
         });
+        if (!_userPaused) newController.play();
+      } catch (e) {
+        debugPrint('Local video init error: $e');
+        _releaseActiveSlot();
+        if (mounted) setState(() => _isInitializing = false);
       }
-    } catch (e) {
-      debugPrint('Local video init error: $e');
-      if (mounted) setState(() => _isInitializing = false);
+    });
+  }
+
+  // 🔥 NEW: Destroy videos when scrolled off-screen to free up phone RAM!
+  void _disposeLocalVideo() {
+    if (_isLocallyOwned && _localVideoController != null) {
+      final oldController = _localVideoController;
+      _localVideoController = null;
+      _isLocallyOwned = false;
+      _releaseActiveSlot();
+
+      if (mounted) {
+        setState(() {
+          _isVideoInitialized = false;
+          _isInitializing = false;
+        });
+      }
+
+      // Small delay before real teardown — disposing the player right
+      // after pausing it is what used to crash some Android devices.
+      Future.delayed(const Duration(milliseconds: 300), () {
+        oldController?.dispose();
+      });
+    }
+  }
+
+  void _onVisibilityChanged(VisibilityInfo info) {
+    if (!mounted) return;
+
+    final visible = info.visibleFraction;
+    _isCurrentlyVisible = visible > 0.4;
+
+    if (visible > 0.4) {
+      if (_localVideoController == null && !_isInitializing) {
+        _initializeLocalVideoIfNeeded();
+      } else if (_isVideoInitialized && _localVideoController != null) {
+        if (!_localVideoController!.value.isPlaying && !_userPaused) {
+          _localVideoController!.play();
+        }
+      }
+    } else if (visible == 0.0) {
+      _disposeLocalVideo();
+    } else {
+      if (_localVideoController != null &&
+          _localVideoController!.value.isPlaying) {
+        _localVideoController!.pause();
+      }
     }
   }
 
@@ -3918,23 +4700,38 @@ class _GistItemCardState extends State<_GistItemCard>
         ? widget.gist['image_urls'][0]
         : imageUrl;
 
+    // 🔥 FIX: Dynamically check if it's a Moment or Gist
+    final isMoment = widget.gist['is_moment'] == true;
+    final typeName = isMoment ? 'moment' : 'gist';
+    final displayTypeName = isMoment ? 'Moment' : 'Gist';
+
+    // 🔥 FIX: Grab the original creator's username for the caption
+    final profileData = widget.gist['profiles'];
+    final originalUsername =
+        (profileData is Map ? profileData['username']?.toString() : null) ??
+            'Someone';
+
     try {
       await Supabase.instance.client.from('stories').insert({
         'user_id': myId,
         'media_url': mediaUrlToUse,
         'media_type': widget.gist['media_type'] ?? 'image',
-        'caption': 'Check out this Gist!\n$truncatedTitle',
+        'caption':
+            'Check out this $displayTypeName by @$originalUsername!\n$truncatedTitle',
+        // 🔥 FIX: Now saves the correct type in the URL so the Story Viewer can find the creator!
         'url':
-            'https://www.allowanceapp.org/share?type=gist&id=${widget.gistId}',
+            'https://www.allowanceapp.org/share?type=$typeName&id=${widget.gistId}',
       });
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Shared to Story!'), backgroundColor: Colors.green));
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Failed to share to story'),
             backgroundColor: Colors.red));
+      }
     }
   }
 
@@ -4386,13 +5183,19 @@ class _GistItemCardState extends State<_GistItemCard>
     final imagesToShow = imageUrls.isNotEmpty
         ? imageUrls
         : (imageUrl.isNotEmpty ? [imageUrl] : []);
+    // FIX: Safely extract all profile data with null checks
     final profileData = widget.gist['profiles'];
-    final userId = widget.gist['user_id']?.toString() ?? '';
-    final String username =
-        (profileData is Map ? profileData['username']?.toString() : null) ??
-            'User';
-    final avatarUrl =
-        (profileData is Map) ? profileData['avatar_url']?.toString() : null;
+    final String userId = widget.gist['user_id']?.toString() ?? '';
+
+    String username = 'User';
+    String? avatarUrl;
+    String? bio;
+
+    if (profileData is Map) {
+      username = profileData['username']?.toString() ?? 'User';
+      avatarUrl = profileData['avatar_url']?.toString();
+      bio = profileData['bio']?.toString();
+    }
 
     final isLocal = widget.gist['type'] == 'local';
     final hasPoll = widget.gist['has_poll'] == true;
@@ -4425,129 +5228,116 @@ class _GistItemCardState extends State<_GistItemCard>
 
       mediaWidget = VisibilityDetector(
         key: Key('video_vis_${widget.gistId}'),
-        onVisibilityChanged: (info) {
-          if (!mounted) return;
-          // When 40% of the video is visible on screen
-          if (info.visibleFraction > 0.4) {
-            if (controller == null && !_isInitializing) {
-              _initializeLocalVideoIfNeeded(); // 🔥 Lazy load the video!
-            } else if (_isVideoInitialized && controller != null) {
-              if (!controller.value.isPlaying && !_userPaused) {
-                controller.play(); // 🔥 Auto-play!
-                setState(() {});
-              }
-            }
-          } else {
-            // Pause when scrolled away
-            if (controller != null && controller.value.isPlaying) {
-              controller.pause();
-              setState(() {});
-            }
-          }
-        },
-        child: controller != null && _isVideoInitialized
-            ? Column(
-                children: [
-                  AspectRatio(
-                    aspectRatio: controller.value.aspectRatio,
-                    child: Stack(
-                      alignment: Alignment.bottomCenter,
-                      children: [
-                        GestureDetector(
-                          onTap: () {
-                            if (isMoment) {
-                              _routeToMomentViewer();
-                            } else {
-                              if (controller.value.isPlaying) {
-                                controller.pause();
-                                _userPaused = true;
-                              } else {
-                                controller.play();
-                                _userPaused = false;
-                              }
-                              setState(() {});
-                            }
-                          },
-                          onDoubleTap: _triggerDoubleTapLike,
-                          child: Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              VideoPlayer(controller),
-                              ValueListenableBuilder(
-                                valueListenable: controller,
-                                builder:
-                                    (context, VideoPlayerValue value, child) {
-                                  if (value.isPlaying)
-                                    return const SizedBox.shrink();
-                                  return Container(
-                                      padding: const EdgeInsets.all(16),
-                                      decoration: BoxDecoration(
-                                          color: Colors.black.withOpacity(0.6),
-                                          shape: BoxShape.circle),
-                                      child: const Icon(
-                                          Icons.play_arrow_rounded,
-                                          color: Colors.white,
-                                          size: 54));
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                        Positioned(
-                          bottom: 12,
-                          right: 12,
-                          child: GestureDetector(
+        onVisibilityChanged: _onVisibilityChanged,
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 400),
+          child: controller != null && _isVideoInitialized
+              ? Column(
+                  key: const ValueKey('video_player'),
+                  children: [
+                    AspectRatio(
+                      aspectRatio: controller.value.aspectRatio,
+                      child: Stack(
+                        alignment: Alignment.bottomCenter,
+                        children: [
+                          GestureDetector(
                             onTap: () {
-                              setState(() {
-                                _isMuted = !_isMuted;
-                                controller.setVolume(_isMuted ? 0.0 : 1.0);
-                              });
-                              widget.onToggleMute(_isMuted);
+                              if (isMoment) {
+                                _routeToMomentViewer();
+                              } else {
+                                if (controller.value.isPlaying) {
+                                  controller.pause();
+                                  _userPaused = true;
+                                } else {
+                                  controller.play();
+                                  _userPaused = false;
+                                }
+                                setState(() {});
+                              }
                             },
-                            child: CircleAvatar(
-                                backgroundColor: Colors.black54,
-                                radius: 14,
-                                child: Icon(
-                                    _isMuted
-                                        ? Icons.volume_off
-                                        : Icons.volume_up,
-                                    color: Colors.white,
-                                    size: 16)),
+                            onDoubleTap: _triggerDoubleTapLike,
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                VideoPlayer(controller),
+                                ValueListenableBuilder(
+                                  valueListenable: controller,
+                                  builder:
+                                      (context, VideoPlayerValue value, child) {
+                                    if (value.isPlaying)
+                                      return const SizedBox.shrink();
+                                    return Container(
+                                        padding: const EdgeInsets.all(16),
+                                        decoration: BoxDecoration(
+                                            color:
+                                                Colors.black.withOpacity(0.6),
+                                            shape: BoxShape.circle),
+                                        child: const Icon(
+                                            Icons.play_arrow_rounded,
+                                            color: Colors.white,
+                                            size: 54));
+                                  },
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                        Center(
-                          child: IgnorePointer(
-                            child: AnimatedOpacity(
-                              opacity: _showHeartOverlay ? 0.9 : 0.0,
-                              duration: const Duration(milliseconds: 200),
-                              child: AnimatedScale(
-                                scale: _showHeartOverlay ? 1.0 : 0.3,
-                                duration: const Duration(milliseconds: 400),
-                                curve: Curves.elasticOut,
-                                child: const Icon(Icons.favorite,
-                                    color: Colors.white, size: 100),
+                          Positioned(
+                            bottom: 12,
+                            right: 12,
+                            child: GestureDetector(
+                              onTap: () {
+                                setState(() {
+                                  _isMuted = !_isMuted;
+                                  controller.setVolume(_isMuted ? 0.0 : 1.0);
+                                });
+                                widget.onToggleMute(_isMuted);
+                              },
+                              child: CircleAvatar(
+                                  backgroundColor: Colors.black54,
+                                  radius: 14,
+                                  child: Icon(
+                                      _isMuted
+                                          ? Icons.volume_off
+                                          : Icons.volume_up,
+                                      color: Colors.white,
+                                      size: 16)),
+                            ),
+                          ),
+                          Center(
+                            child: IgnorePointer(
+                              child: AnimatedOpacity(
+                                opacity: _showHeartOverlay ? 0.9 : 0.0,
+                                duration: const Duration(milliseconds: 200),
+                                child: AnimatedScale(
+                                  scale: _showHeartOverlay ? 1.0 : 0.3,
+                                  duration: const Duration(milliseconds: 400),
+                                  curve: Curves.elasticOut,
+                                  child: const Icon(Icons.favorite,
+                                      color: Colors.white, size: 100),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
-                  VideoProgressIndicator(controller,
-                      allowScrubbing: true,
-                      colors: const VideoProgressColors(
-                          playedColor: Color(0xFF4CAF50),
-                          bufferedColor: Colors.white24,
-                          backgroundColor: Colors.transparent)),
-                ],
-              )
-            : Container(
-                height: 300,
-                width: double.infinity,
-                color: Colors.black,
-                child: const Center(
-                    child:
-                        CircularProgressIndicator(color: Color(0xFF4CAF50)))),
+                    VideoProgressIndicator(controller,
+                        allowScrubbing: true,
+                        colors: const VideoProgressColors(
+                            playedColor: Color(0xFF4CAF50),
+                            bufferedColor: Colors.white24,
+                            backgroundColor: Colors.transparent)),
+                  ],
+                )
+              : Container(
+                  key: const ValueKey('loading_state'),
+                  height: 300,
+                  width: double.infinity,
+                  color: Colors.black,
+                  child: const Center(
+                      child:
+                          CircularProgressIndicator(color: Color(0xFF4CAF50)))),
+        ),
       );
     } else {
       mediaWidget = imagesToShow.isEmpty
@@ -4572,6 +5362,8 @@ class _GistItemCardState extends State<_GistItemCard>
                         child: CachedNetworkImage(
                             imageUrl: imagesToShow[i],
                             fit: BoxFit.cover,
+                            memCacheWidth:
+                                800, // 🔥 CRITICAL FIX: Destroys RAM crashes completely!
                             placeholder: (context, url) => Container(
                                 color: Colors.grey[900],
                                 child: const Center(
@@ -4723,17 +5515,22 @@ class _GistItemCardState extends State<_GistItemCard>
                 CircleAvatar(
                   radius: 16,
                   backgroundColor: Colors.grey[800],
-                  backgroundImage: avatarUrl != null
-                      ? CachedNetworkImageProvider(avatarUrl,
-                          maxWidth: 100, maxHeight: 100)
+                  backgroundImage: (avatarUrl != null && avatarUrl.isNotEmpty)
+                      ? CachedNetworkImageProvider(
+                          avatarUrl,
+                          maxWidth: 100,
+                          maxHeight: 100,
+                        )
                       : null,
-                  child: avatarUrl == null
+                  child: (avatarUrl == null || avatarUrl.isEmpty)
                       ? Text(
                           username.isNotEmpty ? username[0].toUpperCase() : 'U',
                           style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold))
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        )
                       : null,
                 ),
                 const SizedBox(width: 10),
@@ -4747,7 +5544,9 @@ class _GistItemCardState extends State<_GistItemCard>
                               color: Colors.white, fontSize: 14, height: 1.3),
                           children: [
                             TextSpan(
-                                text: '$username  ',
+                                text: username.isNotEmpty
+                                    ? '$username  '
+                                    : 'User  ',
                                 style: const TextStyle(
                                     fontWeight: FontWeight.bold)),
                             TextSpan(

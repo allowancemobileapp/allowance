@@ -72,6 +72,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   StreamSubscription? _msgSub;
   int _firstUnreadIndex = -1;
   bool _unreadCalculated = false;
+  // Add next to _unreadCalculated:
+  List<Map<String, dynamic>>? _cachedCombinedMessages;
+  String _lastComputeSignature = '';
 
   // 🔥 FIX: Added the missing Video Cache and removed the duplicate colors map
   final Map<String, Uint8List> _chatVideoThumbCache = {};
@@ -725,7 +728,85 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
+  // New method — place anywhere above build()
+  List<Map<String, dynamic>> _computeCombinedMessages(
+      List<Map<String, dynamic>> pendingList, String? myId) {
+    final myPending =
+        pendingList.where((m) => m['chat_id'] == widget.chatId).toList();
+
+    final sig = StringBuffer()
+      ..write(myPending.length)
+      ..write('|');
+    for (final p in myPending) {
+      sig
+        ..write(p['local_id'] ?? p['id'])
+        ..write(':')
+        ..write(p['is_failed'])
+        ..write(':')
+        ..write(p['content'])
+        ..write(':')
+        ..write(p['media_type'])
+        ..write(';');
+    }
+    sig
+      ..write('#')
+      ..write(_messages.length)
+      ..write('|');
+    for (final m in _messages) {
+      sig
+        ..write(m['id'])
+        ..write(':')
+        ..write(m['content'])
+        ..write(':')
+        ..write(m['is_edited'])
+        ..write(':')
+        ..write(m['seriousness'])
+        ..write(':')
+        ..write(m['reactions'])
+        ..write(':')
+        ..write(m['is_read'])
+        ..write(';');
+    }
+    final signature = sig.toString();
+
+    // 🔥 FIX: skip the expensive merge+sort entirely when nothing relevant
+    // to THIS chat changed (e.g. a send/upload ticked over in another chat).
+    if (_cachedCombinedMessages != null && signature == _lastComputeSignature) {
+      return _cachedCombinedMessages!;
+    }
+
+    // 🔥 THE ULTIMATE FIX: Safely merges local and server messages without duplicates!
+    final visiblePending = myPending.where((p) {
+      if (p['is_failed'] == true) return true;
+      final pTime =
+          DateTime.tryParse(p['created_at'] ?? '')?.toLocal() ?? DateTime.now();
+      final alreadyOnServer = _messages.any((s) {
+        if (s['sender_id'] != myId ||
+            s['content'] != p['content'] ||
+            s['media_type'] != p['media_type']) {
+          return false;
+        }
+        final sTime = DateTime.tryParse(s['created_at'] ?? '')?.toLocal() ??
+            DateTime.now();
+        return sTime.difference(pTime).inSeconds.abs() <= 5;
+      });
+      return !alreadyOnServer;
+    }).toList();
+
+    final combined = [...visiblePending, ..._messages];
+    combined.sort((a, b) {
+      final dateA = DateTime.parse(a['created_at']).toLocal();
+      final dateB = DateTime.parse(b['created_at']).toLocal();
+      return dateB.compareTo(dateA);
+    });
+
+    _cachedCombinedMessages = combined;
+    _lastComputeSignature = signature;
+    return combined;
+  }
+
   // --- UPDATED: WEB KEYBOARD FIX & UNREAD MESSAGES SEPARATOR ---
+  // --- UPDATED: MOBILE KEYBOARD PERFORMANCE FIX & UNREAD MESSAGES SEPARATOR ---
   @override
   Widget build(BuildContext context) {
     final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
@@ -742,120 +823,92 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
               onTap: () => FocusScope.of(context).unfocus(),
               child: Stack(
                 children: [
-                  ValueListenableBuilder<List<Map<String, dynamic>>>(
-                    valueListenable: ChatSyncService.instance.pendingMessages,
-                    builder: (context, pendingList, _) {
-                      final myPending = pendingList
-                          .where((m) => m['chat_id'] == widget.chatId)
-                          .toList();
+                  // 🔥 FIX: isolated so the keyboard's resize animation doesn't
+                  // force this heavy list to repaint every frame.
+                  RepaintBoundary(
+                    child: ValueListenableBuilder<List<Map<String, dynamic>>>(
+                      valueListenable: ChatSyncService.instance.pendingMessages,
+                      builder: (context, pendingList, _) {
+                        // 🔥 FIX: memoized — see _computeCombinedMessages above.
+                        final combinedMessages =
+                            _computeCombinedMessages(pendingList, myId);
 
-                      // 🔥 THE ULTIMATE FIX: Safely merges local and server messages without duplicates!
-                      final visiblePending = myPending.where((p) {
-                        if (p['is_failed'] == true) return true;
-                        final pTime = DateTime.tryParse(p['created_at'] ?? '')
-                                ?.toLocal() ??
-                            DateTime.now();
+                        if (combinedMessages.isEmpty) {
+                          return const Center(
+                              child: Text("Send a message to start chatting!",
+                                  style: TextStyle(color: Colors.white54)));
+                        }
 
-                        // Hides local message ONLY if the exact server message has arrived within a 5-second window
-                        bool alreadyOnServer = _messages.any((s) {
-                          if (s['sender_id'] != myId ||
-                              s['content'] != p['content'] ||
-                              s['media_type'] != p['media_type']) return false;
-                          final sTime = DateTime.tryParse(s['created_at'] ?? '')
-                                  ?.toLocal() ??
-                              DateTime.now();
-                          return sTime.difference(pTime).inSeconds.abs() <= 5;
-                        });
+                        if (!_unreadCalculated && combinedMessages.isNotEmpty) {
+                          _firstUnreadIndex = combinedMessages.lastIndexWhere(
+                              (m) =>
+                                  m['is_read'] == false &&
+                                  m['sender_id'] != myId);
+                          _unreadCalculated = true;
+                        }
 
-                        return !alreadyOnServer;
-                      }).toList();
+                        return ListView.builder(
+                          controller: _scrollController,
+                          reverse: true,
+                          addAutomaticKeepAlives: false,
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
+                          padding: const EdgeInsets.all(12),
+                          itemCount: combinedMessages.length,
+                          itemBuilder: (context, index) {
+                            final msg = combinedMessages[index];
+                            final date =
+                                DateTime.parse(msg['created_at']).toLocal();
+                            bool showDateHeader = false;
 
-                      final combinedMessages = [
-                        ...visiblePending,
-                        ..._messages
-                      ];
-
-                      combinedMessages.sort((a, b) {
-                        final dateA = DateTime.parse(a['created_at']).toLocal();
-                        final dateB = DateTime.parse(b['created_at']).toLocal();
-                        return dateB.compareTo(dateA);
-                      });
-
-                      if (combinedMessages.isEmpty) {
-                        return const Center(
-                            child: Text("Send a message to start chatting!",
-                                style: TextStyle(color: Colors.white54)));
-                      }
-
-                      if (!_unreadCalculated && combinedMessages.isNotEmpty) {
-                        _firstUnreadIndex = combinedMessages.lastIndexWhere(
-                            (m) =>
-                                m['is_read'] == false &&
-                                m['sender_id'] != myId);
-                        _unreadCalculated = true;
-                      }
-
-                      return ListView.builder(
-                        controller: _scrollController,
-                        reverse: true,
-                        addRepaintBoundaries: false,
-                        addAutomaticKeepAlives: false,
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
-                        padding: const EdgeInsets.all(12),
-                        itemCount: combinedMessages.length,
-                        itemBuilder: (context, index) {
-                          final msg = combinedMessages[index];
-                          final date =
-                              DateTime.parse(msg['created_at']).toLocal();
-                          bool showDateHeader = false;
-
-                          if (index == combinedMessages.length - 1) {
-                            showDateHeader = true;
-                          } else {
-                            final prevDate = DateTime.parse(
-                                    combinedMessages[index + 1]['created_at'])
-                                .toLocal();
-                            if (date.day != prevDate.day ||
-                                date.year != prevDate.year) {
+                            if (index == combinedMessages.length - 1) {
                               showDateHeader = true;
+                            } else {
+                              final prevDate = DateTime.parse(
+                                      combinedMessages[index + 1]['created_at'])
+                                  .toLocal();
+                              if (date.day != prevDate.day ||
+                                  date.year != prevDate.year) {
+                                showDateHeader = true;
+                              }
                             }
-                          }
 
-                          return Column(
-                            children: [
-                              if (showDateHeader)
-                                Padding(
-                                    padding: const EdgeInsets.symmetric(
+                            return Column(
+                              children: [
+                                if (showDateHeader)
+                                  Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 16),
+                                      child: Center(
+                                          child: Text(_getDateLabel(date),
+                                              style: const TextStyle(
+                                                  color: Colors.white54,
+                                                  fontSize: 12)))),
+                                if (index == _firstUnreadIndex &&
+                                    _firstUnreadIndex != -1)
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(
                                         vertical: 16),
-                                    child: Center(
-                                        child: Text(_getDateLabel(date),
-                                            style: const TextStyle(
-                                                color: Colors.white54,
-                                                fontSize: 12)))),
-                              if (index == _firstUnreadIndex &&
-                                  _firstUnreadIndex != -1)
-                                Container(
-                                  margin:
-                                      const EdgeInsets.symmetric(vertical: 16),
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 4),
-                                  decoration: BoxDecoration(
-                                      color: const Color(0xFF1E1E1E),
-                                      borderRadius: BorderRadius.circular(12)),
-                                  child: const Text("UNREAD MESSAGES",
-                                      style: TextStyle(
-                                          color: Colors.amber,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold)),
-                                ),
-                              _buildBubble(
-                                  combinedMessages, index, maxBubbleWidth),
-                            ],
-                          );
-                        },
-                      );
-                    },
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 4),
+                                    decoration: BoxDecoration(
+                                        color: const Color(0xFF1E1E1E),
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                    child: const Text("UNREAD MESSAGES",
+                                        style: TextStyle(
+                                            color: Colors.amber,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold)),
+                                  ),
+                                _buildBubble(
+                                    combinedMessages, index, maxBubbleWidth),
+                              ],
+                            );
+                          },
+                        );
+                      },
+                    ),
                   ),
                   if (_showScrollToBottom)
                     Positioned(
@@ -874,7 +927,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
               ),
             ),
           ),
-          _buildInputBar(),
+          // 🔥 FIX: own boundary so the input bar's caret/focus changes don't
+          // ripple a repaint into the message list above it.
+          RepaintBoundary(child: _buildInputBar()),
         ],
       ),
     );
@@ -1831,6 +1886,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   // --- FIXED: CHAT ROOM BUBBLE WITH REACTIONS & AVATARS ---
+  // --- FIXED: CHAT ROOM BUBBLE WITH REACTIONS & AVATARS ---
   Widget _buildBubble(
       List<Map<String, dynamic>> messages, int index, double maxWidth) {
     final message = messages[index];
@@ -1869,10 +1925,16 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         ? localPaths
         : (hasMediaUrl ? mediaUrlStr.split(',') : []);
 
+    // 🔥 FIX: Track if the View Once media was opened
+    final bool isOpened = content == 'Opened';
+
+    // 🔥 FIX: Prevent the "Receiving..." loader if it was already opened
     final bool isReceivingMedia = !isMe &&
         (isImageOrVideo || isViewOnce) &&
         !hasMediaUrl &&
-        !hasLocalPaths;
+        !hasLocalPaths &&
+        !isOpened;
+
     final bool showMediaSection =
         isImageOrVideo && (hasMediaUrl || hasLocalPaths);
     final bool isHighlighted = _highlightedMessageId == messageId;
@@ -1890,11 +1952,12 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         content != '🎥 Video' &&
         content != '🎤 Voice Note' &&
         content != 'Sticker/GIF' &&
+        content != 'Opened' &&
         content.trim() != '';
 
     // --- VIEW ONCE UI ---
-    if (isViewOnce && (hasMediaUrl || hasLocalPaths)) {
-      final isOpened = content == 'Opened';
+    // 🔥 FIX: Added `|| isOpened` so the bubble doesn't break when media_url goes null
+    if (isViewOnce && (hasMediaUrl || hasLocalPaths || isOpened)) {
       return Align(
         alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
         child: GestureDetector(
@@ -1909,6 +1972,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                 MaterialPageRoute(
                     builder: (_) => FullScreenMediaPlayer(
                         mediaItems: viewOnceItems, initialIndex: 0)));
+
+            // Instantly update UI and delete from DB!
             setState(() {
               message['content'] = 'Opened';
               message['media_url'] = null;
@@ -1922,7 +1987,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
                 color: bubbleColor,
-                // 🔥 FIX: Sharp corners at the top now!
                 borderRadius: BorderRadius.circular(20).copyWith(
                     topRight: isMe ? Radius.zero : const Radius.circular(20),
                     topLeft: !isMe ? Radius.zero : const Radius.circular(20))),
@@ -1975,8 +2039,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
             key: Key('dismiss_$messageId'),
             direction: DismissDirection.startToEnd,
             confirmDismiss: (_) {
-              _onSwipeToReply(
-                  message); // 🔥 FIX: Swipe to reply now works perfectly for stickers!
+              _onSwipeToReply(message);
               return Future.value(false);
             },
             background: Container(
@@ -1988,8 +2051,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
               child: Row(
                 mainAxisAlignment:
                     isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-                crossAxisAlignment:
-                    CrossAxisAlignment.start, // 🔥 FIX: Align top!
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Flexible(
                     child: GestureDetector(
@@ -2080,8 +2142,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
             child: Row(
               mainAxisAlignment:
                   isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-              crossAxisAlignment:
-                  CrossAxisAlignment.start, // 🔥 FIX: Aligns bubble to the Top!
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Flexible(
                   child: Stack(
@@ -2097,7 +2158,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                           constraints: BoxConstraints(maxWidth: maxWidth),
                           decoration: BoxDecoration(
                             color: bubbleColor,
-                            // 🔥 FIX: Sharp corners on top, round at bottom (WhatsApp style for top-aligned avatars)
                             borderRadius: BorderRadius.circular(20).copyWith(
                               topRight: isMe
                                   ? Radius.zero
