@@ -28,6 +28,8 @@ import '../../widgets/universal_profile_card.dart';
 import '../../shared/services/chat_local_db.dart';
 import 'package:record/record.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:table_calendar/table_calendar.dart';
+import 'package:uuid/uuid.dart';
 
 class IndividualChatScreen extends StatefulWidget {
   final String chatId;
@@ -1135,6 +1137,26 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         ),
       ),
       actions: [
+        // 🔥 NEW: Our Calendar button for individual chats
+        if (!isGroup)
+          Stack(
+            alignment: Alignment.topRight,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.calendar_month, color: Colors.white),
+                onPressed: () async {
+                  await showModalBottomSheet(
+                    context: context,
+                    isScrollControlled: true,
+                    backgroundColor: Colors.transparent,
+                    builder: (context) => OurCalendarSheet(
+                      chatId: widget.chatId,
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
         // ONLY show the Follow/Friends button if it is NOT a group chat
         if (!isGroup)
           TextButton.icon(
@@ -1239,6 +1261,23 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
+  Future<bool> _isStickerSaved(String url) async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return false;
+    try {
+      final res = await supabase
+          .from('saved_stickers')
+          .select('id')
+          .eq('user_id', myId)
+          .eq('url', url)
+          .maybeSingle();
+      return res != null;
+    } catch (e) {
+      debugPrint('Sticker check error: $e');
+      return false;
+    }
+  }
+
   // --- FIXED: EDITING WITH OFFLINE SUPPORT & SERIOUSNESS MENU ---
   void _showMessageOptions(Map<String, dynamic> message, bool isMe) {
     final createdAt = DateTime.parse(message['created_at']).toLocal();
@@ -1250,6 +1289,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     final isSticker = message['media_type'] == 'sticker' ||
         (message['media_type'] == 'image' &&
             message['content'] == 'Sticker/GIF');
+    final stickerUrl = isSticker ? message['media_url']?.toString() : null;
 
     final currentReaction = message['reactions'];
     final defaultEmojis = ['❤️', '😂', '😮', '😢', '🙏'];
@@ -1269,13 +1309,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.grey[900],
-      isScrollControlled: true, // 🔥 FIX: Prevents layout from getting crushed
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (ctx) => SafeArea(
-        // 🔥 FIX: Protects against device home bar
         child: SingleChildScrollView(
-          // 🔥 FIX: Eliminates Pixel Overflow entirely
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1313,15 +1351,17 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                 ),
               ),
               const Divider(color: Colors.white24),
-              if (isMe && canEdit)
-                ListTile(
-                    leading: const Icon(Icons.speed, color: Colors.orange),
-                    title: const Text('Set Message Mood/Priority',
-                        style: TextStyle(color: Colors.white)),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _showSeriousnessSlider(message);
-                    }),
+
+              ListTile(
+                leading: const Icon(Icons.reply, color: Colors.blueAccent),
+                title: const Text('Reply',
+                    style: TextStyle(color: Colors.blueAccent)),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _onSwipeToReply(message);
+                },
+              ),
+
               ListTile(
                   leading: const Icon(Icons.forward, color: Colors.blueAccent),
                   title: const Text('Forward',
@@ -1330,6 +1370,90 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                     Navigator.pop(ctx);
                     _showForwardSheet(message);
                   }),
+
+              // 🔥 MOOD: always available on your own messages
+              if (isMe)
+                ListTile(
+                    leading: const Icon(Icons.speed, color: Colors.orange),
+                    title: const Text('Set Message Mood/Priority',
+                        style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showSeriousnessSlider(message);
+                    }),
+
+              if (stickerUrl != null)
+                FutureBuilder<bool>(
+                  future: _isStickerSaved(stickerUrl),
+                  builder: (context, snapshot) {
+                    final isSaved = snapshot.data ?? false;
+                    return ListTile(
+                      leading: Icon(
+                        isSaved ? Icons.bookmark_remove : Icons.bookmark_add,
+                        color: isSaved
+                            ? Colors.orangeAccent
+                            : const Color(0xFF4CAF50),
+                      ),
+                      title: Text(
+                        isSaved ? 'Remove Sticker' : 'Save Sticker',
+                        style: TextStyle(
+                            color: isSaved
+                                ? Colors.orangeAccent
+                                : const Color(0xFF4CAF50)),
+                      ),
+                      onTap: () async {
+                        Navigator.pop(ctx);
+                        final myId = supabase.auth.currentUser?.id;
+                        if (myId == null) return;
+                        try {
+                          if (isSaved) {
+                            await supabase
+                                .from('saved_stickers')
+                                .delete()
+                                .eq('user_id', myId)
+                                .eq('url', stickerUrl);
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                      'Sticker removed from your collection'),
+                                  backgroundColor: Colors.black87,
+                                  duration: Duration(seconds: 2),
+                                ),
+                              );
+                            }
+                          } else {
+                            await supabase.from('saved_stickers').insert({
+                              'user_id': myId,
+                              'url': stickerUrl,
+                              'created_at': DateTime.now().toIso8601String(),
+                            });
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Sticker saved!'),
+                                  backgroundColor: Color(0xFF4CAF50),
+                                  duration: Duration(seconds: 2),
+                                ),
+                              );
+                            }
+                          }
+                        } catch (e) {
+                          debugPrint('Sticker save/remove error: $e');
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Failed to update sticker'),
+                                backgroundColor: Colors.redAccent,
+                              ),
+                            );
+                          }
+                        }
+                      },
+                    );
+                  },
+                ),
+
               if (hasContent && !isSticker)
                 ListTile(
                   leading: const Icon(Icons.copy, color: Colors.white),
@@ -1554,18 +1678,28 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                   child: Padding(
                       padding: const EdgeInsets.all(16.0),
                       child: Column(mainAxisSize: MainAxisSize.min, children: [
-                        const Text('Stickers',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold)),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            const Text('Stickers',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold)),
+                            // 🔥 Close button so user can dismiss after sending multiple
+                            GestureDetector(
+                              onTap: () => Navigator.pop(ctx),
+                              child: const Icon(Icons.close,
+                                  color: Colors.white54, size: 28),
+                            ),
+                          ],
+                        ),
                         const SizedBox(height: 16),
                         ConstrainedBox(
                           constraints: BoxConstraints(
                               maxHeight:
                                   MediaQuery.of(context).size.height * 0.4),
                           child: FutureBuilder(
-                              // 🔥 FIX 4: Fetches dynamically from your new Database Table!
                               future: supabase
                                   .from('saved_stickers')
                                   .select('id, url')
@@ -1615,12 +1749,13 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
                                       return GestureDetector(
                                         onTap: () {
-                                          Navigator.pop(ctx);
+                                          // 🔥 NO POP — sheet stays open for rapid-fire sticker spam
                                           _sendExistingSticker(url);
+                                          HapticFeedback.lightImpact();
                                         },
                                         onLongPress: () async {
                                           HapticFeedback.lightImpact();
-                                          // 🔥 FIX 4: Permanently Deletes from Database
+                                          // Permanently delete from saved collection
                                           await supabase
                                               .from('saved_stickers')
                                               .delete()
@@ -1847,12 +1982,20 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       final myId = supabase.auth.currentUser?.id;
       if (myId == null) return;
 
+      // 🔥 CAPTURE REPLY STATE
+      final replyId = _replyMessage?['id'];
+      final replySummary =
+          _replyMessage != null ? _getReplySummary() : 'Sticker';
+      setState(() => _replyMessage = null);
+
       // Sent to ChatSyncService safely!
       ChatSyncService.instance.enqueueMessage({
         'chat_id': widget.chatId,
         'sender_id': myId,
         'content': 'Sticker/GIF',
         'media_type': 'sticker',
+        if (replyId != null) 'reply_to_id': replyId,
+        if (replyId != null) 'reply_content': replySummary,
       }, localPaths: [
         finalFile.path
       ]);
@@ -1867,10 +2010,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
     // 🔥 CAPTURE REPLY STATE
     final replyId = _replyMessage?['id'];
-    String replySummary = 'Sticker';
-    if (_replyMessage != null) {
-      replySummary = _replyMessage!['content'] ?? 'Sticker';
-    }
+    final replySummary = _replyMessage != null ? _getReplySummary() : 'Sticker';
 
     setState(() => _replyMessage = null); // Clear UI
 
@@ -1955,8 +2095,225 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         content != 'Opened' &&
         content.trim() != '';
 
+    // =========================================================================
+    // EVENT BANNER (Clean, no "STARTING NOW" text)
+    // =========================================================================
+    if (mediaType == 'event') {
+      final String? evtMediaUrl = message['media_url']?.toString();
+      final bool evtHasMedia =
+          evtMediaUrl != null && evtMediaUrl.trim().isNotEmpty;
+
+      return GestureDetector(
+        onLongPress: () => _showMessageOptions(message, isMe),
+        behavior: HitTestBehavior.opaque,
+        child: Center(
+          child: Container(
+            width: double.infinity,
+            margin: const EdgeInsets.symmetric(vertical: 20, horizontal: 12),
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              gradient: evtHasMedia
+                  ? null
+                  : const LinearGradient(
+                      colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.4),
+                  blurRadius: 24,
+                  spreadRadius: 2,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Stack(
+              children: [
+                if (evtHasMedia)
+                  Positioned.fill(
+                    child: CachedNetworkImage(
+                      imageUrl: evtMediaUrl!.split(',').first,
+                      fit: BoxFit.cover,
+                      placeholder: (context, url) =>
+                          Container(color: const Color(0xFF0F172A)),
+                      errorWidget: (context, url, error) =>
+                          Container(color: const Color(0xFF0F172A)),
+                    ),
+                  ),
+                Positioned.fill(
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          Colors.black.withOpacity(0.1),
+                          Colors.black.withOpacity(0.5),
+                          Colors.black.withOpacity(evtHasMedia ? 0.88 : 0.95),
+                        ],
+                        stops: const [0.0, 0.35, 1.0],
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                      ),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  child: Container(
+                    height: 3,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          const Color(0xFF4CAF50),
+                          const Color(0xFF4CAF50).withOpacity(0.0),
+                        ],
+                        begin: Alignment.centerLeft,
+                        end: Alignment.centerRight,
+                      ),
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF4CAF50).withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                            color: const Color(0xFF4CAF50).withOpacity(0.25),
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.event_available_rounded,
+                              color: const Color(0xFF4CAF50),
+                              size: 13,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              'EVENT',
+                              style: TextStyle(
+                                color: const Color(0xFF4CAF50),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.8,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        content,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w800,
+                          height: 1.2,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      if (message['description']?.toString().isNotEmpty ==
+                          true) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          message['description'].toString(),
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.75),
+                            fontSize: 14,
+                            height: 1.4,
+                            fontWeight: FontWeight.w400,
+                          ),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      const SizedBox(height: 20),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withOpacity(0.35),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Colors.white.withOpacity(0.08),
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.access_time_rounded,
+                              color: const Color(0xFF4CAF50),
+                              size: 15,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              timeStr,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            if (message['location']?.toString().isNotEmpty ==
+                                true) ...[
+                              const SizedBox(width: 12),
+                              Container(
+                                width: 4,
+                                height: 4,
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.4),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Icon(
+                                Icons.location_on_outlined,
+                                color: Colors.white.withOpacity(0.6),
+                                size: 14,
+                              ),
+                              const SizedBox(width: 6),
+                              Flexible(
+                                child: Text(
+                                  message['location'].toString(),
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.7),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     // --- VIEW ONCE UI ---
-    // 🔥 FIX: Added `|| isOpened` so the bubble doesn't break when media_url goes null
     if (isViewOnce && (hasMediaUrl || hasLocalPaths || isOpened)) {
       return Align(
         alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -2028,6 +2385,10 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
           : CachedNetworkImage(
               imageUrl: effectiveUrl, width: 150, fit: BoxFit.contain);
 
+      // 🔥 FIX: Detect if this sticker is replying to something
+      final bool hasReply = message['reply_to_id'] != null ||
+          (message['reply_content']?.toString().startsWith('Story_') ?? false);
+
       return RepaintBoundary(
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 6),
@@ -2057,55 +2418,68 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
                     child: GestureDetector(
                       onLongPress: () => _showMessageOptions(message, isMe),
                       behavior: HitTestBehavior.opaque,
-                      child: Stack(
-                        clipBehavior: Clip.none,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: isMe
+                            ? CrossAxisAlignment.end
+                            : CrossAxisAlignment.start,
                         children: [
-                          ClipRRect(
-                              borderRadius: BorderRadius.circular(12),
-                              child: stickerWidget),
-                          if (isPending && localId != null)
-                            Positioned.fill(
-                              child: Container(
-                                decoration: BoxDecoration(
-                                    color: Colors.black.withOpacity(0.4),
-                                    borderRadius: BorderRadius.circular(12)),
-                                child: Center(
-                                  child: isFailed
-                                      ? IconButton(
-                                          icon: const Icon(Icons.refresh,
-                                              color: Colors.redAccent,
-                                              size: 40),
-                                          onPressed: () => ChatSyncService
-                                              .instance
-                                              .retryMessage(localId))
-                                      : const CircularProgressIndicator(
-                                          color: Color(0xFF4CAF50)),
-                                ),
-                              ),
-                            ),
-                          Positioned(
-                              bottom: 4,
-                              right: 4,
-                              child: _buildMediaTime(timeStr, isMe, isRead,
-                                  isPending: isPending,
-                                  isFailed: isFailed,
-                                  localId: localId)),
-                          if (message['reactions'] != null &&
-                              message['reactions'].toString().isNotEmpty)
-                            Positioned(
-                                bottom: -10,
-                                right: isMe ? 0 : null,
-                                left: isMe ? null : 0,
-                                child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 4, vertical: 1),
+                          if (hasReply) _buildReplyInsideBubble(message),
+                          Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              ClipRRect(
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: stickerWidget),
+                              if (isPending && localId != null)
+                                Positioned.fill(
+                                  child: Container(
                                     decoration: BoxDecoration(
-                                        color: const Color(0xFF121212),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(
-                                            color: Colors.white24, width: 1)),
-                                    child: Text(message['reactions'],
-                                        style: const TextStyle(fontSize: 12)))),
+                                        color: Colors.black.withOpacity(0.4),
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                    child: Center(
+                                      child: isFailed
+                                          ? IconButton(
+                                              icon: const Icon(Icons.refresh,
+                                                  color: Colors.redAccent,
+                                                  size: 40),
+                                              onPressed: () => ChatSyncService
+                                                  .instance
+                                                  .retryMessage(localId))
+                                          : const CircularProgressIndicator(
+                                              color: Color(0xFF4CAF50)),
+                                    ),
+                                  ),
+                                ),
+                              Positioned(
+                                  bottom: 4,
+                                  right: 4,
+                                  child: _buildMediaTime(timeStr, isMe, isRead,
+                                      isPending: isPending,
+                                      isFailed: isFailed,
+                                      localId: localId)),
+                              if (message['reactions'] != null &&
+                                  message['reactions'].toString().isNotEmpty)
+                                Positioned(
+                                    bottom: -10,
+                                    right: isMe ? 0 : null,
+                                    left: isMe ? null : 0,
+                                    child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 4, vertical: 1),
+                                        decoration: BoxDecoration(
+                                            color: const Color(0xFF121212),
+                                            borderRadius:
+                                                BorderRadius.circular(10),
+                                            border: Border.all(
+                                                color: Colors.white24,
+                                                width: 1)),
+                                        child: Text(message['reactions'],
+                                            style: const TextStyle(
+                                                fontSize: 12)))),
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -3296,6 +3670,141 @@ class _CachedLinkifyState extends State<CachedLinkify> {
 }
 
 // =========================================================================
+// PERSISTENT AUDIO PLAYER SERVICE (Survives ListView rebuilds)
+// =========================================================================
+class AudioPlayerService {
+  static final AudioPlayerService _instance = AudioPlayerService._internal();
+  factory AudioPlayerService() => _instance;
+  AudioPlayerService._internal();
+
+  final AudioPlayer _player = AudioPlayer();
+  String? _currentUrl;
+  bool _isPlaying = false;
+  bool _isLoaded = false;
+  bool _isLoading = false;
+  bool _isDownloaded = false;
+  Duration _duration = Duration.zero;
+  Duration _position = Duration.zero;
+
+  // Stream controllers for UI to listen to
+  final _playingController = StreamController<bool>.broadcast();
+  final _loadingController = StreamController<bool>.broadcast();
+  final _durationController = StreamController<Duration>.broadcast();
+  final _positionController = StreamController<Duration>.broadcast();
+  final _downloadedController = StreamController<bool>.broadcast();
+  final _urlController = StreamController<String?>.broadcast();
+
+  Stream<bool> get playingStream => _playingController.stream;
+  Stream<bool> get loadingStream => _loadingController.stream;
+  Stream<Duration> get durationStream => _durationController.stream;
+  Stream<Duration> get positionStream => _positionController.stream;
+  Stream<bool> get downloadedStream => _downloadedController.stream;
+  Stream<String?> get urlStream => _urlController.stream;
+
+  String? get currentUrl => _currentUrl;
+  bool get isPlaying => _isPlaying;
+  bool get isLoaded => _isLoaded;
+  bool get isLoading => _isLoading;
+  bool get isDownloaded => _isDownloaded;
+  Duration get duration => _duration;
+  Duration get position => _position;
+
+  Future<void> init() async {
+    _player.playerStateStream.listen((state) {
+      _isPlaying = state.playing;
+      _playingController.add(_isPlaying);
+      if (state.processingState == ProcessingState.completed) {
+        _isPlaying = false;
+        _playingController.add(false);
+        _player.seek(Duration.zero);
+        _player.pause();
+      }
+    });
+
+    _player.durationStream.listen((d) {
+      if (d != null) {
+        _duration = d;
+        _durationController.add(d);
+      }
+    });
+
+    _player.positionStream.listen((p) {
+      _position = p;
+      _positionController.add(p);
+    });
+  }
+
+  Future<void> checkDownloaded(String url) async {
+    if (kIsWeb || !url.startsWith('http')) {
+      _isDownloaded = true;
+      _downloadedController.add(true);
+      return;
+    }
+    final file = await DefaultCacheManager().getFileFromCache(url);
+    _isDownloaded = file != null;
+    _downloadedController.add(_isDownloaded);
+  }
+
+  Future<void> togglePlay(String url) async {
+    // If same URL is playing, pause it
+    if (_currentUrl == url && _isPlaying) {
+      await _player.pause();
+      return;
+    }
+
+    // If same URL is paused, resume
+    if (_currentUrl == url && !_isPlaying && _isLoaded) {
+      await _player.play();
+      return;
+    }
+
+    // New URL — load and play
+    if (_currentUrl != url) {
+      _isLoaded = false;
+      _isLoading = true;
+      _loadingController.add(true);
+      _currentUrl = url;
+      _urlController.add(url);
+
+      try {
+        await _player.setUrl(url);
+        _isLoaded = true;
+        await _player.play();
+      } catch (e) {
+        debugPrint("Audio load error: $e");
+      }
+
+      _isLoading = false;
+      _loadingController.add(false);
+    }
+  }
+
+  Future<void> download(String url) async {
+    _isLoading = true;
+    _loadingController.add(true);
+    await DefaultCacheManager().downloadFile(url);
+    _isDownloaded = true;
+    _downloadedController.add(true);
+    _isLoading = false;
+    _loadingController.add(false);
+  }
+
+  Future<void> seek(Duration position) async {
+    await _player.seek(position);
+  }
+
+  void dispose() {
+    _player.dispose();
+    _playingController.close();
+    _loadingController.close();
+    _durationController.close();
+    _positionController.close();
+    _downloadedController.close();
+    _urlController.close();
+  }
+}
+
+// =========================================================================
 // EXPANDABLE TEXT WIDGET (With Background Sync States, Edits & Seriousness)
 // =========================================================================
 class ExpandableMessageText extends StatefulWidget {
@@ -3504,20 +4013,21 @@ class AudioPlayerBubble extends StatefulWidget {
   final String timeStr;
   final bool isRead;
 
-  const AudioPlayerBubble(
-      {super.key,
-      required this.url,
-      required this.isMe,
-      required this.themeColor,
-      required this.timeStr,
-      required this.isRead});
+  const AudioPlayerBubble({
+    super.key,
+    required this.url,
+    required this.isMe,
+    required this.themeColor,
+    required this.timeStr,
+    required this.isRead,
+  });
 
   @override
   State<AudioPlayerBubble> createState() => _AudioPlayerBubbleState();
 }
 
 class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
-  final AudioPlayer _audioPlayer = AudioPlayer();
+  final AudioPlayerService _service = AudioPlayerService();
   bool _isPlaying = false;
   bool _isLoaded = false;
   bool _isLoading = false;
@@ -3528,59 +4038,50 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
   @override
   void initState() {
     super.initState();
-    _checkIfDownloaded();
-  }
+    _service.init();
+    _service.checkDownloaded(widget.url);
 
-  Future<void> _checkIfDownloaded() async {
-    if (kIsWeb || !widget.url.startsWith('http')) {
-      if (mounted) setState(() => _isDownloaded = true);
-      return;
-    }
-    final file = await DefaultCacheManager().getFileFromCache(widget.url);
-    if (mounted) setState(() => _isDownloaded = file != null);
-  }
-
-  @override
-  void dispose() {
-    _audioPlayer.dispose();
-    super.dispose();
+    // Subscribe to persistent service streams
+    _service.playingStream.listen((playing) {
+      if (mounted && _service.currentUrl == widget.url) {
+        setState(() => _isPlaying = playing);
+      }
+    });
+    _service.loadingStream.listen((loading) {
+      if (mounted && _service.currentUrl == widget.url) {
+        setState(() => _isLoading = loading);
+      }
+    });
+    _service.durationStream.listen((d) {
+      if (mounted && _service.currentUrl == widget.url) {
+        setState(() {
+          _duration = d;
+          _isLoaded = true;
+        });
+      }
+    });
+    _service.positionStream.listen((p) {
+      if (mounted && _service.currentUrl == widget.url) {
+        setState(() => _position = p);
+      }
+    });
+    _service.downloadedStream.listen((downloaded) {
+      if (mounted) setState(() => _isDownloaded = downloaded);
+    });
+    _service.urlStream.listen((url) {
+      if (mounted && url != widget.url) {
+        // Another voice note started playing — show as paused
+        setState(() => _isPlaying = false);
+      }
+    });
   }
 
   Future<void> _togglePlay() async {
-    if (_isPlaying) {
-      await _audioPlayer.pause();
+    if (!_isDownloaded && widget.url.startsWith('http')) {
+      await _service.download(widget.url);
       return;
     }
-
-    if (!_isLoaded) {
-      setState(() => _isLoading = true);
-      try {
-        await _audioPlayer.setUrl(widget.url);
-        _audioPlayer.playerStateStream.listen((state) {
-          if (mounted) {
-            setState(() {
-              _isPlaying = state.playing;
-              if (state.processingState == ProcessingState.completed) {
-                _isPlaying = false;
-                _audioPlayer.seek(Duration.zero);
-                _audioPlayer.pause();
-              }
-            });
-          }
-        });
-        _audioPlayer.durationStream.listen((d) {
-          if (mounted && d != null) setState(() => _duration = d);
-        });
-        _audioPlayer.positionStream.listen((p) {
-          if (mounted) setState(() => _position = p);
-        });
-        _isLoaded = true;
-      } catch (e) {
-        debugPrint("Audio load error: $e");
-      }
-      if (mounted) setState(() => _isLoading = false);
-    }
-    await _audioPlayer.play();
+    await _service.togglePlay(widget.url);
   }
 
   String _formatDuration(Duration d) {
@@ -3591,8 +4092,11 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
 
   @override
   Widget build(BuildContext context) {
+    // Show active state only if this is the currently playing URL
+    final bool isActive = _service.currentUrl == widget.url;
+    final bool showPlaying = isActive ? _isPlaying : false;
+
     return Container(
-      // 🔥 FIX: Replaced fixed width with a minimum constraint so it stretches with the bubble nicely
       constraints: const BoxConstraints(minWidth: 230),
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
       child: Column(
@@ -3601,20 +4105,8 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
           Row(
             children: [
               GestureDetector(
-                onTap: () async {
-                  if (!_isDownloaded && widget.url.startsWith('http')) {
-                    setState(() => _isLoading = true);
-                    await DefaultCacheManager().downloadFile(widget.url);
-                    if (mounted)
-                      setState(() {
-                        _isDownloaded = true;
-                        _isLoading = false;
-                      });
-                    return;
-                  }
-                  if (!_isLoading) _togglePlay();
-                },
-                child: _isLoading
+                onTap: _togglePlay,
+                child: _isLoading && isActive
                     ? SizedBox(
                         width: 38,
                         height: 38,
@@ -3628,7 +4120,7 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
                     : Icon(
                         !_isDownloaded
                             ? Icons.download_for_offline
-                            : (_isPlaying
+                            : (showPlaying
                                 ? Icons.pause_circle_filled
                                 : Icons.play_circle_fill),
                         color: widget.isMe ? Colors.black87 : widget.themeColor,
@@ -3660,8 +4152,9 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
                             ? _duration.inMilliseconds.toDouble()
                             : 1.0),
                     onChanged: (val) {
-                      if (_isLoaded)
-                        _audioPlayer.seek(Duration(milliseconds: val.toInt()));
+                      if (_isLoaded && isActive) {
+                        _service.seek(Duration(milliseconds: val.toInt()));
+                      }
                     },
                   ),
                 ),
@@ -3683,7 +4176,7 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
               Padding(
                 padding: const EdgeInsets.only(left: 48),
                 child: Text(
-                    _isLoaded
+                    isActive && _isLoaded
                         ? _formatDuration(
                             _position.inSeconds > 0 ? _position : _duration)
                         : "Voice Note",
@@ -3976,6 +4469,649 @@ class _VideoPageItemState extends State<_VideoPageItem> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// =========================================================================
+// OUR CALENDAR (For Individual Chats)
+// =========================================================================
+class OurCalendarSheet extends StatefulWidget {
+  final String chatId;
+
+  const OurCalendarSheet({
+    super.key,
+    required this.chatId,
+  });
+
+  @override
+  State<OurCalendarSheet> createState() => _OurCalendarSheetState();
+}
+
+class _OurCalendarSheetState extends State<OurCalendarSheet> {
+  final _supabase = Supabase.instance.client;
+  DateTime _focusedDay = DateTime.now();
+  DateTime? _selectedDay;
+  Map<DateTime, List<Map<String, dynamic>>> _events = {};
+  Set<int> _unseenEventIds = {};
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedDay = DateTime.now();
+    _fetchEvents();
+  }
+
+  Future<void> _fetchEvents() async {
+    setState(() => _isLoading = true);
+    final myId = _supabase.auth.currentUser!.id;
+    try {
+      final data = await _supabase
+          .from('chat_events')
+          .select()
+          .eq('chat_id', widget.chatId);
+      final viewsResp = await _supabase
+          .from('chat_event_views')
+          .select('event_id')
+          .eq('user_id', myId);
+      final viewedIds =
+          (viewsResp as List).map((v) => v['event_id'] as int).toSet();
+
+      final Map<DateTime, List<Map<String, dynamic>>> mappedEvents = {};
+      final Set<int> unseen = {};
+
+      for (var event in data) {
+        final int eId = event['id'];
+        if (!viewedIds.contains(eId)) unseen.add(eId);
+
+        final repeat = event['repeat_type'] as String? ?? 'none';
+        final startTime = DateTime.parse(event['start_time']).toLocal();
+        final endTime = event['end_repeat'] != null
+            ? DateTime.parse(event['end_repeat']).toLocal()
+            : null;
+
+        if (repeat == 'none') {
+          final key = DateTime(startTime.year, startTime.month, startTime.day);
+          if (mappedEvents[key] == null) mappedEvents[key] = [];
+          mappedEvents[key]!.add(event);
+        } else {
+          for (int i = 0; i < 90; i++) {
+            DateTime occDate;
+            if (repeat == 'daily') {
+              occDate = startTime.add(Duration(days: i));
+            } else if (repeat == 'weekly') {
+              occDate = startTime.add(Duration(days: i * 7));
+            } else {
+              continue;
+            }
+            if (endTime != null && occDate.isAfter(endTime)) break;
+            final key = DateTime(occDate.year, occDate.month, occDate.day);
+            if (mappedEvents[key] == null) mappedEvents[key] = [];
+            mappedEvents[key]!.add(event);
+          }
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _events = mappedEvents;
+          _unseenEventIds = unseen;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _markDayAsSeen(DateTime day) async {
+    final eventsForDay = _getEventsForDay(day);
+    final unseenEvents =
+        eventsForDay.where((e) => _unseenEventIds.contains(e['id'])).toList();
+
+    if (unseenEvents.isNotEmpty) {
+      final myId = _supabase.auth.currentUser!.id;
+      final inserts = unseenEvents
+          .map((e) => {'event_id': e['id'], 'user_id': myId})
+          .toList();
+
+      setState(() {
+        for (var e in unseenEvents) {
+          _unseenEventIds.remove(e['id']);
+        }
+      });
+
+      try {
+        await _supabase.from('chat_event_views').insert(inserts);
+      } catch (e) {
+        debugPrint("Failed to mark as seen: $e");
+      }
+    }
+  }
+
+  void _deleteEvent(int eventId) async {
+    try {
+      await _supabase.from('chat_events').delete().eq('id', eventId);
+      _fetchEvents();
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Event Deleted')));
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to delete event')));
+    }
+  }
+
+  List<Map<String, dynamic>> _getEventsForDay(DateTime day) {
+    return _events[DateTime(day.year, day.month, day.day)] ?? [];
+  }
+
+  void _onDaySelected(DateTime selectedDay, DateTime focusedDay) {
+    setState(() {
+      _selectedDay = selectedDay;
+      _focusedDay = focusedDay;
+    });
+    _markDayAsSeen(selectedDay);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectedEvents =
+        _selectedDay != null ? _getEventsForDay(_selectedDay!) : [];
+    final myId = _supabase.auth.currentUser!.id;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.9,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      builder: (_, scrollController) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF121212),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            const SizedBox(height: 12),
+            Container(
+                width: 40,
+                height: 5,
+                decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(10))),
+            const SizedBox(height: 16),
+            const Text("Our Calendar",
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold)),
+            const Divider(color: Colors.white10, height: 30),
+            Expanded(
+              child: CustomScrollView(
+                controller: scrollController,
+                slivers: [
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16.0, vertical: 8),
+                      child: Container(
+                        decoration: BoxDecoration(
+                            color: const Color(0xFF1E1E1E),
+                            borderRadius: BorderRadius.circular(16)),
+                        child: TableCalendar(
+                          firstDay: DateTime.utc(2023, 1, 1),
+                          lastDay: DateTime.utc(2030, 12, 31),
+                          focusedDay: _focusedDay,
+                          selectedDayPredicate: (day) =>
+                              isSameDay(_selectedDay, day),
+                          onDaySelected: _onDaySelected,
+                          eventLoader: _getEventsForDay,
+                          calendarFormat: CalendarFormat.month,
+                          headerStyle: const HeaderStyle(
+                            formatButtonVisible: false,
+                            titleCentered: true,
+                            titleTextStyle: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold),
+                            leftChevronIcon:
+                                Icon(Icons.chevron_left, color: Colors.white),
+                            rightChevronIcon:
+                                Icon(Icons.chevron_right, color: Colors.white),
+                          ),
+                          calendarBuilders: CalendarBuilders(
+                            markerBuilder: (context, date, events) {
+                              if (events.isEmpty)
+                                return const SizedBox.shrink();
+
+                              bool hasUnseen = false;
+                              for (var event in events) {
+                                if (event is Map<String, dynamic> &&
+                                    _unseenEventIds.contains(event['id'])) {
+                                  hasUnseen = true;
+                                  break;
+                                }
+                              }
+
+                              return Positioned(
+                                bottom: 8,
+                                child: Container(
+                                  width: 7,
+                                  height: 7,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: hasUnseen
+                                        ? Colors.redAccent
+                                        : const Color(0xFF4CAF50),
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                          calendarStyle: CalendarStyle(
+                            defaultTextStyle:
+                                const TextStyle(color: Colors.white),
+                            weekendTextStyle:
+                                const TextStyle(color: Colors.white70),
+                            outsideTextStyle:
+                                const TextStyle(color: Colors.white24),
+                            selectedDecoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.2),
+                                shape: BoxShape.circle),
+                            selectedTextStyle: const TextStyle(
+                                color: Color(0xFF4CAF50),
+                                fontWeight: FontWeight.bold),
+                            todayDecoration: BoxDecoration(
+                                color: const Color(0xFF4CAF50).withOpacity(0.3),
+                                shape: BoxShape.circle),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (_isLoading)
+                    const SliverFillRemaining(
+                        child: Center(
+                            child: CircularProgressIndicator(
+                                color: Color(0xFF4CAF50))))
+                  else if (selectedEvents.isEmpty)
+                    const SliverFillRemaining(
+                        child: Center(
+                            child: Text("No events for this day",
+                                style: TextStyle(color: Colors.white54))))
+                  else
+                    SliverPadding(
+                      padding: const EdgeInsets.all(16),
+                      sliver: SliverList(
+                        delegate: SliverChildBuilderDelegate(
+                          (context, index) {
+                            final event = selectedEvents[index];
+                            final timeStr = DateFormat.jm().format(
+                                DateTime.parse(event['start_time']).toLocal());
+                            final bool isCreator = event['creator_id'] == myId;
+                            final DateTime createdAt =
+                                DateTime.parse(event['created_at']).toLocal();
+                            final bool canEdit = isCreator &&
+                                DateTime.now()
+                                        .difference(createdAt)
+                                        .inMinutes <=
+                                    60;
+                            final bool canDelete = isCreator;
+
+                            return Card(
+                              clipBehavior: Clip.antiAlias,
+                              color: const Color(0xFF1E1E1E),
+                              margin: const EdgeInsets.only(bottom: 16),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                  side: const BorderSide(
+                                      color: Colors.white10, width: 1)),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (event['image_url'] != null)
+                                    Image.network(event['image_url'],
+                                        height: 160,
+                                        width: double.infinity,
+                                        fit: BoxFit.cover),
+                                  ListTile(
+                                    contentPadding: const EdgeInsets.all(16),
+                                    title: Text(event['title'],
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold)),
+                                    subtitle: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const SizedBox(height: 8),
+                                        if (event['description'] != null &&
+                                            event['description']
+                                                .toString()
+                                                .isNotEmpty)
+                                          Padding(
+                                              padding: const EdgeInsets.only(
+                                                  bottom: 8.0),
+                                              child: Text(event['description'],
+                                                  style: const TextStyle(
+                                                      color: Colors.white70))),
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.access_time,
+                                                color: Color(0xFF4CAF50),
+                                                size: 16),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                                "$timeStr • ${event['repeat_type'] == 'none' ? 'One-time' : 'Repeats ${event['repeat_type']}'}",
+                                                style: const TextStyle(
+                                                    color: Colors.white54,
+                                                    fontWeight:
+                                                        FontWeight.bold)),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                    trailing: PopupMenuButton<String>(
+                                      icon: const Icon(Icons.more_vert,
+                                          color: Colors.white70),
+                                      color: const Color(0xFF121212),
+                                      onSelected: (val) {
+                                        if (val == 'edit')
+                                          _showAddEditEventModal(event: event);
+                                        if (val == 'delete')
+                                          _deleteEvent(event['id']);
+                                      },
+                                      itemBuilder: (ctx) => [
+                                        if (canEdit)
+                                          const PopupMenuItem(
+                                              value: 'edit',
+                                              child: Text('Edit Event',
+                                                  style: TextStyle(
+                                                      color:
+                                                          Colors.blueAccent))),
+                                        if (canDelete)
+                                          const PopupMenuItem(
+                                              value: 'delete',
+                                              child: Text('Delete Event',
+                                                  style: TextStyle(
+                                                      color:
+                                                          Colors.redAccent))),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                          childCount: selectedEvents.length,
+                        ),
+                      ),
+                    )
+                ],
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: const BoxDecoration(
+                  color: Color(0xFF121212),
+                  border: Border(top: BorderSide(color: Colors.white10))),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4CAF50),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                  icon: const Icon(Icons.add, color: Colors.black),
+                  label: const Text('ADD EVENT',
+                      style: TextStyle(
+                          color: Colors.black,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16)),
+                  onPressed: () => _showAddEditEventModal(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAddEditEventModal({Map<String, dynamic>? event}) async {
+    final bool isEditing = event != null;
+    final formKey = GlobalKey<FormState>();
+    final titleController =
+        TextEditingController(text: isEditing ? event['title'] : '');
+    final descriptionController =
+        TextEditingController(text: isEditing ? event['description'] : '');
+    XFile? pickedImage;
+    String? existingImageUrl = isEditing ? event['image_url'] : null;
+
+    TimeOfDay startTime = TimeOfDay.fromDateTime(isEditing
+        ? DateTime.parse(event['start_time']).toLocal()
+        : (_selectedDay ?? DateTime.now()));
+    TimeOfDay endTime = TimeOfDay.fromDateTime(isEditing
+        ? DateTime.parse(event['end_time']).toLocal()
+        : (_selectedDay ?? DateTime.now()).add(const Duration(hours: 1)));
+    String repeatValue = isEditing ? event['repeat_type'] : 'none';
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (modalContext, setModalState) => DraggableScrollableSheet(
+          initialChildSize: 0.9,
+          builder: (_, scrollController) => Container(
+            decoration: const BoxDecoration(
+                color: Color(0xFF121212),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+            padding: EdgeInsets.fromLTRB(
+                24, 24, 24, MediaQuery.of(modalContext).viewInsets.bottom + 24),
+            child: Form(
+              key: formKey,
+              child: ListView(
+                controller: scrollController,
+                children: [
+                  Text(isEditing ? 'Edit Event' : 'Add Event',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 24),
+                  GestureDetector(
+                    onTap: () async {
+                      final file = await ImagePicker()
+                          .pickImage(source: ImageSource.gallery);
+                      if (file != null)
+                        setModalState(() {
+                          pickedImage = file;
+                          existingImageUrl = null;
+                        });
+                    },
+                    child: Container(
+                      height: 150,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E1E1E),
+                        borderRadius: BorderRadius.circular(16),
+                        image: pickedImage != null
+                            ? DecorationImage(
+                                image: FileImage(File(pickedImage!.path)),
+                                fit: BoxFit.cover)
+                            : (existingImageUrl != null
+                                ? DecorationImage(
+                                    image: NetworkImage(existingImageUrl!),
+                                    fit: BoxFit.cover)
+                                : null),
+                      ),
+                      child: (pickedImage == null && existingImageUrl == null)
+                          ? const Center(
+                              child: Icon(Icons.add_a_photo,
+                                  color: Colors.white38, size: 40))
+                          : null,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                      controller: titleController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: _inputDecoration('Event Title'),
+                      validator: (v) => v!.isEmpty ? 'Required' : null),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                      controller: descriptionController,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: _inputDecoration('Description')),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                          child: _buildTimePicker(
+                              modalContext,
+                              'Starts',
+                              startTime,
+                              (t) => setModalState(() => startTime = t))),
+                      const SizedBox(width: 16),
+                      Expanded(
+                          child: _buildTimePicker(modalContext, 'Ends', endTime,
+                              (t) => setModalState(() => endTime = t))),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    value: repeatValue,
+                    dropdownColor: const Color(0xFF1E1E1E),
+                    style: const TextStyle(color: Colors.white),
+                    decoration: _inputDecoration('Repeat'),
+                    items: const [
+                      DropdownMenuItem(
+                          value: 'none', child: Text('Does not repeat')),
+                      DropdownMenuItem(
+                          value: 'daily', child: Text('Every day')),
+                      DropdownMenuItem(
+                          value: 'weekly', child: Text('Every week')),
+                    ],
+                    onChanged: (val) =>
+                        setModalState(() => repeatValue = val ?? 'none'),
+                  ),
+                  const SizedBox(height: 32),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF4CAF50),
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12))),
+                    onPressed: () async {
+                      if (!formKey.currentState!.validate()) return;
+
+                      final day = isEditing
+                          ? DateTime.parse(event['start_time']).toLocal()
+                          : (_selectedDay ?? DateTime.now());
+                      final startDateTime = DateTime(day.year, day.month,
+                          day.day, startTime.hour, startTime.minute);
+                      var endDateTime = DateTime(day.year, day.month, day.day,
+                          endTime.hour, endTime.minute);
+                      if (endDateTime.isBefore(startDateTime))
+                        endDateTime = endDateTime.add(const Duration(days: 1));
+
+                      String? finalImageUrl = existingImageUrl;
+
+                      try {
+                        if (pickedImage != null) {
+                          final bytes = await pickedImage!.readAsBytes();
+                          final path = 'event_images/${const Uuid().v4()}.jpg';
+                          await _supabase.storage
+                              .from('chat_media')
+                              .uploadBinary(path, bytes);
+                          finalImageUrl = _supabase.storage
+                              .from('chat_media')
+                              .getPublicUrl(path);
+                        }
+
+                        if (isEditing) {
+                          await _supabase.from('chat_events').update({
+                            'title': titleController.text,
+                            'description': descriptionController.text,
+                            'start_time':
+                                startDateTime.toUtc().toIso8601String(),
+                            'end_time': endDateTime.toUtc().toIso8601String(),
+                            'repeat_type': repeatValue,
+                            'image_url': finalImageUrl,
+                          }).eq('id', event['id']);
+                        } else {
+                          // Save the event only — cron job will drop the banner at event time
+                          await _supabase.from('chat_events').insert({
+                            'chat_id': widget.chatId,
+                            'creator_id': _supabase.auth.currentUser!.id,
+                            'title': titleController.text,
+                            'description': descriptionController.text,
+                            'start_time':
+                                startDateTime.toUtc().toIso8601String(),
+                            'end_time': endDateTime.toUtc().toIso8601String(),
+                            'repeat_type': repeatValue,
+                            'image_url': finalImageUrl,
+                          });
+                        }
+
+                        if (mounted) {
+                          Navigator.pop(ctx);
+                          _fetchEvents();
+                        }
+                      } catch (e) {
+                        debugPrint('Event save error: $e');
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Database error: ${e.toString()}'),
+                              backgroundColor: Colors.redAccent,
+                              duration: const Duration(seconds: 4),
+                            ),
+                          );
+                        }
+                      }
+                    },
+                    child: Text(isEditing ? 'Save Changes' : 'Create Event',
+                        style: const TextStyle(
+                            color: Colors.black,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16)),
+                  )
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimePicker(BuildContext ctx, String label, TimeOfDay time,
+      Function(TimeOfDay) onChanged) {
+    return InkWell(
+      onTap: () async {
+        final picked = await showTimePicker(context: ctx, initialTime: time);
+        if (picked != null) onChanged(picked);
+      },
+      child: InputDecorator(
+          decoration: _inputDecoration(label),
+          child: Text(time.format(ctx),
+              style: const TextStyle(color: Colors.white, fontSize: 16))),
+    );
+  }
+
+  InputDecoration _inputDecoration(String label) {
+    return InputDecoration(
+      labelText: label,
+      labelStyle: const TextStyle(color: Colors.white54),
+      filled: true,
+      fillColor: const Color(0xFF1E1E1E),
+      border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
     );
   }
 }

@@ -58,6 +58,7 @@ dependencies:
   flutter_local_notifications: ^17.0.0
   syncfusion_flutter_pdfviewer: ^33.2.13
   visibility_detector: ^0.4.0+2
+  table_calendar: ^3.2.0
 
 dev_dependencies:
   flutter_test:

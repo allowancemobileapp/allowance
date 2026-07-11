@@ -792,19 +792,32 @@ class _ChatTileState extends State<_ChatTile> {
     return StreamBuilder<List<Map<String, dynamic>>>(
       stream: _lastMessageStream,
       builder: (context, msgSnapshot) {
-        int seriousness = 0; // 🔥 Pull seriousness
+        int seriousness = 0;
+        String? serverMediaType;
+        String serverLastMessage = _cachedLastMessage;
+        String serverLastTime = _cachedLastMessageTime;
 
+        // 🔥 FIX: Always read the REAL server message first
         if (msgSnapshot.hasData && msgSnapshot.data!.isNotEmpty) {
           final msg = msgSnapshot.data!.first;
           seriousness = msg['seriousness'] as int? ?? 0;
+          serverMediaType = msg['media_type']?.toString();
 
           String rawContent = msg['content'] ?? '📷 Media';
           if (rawContent == 'Sticker/GIF') rawContent = '🎭 Sticker';
-          if (msg['media_type']?.toString().startsWith('view_once') == true)
+          if (serverMediaType?.startsWith('view_once') == true)
             rawContent = '📷 View once message';
+          // 🔥 FIX: Pretty-print event reminders
+          if (serverMediaType == 'event') {
+            rawContent =
+                '📅 ${rawContent.replaceAll('⏳ ', '').replaceAll('🎉 ', '').split('\n').first}';
+          }
 
-          _cachedLastMessage = rawContent;
-          _cachedLastMessageTime = _formatTime(msg['created_at']);
+          serverLastMessage = rawContent;
+          serverLastTime = _formatTime(msg['created_at']);
+          _cachedLastMessage = serverLastMessage;
+          _cachedLastMessageTime = serverLastTime;
+
           SharedPreferences.getInstance().then((prefs) => prefs.setString(
               'last_msg_$chatId',
               jsonEncode(
@@ -895,7 +908,7 @@ class _ChatTileState extends State<_ChatTile> {
                     return Text(
                         myPending.isNotEmpty
                             ? _formatTime(myPending.first['created_at'])
-                            : _cachedLastMessageTime,
+                            : serverLastTime,
                         style: TextStyle(
                             color: (widget.unreadCount > 0 && seriousness > 0)
                                 ? Colors.redAccent
@@ -923,32 +936,46 @@ class _ChatTileState extends State<_ChatTile> {
                           final myPending = pending
                               .where((m) => m['chat_id'] == chatId)
                               .toList();
-                          String displayMsg =
-                              _localIsTyping ? "typing..." : _cachedLastMessage;
-                          Color msgColor = _localIsTyping
-                              ? widget.themeColor
-                              : Colors.white54;
 
-                          if (myPending.isNotEmpty && !_localIsTyping) {
+                          // 🔥 FIX: Priority: server message > typing > pending
+                          String displayMsg;
+                          Color msgColor;
+
+                          if (_localIsTyping) {
+                            displayMsg = "typing...";
+                            msgColor = widget.themeColor;
+                          } else if (myPending.isNotEmpty &&
+                              msgSnapshot.hasData &&
+                              msgSnapshot.data!.isEmpty) {
+                            // Only show pending if there's NO server message at all
                             final lastMsg = myPending.first;
+                            final pendingMediaType =
+                                lastMsg['media_type']?.toString() ?? 'text';
+
                             displayMsg =
                                 lastMsg['content'].toString().trim().isEmpty
                                     ? '📷 Media'
                                     : lastMsg['content'];
                             if (displayMsg == 'Sticker/GIF')
                               displayMsg = '🎭 Sticker';
-                            if (lastMsg['media_type']
-                                    ?.toString()
-                                    .startsWith('view_once') ==
-                                true) displayMsg = '📷 View once message';
+                            if (pendingMediaType.startsWith('view_once'))
+                              displayMsg = '📷 View once message';
 
                             if (lastMsg['is_failed'] == true) {
                               displayMsg = '❌ Failed to send';
                               msgColor = Colors.redAccent;
                             } else if (lastMsg['is_pending'] == true) {
                               displayMsg = '🕒 $displayMsg';
+                              msgColor = Colors.white54;
+                            } else {
+                              msgColor = Colors.white54;
                             }
+                          } else {
+                            // Use the server message (which includes events)
+                            displayMsg = serverLastMessage;
+                            msgColor = Colors.white54;
                           }
+
                           return Text(displayMsg,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -976,8 +1003,6 @@ class _ChatTileState extends State<_ChatTile> {
                                   color: Colors.white,
                                   fontSize: 10,
                                   fontWeight: FontWeight.bold))),
-
-                    // 🔥 FIX: Unread bubble turns red if seriousness is high!
                     Container(
                         padding: const EdgeInsets.all(6),
                         decoration: BoxDecoration(
