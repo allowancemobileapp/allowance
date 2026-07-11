@@ -55,7 +55,8 @@ class ChatRoomScreen extends StatefulWidget {
   State<ChatRoomScreen> createState() => _ChatRoomScreenState();
 }
 
-class _ChatRoomScreenState extends State<ChatRoomScreen> {
+class _ChatRoomScreenState extends State<ChatRoomScreen>
+    with WidgetsBindingObserver {
   final supabase = Supabase.instance.client;
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -73,6 +74,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   Timer? _typingTimer;
   List<Map<String, dynamic>> _messages = [];
   StreamSubscription? _msgSub;
+  StreamSubscription? _typingStatusSub;
   Timer? _remoteTypingTimer;
 
   Map<String, dynamic>? _chatMeta;
@@ -98,12 +100,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     activeChatId = widget.chatId;
 
-    // 🔥 FIX: Instantly populate the UI with the data we already know!
     _chatMeta = {
       'group_name': widget.chatTitle,
-      'group_avatar': null, // Will update when network loads
+      'group_avatar': null,
       'group_description': 'Loading group info...',
     };
 
@@ -112,6 +114,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     _loadChatMeta();
     _setupTypingListener();
     _markMessagesAsRead();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _setupMessageStream();
+      _setupTypingListener();
+      _loadChatMeta();
+      _markMessagesAsRead();
+    }
   }
 
   Future<void> _loadChatMeta() async {
@@ -272,7 +284,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 
   void _setupTypingListener() {
-    supabase
+    _typingStatusSub?.cancel();
+    _typingStatusSub = supabase
         .from('chat_participants')
         .stream(primaryKey: ['chat_id', 'user_id'])
         .eq('chat_id', widget.chatId)
@@ -284,8 +297,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
           setState(() => _remoteUserIsTyping = remoteTyping);
 
-          // 🔥 THE FIX: Auto-kill the typing indicator after 5 seconds!
-          // If their app crashes or loses internet, this cures the "Ghost Typing"
           if (remoteTyping) {
             _remoteTypingTimer?.cancel();
             _remoteTypingTimer = Timer(const Duration(seconds: 5), () {
@@ -514,8 +525,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   // --- NEW: HELPER TO EXTRACT REPLY TEXT/MEDIA TYPE ---
   String _getReplySummary() {
     if (_replyMessage == null) return '';
+    if (_replyMessage!['reply_content_override'] != null) {
+      return _replyMessage!['reply_content_override'].toString();
+    }
     final content = _replyMessage!['content']?.toString() ?? '';
-    final mType = _replyMessage!['media_type'];
+    final mType = _replyMessage!['media_type']?.toString();
     if (content.isNotEmpty &&
         content != '📸 Photo' &&
         content != '🎥 Video' &&
@@ -526,6 +540,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     if (mType == 'video') return '🎥 Video';
     if (mType == 'audio') return '🎤 Voice Note';
     if (mType == 'sticker') return '🎭 Sticker';
+    if (mType != null && mType.startsWith('view_once')) {
+      return mType.contains('video')
+          ? '🎥 View once video'
+          : '📷 View once photo';
+    }
     return '📸 Photo';
   }
 
@@ -2751,81 +2770,97 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final bool isHighlighted = _highlightedMessageId == messageId;
 
     // --- VIEW ONCE UI (NOW SHOWS REPLY PREVIEW) ---
+    // --- VIEW ONCE UI (swipeable to reply, shows reply preview) ---
     if (isViewOnce && (hasMediaUrl || hasLocalPaths || isOpened)) {
-      return Align(
-        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-        child: GestureDetector(
-          onTap: () async {
-            if (isMe || isOpened || mediaUrls.isEmpty) return;
-            final actualType = mediaType.replaceAll('view_once_', '');
-            final viewOnceItems = mediaUrls
-                .map((url) => {'url': url, 'type': actualType})
-                .toList();
-            await Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => FullScreenMediaPlayer(
-                        mediaItems: viewOnceItems, initialIndex: 0)));
-
-            setState(() {
-              message['content'] = 'Opened';
-              message['media_url'] = null;
-            });
-            await supabase.from('messages').update(
-                {'content': 'Opened', 'media_url': null}).eq('id', messageId);
-          },
-          onLongPress: () => _showMessageOptions(message, isMe),
-          behavior: HitTestBehavior.opaque,
-          child: Container(
-            margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-            decoration: BoxDecoration(
-                color: bubbleColor,
-                borderRadius: BorderRadius.circular(20).copyWith(
-                    topRight: isMe ? Radius.zero : const Radius.circular(20),
-                    topLeft: (!isMe && showAvatar)
-                        ? Radius.zero
-                        : const Radius.circular(20))),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (message['reply_to_id'] != null ||
-                    (message['reply_content']?.toString().isNotEmpty ?? false))
-                  _buildReplyInsideBubble(message),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(isOpened ? Icons.looks_one_outlined : Icons.looks_one,
-                        color: isOpened ? Colors.white38 : Colors.blueAccent,
-                        size: 24),
-                    const SizedBox(width: 8),
-                    Text(
-                        isOpened
-                            ? 'Opened'
-                            : (mediaType.contains('video') ? 'Video' : 'Photo'),
-                        style: TextStyle(
-                            color: isOpened
-                                ? Colors.white54
-                                : (isMe ? Colors.black87 : Colors.white),
-                            fontSize: 16,
-                            fontStyle: isOpened
-                                ? FontStyle.italic
-                                : FontStyle.normal)),
-                    const SizedBox(width: 16),
-                    _buildMediaTime(timeStr, isMe, isRead,
-                        isPending: isPending,
-                        isFailed: isFailed,
-                        localId: localId),
-                  ],
-                ),
-              ],
+      return Dismissible(
+        key: ValueKey('viewonce_$messageId'),
+        direction: DismissDirection.startToEnd,
+        confirmDismiss: (_) {
+          _onSwipeToReply(message);
+          return Future.value(false);
+        },
+        background: Container(
+            alignment: Alignment.centerLeft,
+            padding: const EdgeInsets.only(left: 20),
+            child: const Icon(Icons.reply, color: Color(0xFF4CAF50))),
+        child: Align(
+          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+          child: GestureDetector(
+            onTap: () async {
+              if (isMe || isOpened || mediaUrls.isEmpty) return;
+              final actualType = mediaType.replaceAll('view_once_', '');
+              final viewOnceItems = mediaUrls
+                  .map((url) => {'url': url, 'type': actualType})
+                  .toList();
+              await Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => FullScreenMediaPlayer(
+                          mediaItems: viewOnceItems, initialIndex: 0)));
+              setState(() {
+                message['content'] = 'Opened';
+                message['media_url'] = null;
+              });
+              await supabase.from('messages').update(
+                  {'content': 'Opened', 'media_url': null}).eq('id', messageId);
+            },
+            onLongPress: () => _showMessageOptions(message, isMe),
+            behavior: HitTestBehavior.opaque,
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                  color: bubbleColor,
+                  borderRadius: BorderRadius.circular(20).copyWith(
+                      topRight: isMe ? Radius.zero : const Radius.circular(20),
+                      topLeft: (!isMe && showAvatar)
+                          ? Radius.zero
+                          : const Radius.circular(20))),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (message['reply_to_id'] != null ||
+                      (message['reply_content']?.startsWith('Story_') ??
+                          false) ||
+                      (message['reply_content']?.startsWith('Event_') ?? false))
+                    _buildReplyInsideBubble(message),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                          isOpened ? Icons.looks_one_outlined : Icons.looks_one,
+                          color: isOpened ? Colors.white38 : Colors.blueAccent,
+                          size: 24),
+                      const SizedBox(width: 8),
+                      Text(
+                          isOpened
+                              ? 'Opened'
+                              : (mediaType.contains('video')
+                                  ? 'Video'
+                                  : 'Photo'),
+                          style: TextStyle(
+                              color: isOpened
+                                  ? Colors.white54
+                                  : (isMe ? Colors.black87 : Colors.white),
+                              fontSize: 16,
+                              fontStyle: isOpened
+                                  ? FontStyle.italic
+                                  : FontStyle.normal)),
+                      const SizedBox(width: 16),
+                      _buildMediaTime(timeStr, isMe, isRead,
+                          isPending: isPending,
+                          isFailed: isFailed,
+                          localId: localId),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       );
     }
 
-    // --- STICKER UI (NOW SHOWS REPLY PREVIEW) ---
     // --- STICKER UI ---
     if (isSticker && showMediaSection) {
       final effectiveUrl = mediaUrls.first;
@@ -3246,20 +3281,18 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final replyContent = message['reply_content']?.toString() ?? '';
     final bool isStoryReply =
         replyContent.startsWith('Story_') || replyContent == 'Story';
-    // 🔥 FIX: Event replies have reply_content but no real reply_to_id (or fake event_ ID)
-    final bool isEventReply = replyContent.isNotEmpty &&
-        (message['reply_to_id'] == null ||
-            message['reply_to_id']?.toString().startsWith('event_') == true);
+    final bool isEventReply = replyContent.startsWith('Event_');
     final String? storyImageUrl = message['thumbnail_url'];
 
     String displayReplyText = replyContent;
     if (isStoryReply && replyContent.startsWith('Story_')) {
       final parts = replyContent.split('_');
-      if (parts.length > 2) {
-        displayReplyText = parts.sublist(2).join('_');
-      } else {
-        displayReplyText = "Story";
-      }
+      displayReplyText =
+          parts.length > 2 ? parts.sublist(2).join('_') : "Story";
+    } else if (isEventReply) {
+      final parts = replyContent.split('_');
+      displayReplyText =
+          parts.length > 2 ? parts.sublist(2).join('_') : "Event";
     }
 
     return GestureDetector(
@@ -3293,13 +3326,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                           fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 2),
-                    Text(
-                      displayReplyText,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 12),
-                    ),
+                    Text(displayReplyText,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 12)),
                   ],
                 ),
               ),
@@ -3333,7 +3364,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
     if (replyContent.startsWith('Story_')) {
       final storyId = replyContent.split('_')[1];
-
       final response = await supabase
           .from('stories')
           .select('*, profiles:user_id(username, avatar_url, school_name)')
@@ -3355,12 +3385,21 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
             backgroundColor: Colors.black87,
             duration: Duration(seconds: 2)));
       }
-    } else if (message['reply_to_id'] != null) {
+      return;
+    }
+
+    if (replyContent.startsWith('Event_')) {
+      final parts = replyContent.split('_');
+      final title = parts.length > 2 ? parts.sublist(2).join('_') : 'an event';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('This was a reply to the event "$title".'),
+          backgroundColor: Colors.black87,
+          duration: const Duration(seconds: 2)));
+      return;
+    }
+
+    if (message['reply_to_id'] != null) {
       final targetId = message['reply_to_id'].toString();
-
-      // 🔥 FIX: Don't try to scroll to event tags (fake IDs)
-      if (targetId.startsWith('event_')) return;
-
       setState(() => _highlightedMessageId = targetId);
       Future.delayed(const Duration(milliseconds: 1500), () {
         if (mounted) setState(() => _highlightedMessageId = null);
@@ -3368,14 +3407,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
       final targetIndex =
           _messages.indexWhere((m) => m['id'].toString() == targetId);
-
       if (targetIndex != -1) {
         final estimatedOffset = targetIndex * 80.0;
-        _scrollController.animateTo(
-          estimatedOffset,
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeInOut,
-        );
+        _scrollController.animateTo(estimatedOffset,
+            duration: const Duration(milliseconds: 400),
+            curve: Curves.easeInOut);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Message is too far back to scroll to.'),
@@ -3756,55 +3792,31 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final myPending =
         pendingList.where((m) => m['chat_id'] == widget.chatId).toList();
 
-    // Build lightweight signature
-    final sig = StringBuffer()
-      ..write(myPending.length)
-      ..write('|');
+    int hash = myPending.length.hashCode ^ _messages.length.hashCode;
     for (final p in myPending) {
-      sig
-        ..write(p['local_id'] ?? p['id'])
-        ..write(':')
-        ..write(p['is_failed'])
-        ..write(';');
+      hash ^= (p['local_id'] ?? '').hashCode;
+      hash ^= (p['is_failed'] == true ? 1 : 0).hashCode;
+      hash ^= (p['is_pending'] == true ? 2 : 0).hashCode;
     }
-    sig
-      ..write('#')
-      ..write(_messages.length)
-      ..write('|');
     for (final m in _messages) {
-      sig
-        ..write(m['id'])
-        ..write(';');
+      hash ^= (m['id'] ?? '').hashCode;
+      hash ^= (m['is_edited'] == true ? 1 : 0).hashCode;
     }
-    final signature = sig.toString();
+    final signature = hash.toString();
 
     if (_cachedCombinedMessages != null && signature == _lastComputeSignature) {
       return _cachedCombinedMessages!;
     }
 
-    // Merge: pending first (they have newer local timestamps), then server messages
-    // Only hide a pending message if we find an EXACT server match by content + sender + within 3s
-    final Set<String> matchedServerIds = {};
+    // 🔥 Exact match by local_id — no more time-window guessing
+    final confirmedLocalIds = _messages
+        .map((m) => m['local_id']?.toString())
+        .where((id) => id != null && id.isNotEmpty)
+        .toSet();
+
     final visiblePending = myPending.where((p) {
       if (p['is_failed'] == true) return true;
-
-      // Check if this pending message already has a matching server message
-      final pTime =
-          DateTime.tryParse(p['created_at'] ?? '')?.toLocal() ?? DateTime.now();
-      final match = _messages.firstWhere((s) {
-        if (s['sender_id'] != myId) return false;
-        if (s['content'] != p['content']) return false;
-        if (s['media_type'] != p['media_type']) return false;
-        final sTime = DateTime.tryParse(s['created_at'] ?? '')?.toLocal() ??
-            DateTime.now();
-        return sTime.difference(pTime).inSeconds.abs() <= 3;
-      }, orElse: () => <String, dynamic>{});
-
-      if (match.isNotEmpty) {
-        matchedServerIds.add(match['id'].toString());
-        return false; // Hide this pending, server has it
-      }
-      return true; // Keep pending, hasn't arrived on server yet
+      return !confirmedLocalIds.contains(p['local_id']?.toString());
     }).toList();
 
     final combined = [...visiblePending, ..._messages];
@@ -4021,38 +4033,36 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         .limit(100)
         .listen((data) async {
           if (!mounted) return;
-
           setState(() {
-            _messages = data;
-            if (!_unreadCalculated && data.isNotEmpty) {
+            _messages = List<Map<String, dynamic>>.from(data);
+            if (!_unreadCalculated && _messages.isNotEmpty) {
               _firstUnreadIndex = _messages.lastIndexWhere((m) =>
                   m['is_read'] == false &&
                   m['sender_id'] != supabase.auth.currentUser?.id);
               _unreadCalculated = true;
             }
           });
-
           await ChatLocalDB.instance.cacheMessages(widget.chatId, data);
         });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (activeChatId == widget.chatId) {
       activeChatId = null;
     }
     _msgSub?.cancel();
+    _typingStatusSub?.cancel();
     _scrollController.removeListener(_scrollListener);
-    _memberSearchController.dispose(); // <-- Unique to ChatRoomScreen
+    _memberSearchController.dispose();
     _typingTimer?.cancel();
     _remoteTypingTimer?.cancel();
 
-    // 🔥 THE FIX: Tell the database we stopped typing when we leave the chat!
     final myId = supabase.auth.currentUser?.id;
     if (myId != null && _isTyping) {
-      supabase.from('chat_participants').update({
-        'is_typing': false,
-      }).match({'chat_id': widget.chatId, 'user_id': myId});
+      supabase.from('chat_participants').update({'is_typing': false}).match(
+          {'chat_id': widget.chatId, 'user_id': myId});
     }
 
     _messageController.dispose();

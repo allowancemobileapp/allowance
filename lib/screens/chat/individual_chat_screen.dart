@@ -47,7 +47,8 @@ class IndividualChatScreen extends StatefulWidget {
   State<IndividualChatScreen> createState() => _IndividualChatScreenState();
 }
 
-class _IndividualChatScreenState extends State<IndividualChatScreen> {
+class _IndividualChatScreenState extends State<IndividualChatScreen>
+    with WidgetsBindingObserver {
   final supabase = Supabase.instance.client;
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -72,6 +73,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   Map<String, dynamic>? _pendingOrder;
   List<Map<String, dynamic>> _messages = [];
   StreamSubscription? _msgSub;
+  StreamSubscription? _typingStatusSub;
   int _firstUnreadIndex = -1;
   bool _unreadCalculated = false;
   // Add next to _unreadCalculated:
@@ -86,6 +88,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
 
   @override
   void initState() {
+    WidgetsBinding.instance.addObserver(this);
     super.initState();
     activeChatId = widget.chatId;
 
@@ -115,6 +118,15 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     _setupTypingListener();
     _checkFollowStatus(); // Silent network update
     _markMessagesAsRead();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _setupMessageStream();
+      _setupTypingListener();
+      _markMessagesAsRead();
+    }
   }
 
   Future<void> _checkFollowStatus() async {
@@ -307,24 +319,16 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
         .order('created_at', ascending: false)
         .limit(100)
         .listen((data) async {
-          if (mounted) {
-            setState(() {
-              final pendingMsgs = _messages
-                  .where((m) =>
-                      m['id'].toString().length > 10 &&
-                      !data.any((d) => d['content'] == m['content']))
-                  .toList();
-              _messages = [...pendingMsgs, ...data];
-
-              // Set unread banner index only ONCE on first network load
-              if (!_unreadCalculated && data.isNotEmpty) {
-                _firstUnreadIndex = _messages.lastIndexWhere((m) =>
-                    m['is_read'] == false &&
-                    m['sender_id'] != supabase.auth.currentUser?.id);
-                _unreadCalculated = true;
-              }
-            });
-          }
+          if (!mounted) return;
+          setState(() {
+            _messages = List<Map<String, dynamic>>.from(data);
+            if (!_unreadCalculated && _messages.isNotEmpty) {
+              _firstUnreadIndex = _messages.lastIndexWhere((m) =>
+                  m['is_read'] == false &&
+                  m['sender_id'] != supabase.auth.currentUser?.id);
+              _unreadCalculated = true;
+            }
+          });
           await ChatLocalDB.instance.cacheMessages(widget.chatId, data);
         });
   }
@@ -345,7 +349,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   }
 
   void _setupTypingListener() {
-    supabase
+    _typingStatusSub?.cancel();
+    _typingStatusSub = supabase
         .from('chat_participants')
         .stream(primaryKey: ['chat_id', 'user_id'])
         .eq('chat_id', widget.chatId)
@@ -354,11 +359,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
           final myId = supabase.auth.currentUser?.id;
           final remoteTyping = data.any((p) =>
               p['user_id']?.toString() != myId && p['is_typing'] == true);
-
           setState(() => _remoteUserIsTyping = remoteTyping);
-
-          // 🔥 THE FIX: Auto-kill the typing indicator after 5 seconds!
-          // If their app crashes or loses internet, this cures the "Ghost Typing"
           if (remoteTyping) {
             _remoteTypingTimer?.cancel();
             _remoteTypingTimer = Timer(const Duration(seconds: 5), () {
@@ -597,6 +598,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   // --- REPLACE YOUR DISPOSE METHOD WITH THIS (Fixed errors) ---
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     if (activeChatId == widget.chatId) {
       activeChatId = null;
     }
@@ -638,7 +640,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
   String _getReplySummary() {
     if (_replyMessage == null) return '';
     final content = _replyMessage!['content']?.toString() ?? '';
-    final mType = _replyMessage!['media_type'];
+    final mType = _replyMessage!['media_type']?.toString();
     if (content.isNotEmpty &&
         content != '📸 Photo' &&
         content != '🎥 Video' &&
@@ -649,6 +651,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     if (mType == 'video') return '🎥 Video';
     if (mType == 'audio') return '🎤 Voice Note';
     if (mType == 'sticker') return '🎭 Sticker';
+    if (mType != null && mType.startsWith('view_once')) {
+      return mType.contains('video')
+          ? '🎥 View once video'
+          : '📷 View once photo';
+    }
     return '📸 Photo';
   }
 
@@ -730,7 +737,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     );
   }
 
-  // New method — place anywhere above build()
   List<Map<String, dynamic>> _computeCombinedMessages(
       List<Map<String, dynamic>> pendingList, String? myId) {
     final myPending =
@@ -741,13 +747,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       ..write('|');
     for (final p in myPending) {
       sig
-        ..write(p['local_id'] ?? p['id'])
+        ..write(p['local_id'])
         ..write(':')
         ..write(p['is_failed'])
         ..write(':')
-        ..write(p['content'])
-        ..write(':')
-        ..write(p['media_type'])
+        ..write(p['is_pending'])
         ..write(';');
     }
     sig
@@ -758,7 +762,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
       sig
         ..write(m['id'])
         ..write(':')
-        ..write(m['content'])
+        ..write(m['local_id'])
         ..write(':')
         ..write(m['is_edited'])
         ..write(':')
@@ -771,28 +775,18 @@ class _IndividualChatScreenState extends State<IndividualChatScreen> {
     }
     final signature = sig.toString();
 
-    // 🔥 FIX: skip the expensive merge+sort entirely when nothing relevant
-    // to THIS chat changed (e.g. a send/upload ticked over in another chat).
     if (_cachedCombinedMessages != null && signature == _lastComputeSignature) {
       return _cachedCombinedMessages!;
     }
 
-    // 🔥 THE ULTIMATE FIX: Safely merges local and server messages without duplicates!
+    final confirmedLocalIds = _messages
+        .map((m) => m['local_id']?.toString())
+        .where((id) => id != null && id.isNotEmpty)
+        .toSet();
+
     final visiblePending = myPending.where((p) {
       if (p['is_failed'] == true) return true;
-      final pTime =
-          DateTime.tryParse(p['created_at'] ?? '')?.toLocal() ?? DateTime.now();
-      final alreadyOnServer = _messages.any((s) {
-        if (s['sender_id'] != myId ||
-            s['content'] != p['content'] ||
-            s['media_type'] != p['media_type']) {
-          return false;
-        }
-        final sTime = DateTime.tryParse(s['created_at'] ?? '')?.toLocal() ??
-            DateTime.now();
-        return sTime.difference(pTime).inSeconds.abs() <= 5;
-      });
-      return !alreadyOnServer;
+      return !confirmedLocalIds.contains(p['local_id']?.toString());
     }).toList();
 
     final combined = [...visiblePending, ..._messages];

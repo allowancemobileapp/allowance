@@ -52,7 +52,21 @@ class ChatSyncService {
 
     pendingMessages.value = [msg, ...pendingMessages.value];
     _savePending();
+
+    // 🚀 Instant chat list bump
+    _optimisticallyBumpChat(msg);
+
     _processQueueItem(msg);
+  }
+
+  Future<void> _optimisticallyBumpChat(Map<String, dynamic> msg) async {
+    final preview = (msg['content'] ?? '').toString().trim();
+    try {
+      await Supabase.instance.client.from('chats').update({
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+        'last_message': preview.isEmpty ? 'Media' : preview,
+      }).eq('id', msg['chat_id']);
+    } catch (_) {}
   }
 
   void retryMessage(String localId) {
@@ -91,7 +105,7 @@ class ChatSyncService {
   }
 
   Future<void> _processQueueItem(Map<String, dynamic> msg) async {
-    final localId = msg['local_id'];
+    final localId = msg['local_id'] as String;
     final supabase = Supabase.instance.client;
 
     try {
@@ -104,8 +118,6 @@ class ChatSyncService {
         for (String path in localPaths) {
           Uint8List fileBytes;
           String fileName;
-
-          // 🔥 FIX 1: Safely extract the media type
           final String mType = msg['media_type']?.toString() ?? 'image';
 
           if (kIsWeb) {
@@ -116,12 +128,9 @@ class ChatSyncService {
               final response = await http.get(Uri.parse(path));
               fileBytes = response.bodyBytes;
             }
-
-            // 🔥 FIX 2: Correctly identifies View Once videos so they don't get saved as JPGs!
             final ext = (mType == 'video' || mType == 'view_once_video')
                 ? 'mp4'
                 : (mType == 'sticker' ? 'png' : 'jpg');
-
             fileName =
                 '${DateTime.now().millisecondsSinceEpoch}_${path.hashCode}.$ext';
           } else {
@@ -135,7 +144,6 @@ class ChatSyncService {
           }
 
           final storagePath = 'chat_media/${msg['chat_id']}/$fileName';
-
           await supabase.storage
               .from('chat_media')
               .uploadBinary(storagePath, fileBytes);
@@ -158,15 +166,26 @@ class ChatSyncService {
         }
 
         _simulatedTimers[localId]?.cancel();
+        _simulatedTimers.remove(localId);
         uploadProgress.value = Map.from(uploadProgress.value)..[localId] = 1.0;
       }
 
-      // 🔥 FIXED: Preserves the 'media_url' if we sent a pre-saved sticker
+      // 🔒 Sanitize reply_to_id — events/stories aren't real messages
+      String? replyToId = msg['reply_to_id']?.toString();
+      final String? replyContent = msg['reply_content']?.toString();
+      final bool isSyntheticReply = replyToId != null &&
+          (replyToId.startsWith('event_') ||
+              replyToId.startsWith('story_') ||
+              (replyContent?.startsWith('Story_') ?? false) ||
+              (replyContent?.startsWith('Event_') ?? false));
+      if (isSyntheticReply) replyToId = null;
+
       final payload = {
         'chat_id': msg['chat_id'],
         'sender_id': msg['sender_id'],
         'content': msg['content'],
         'is_read': false,
+        'local_id': localId,
         if (uploadedUrls.isNotEmpty || msg['media_url'] != null)
           'media_url': uploadedUrls.isNotEmpty
               ? uploadedUrls.join(',')
@@ -175,36 +194,34 @@ class ChatSyncService {
         if (msg['thumbnail_url'] != null) 'thumbnail_url': msg['thumbnail_url'],
         if (msg['file_size_bytes'] != null)
           'file_size_bytes': msg['file_size_bytes'],
-        if (msg['reply_to_id'] != null) 'reply_to_id': msg['reply_to_id'],
-        if (msg['reply_content'] != null) 'reply_content': msg['reply_content'],
+        if (replyToId != null) 'reply_to_id': replyToId,
+        if (replyContent != null && replyContent.isNotEmpty)
+          'reply_content': replyContent,
       };
 
       await supabase.from('messages').insert(payload);
+
+      _simulatedTimers[localId]?.cancel();
+      _simulatedTimers.remove(localId);
+      uploadProgress.value = Map.from(uploadProgress.value)..remove(localId);
 
       final msgs = List<Map<String, dynamic>>.from(pendingMessages.value);
       final idx = msgs.indexWhere((m) => m['local_id'] == localId);
       if (idx != -1) {
         msgs[idx]['is_pending'] = false;
+        msgs[idx]['is_failed'] = false;
         pendingMessages.value = msgs;
         _savePending();
       }
-
-      Future.delayed(const Duration(seconds: 15), () => cancelMessage(localId));
-
-      try {
-        await supabase.from('chats').update({
-          'updated_at': DateTime.now().toUtc().toIso8601String(),
-          'last_message': msg['content'].toString().trim().isEmpty
-              ? 'Media'
-              : msg['content'],
-        }).eq('id', msg['chat_id']);
-      } catch (_) {}
     } catch (e) {
       _simulatedTimers[localId]?.cancel();
+      _simulatedTimers.remove(localId);
+
       final msgs = List<Map<String, dynamic>>.from(pendingMessages.value);
       final index = msgs.indexWhere((m) => m['local_id'] == localId);
       if (index != -1) {
         msgs[index]['is_failed'] = true;
+        msgs[index]['is_pending'] = false;
         pendingMessages.value = msgs;
         _savePending();
       }

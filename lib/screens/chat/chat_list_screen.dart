@@ -21,7 +21,7 @@ class ChatListScreen extends StatefulWidget {
 }
 
 class _ChatListScreenState extends State<ChatListScreen>
-    with AutomaticKeepAliveClientMixin {
+    with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
   // <-- ADD MIXIN
   final Color themeColor = const Color(0xFF4CAF50);
   int _selectedTabIndex = 0; // 0: Friends, 1: General, 2: Groups
@@ -50,11 +50,11 @@ class _ChatListScreenState extends State<ChatListScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _pageController = PageController(initialPage: _selectedTabIndex);
     _myId = supabase.auth.currentUser?.id;
 
     if (_myId != null) {
-      // 🔥 FIX: Clean up any stuck typing statuses from previous app crashes silently!
       supabase
           .from('chat_participants')
           .update({'is_typing': false})
@@ -67,6 +67,14 @@ class _ChatListScreenState extends State<ChatListScreen>
       Future.delayed(const Duration(milliseconds: 1500), () {
         if (mounted && _isLoading) setState(() => _isLoading = false);
       });
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _myId != null) {
+      _fetchLatestData();
+      _setupStreams();
     }
   }
 
@@ -238,6 +246,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pageController.dispose();
     _participantsSub?.cancel();
     _chatsSub?.cancel();
@@ -435,6 +444,13 @@ class _ChatListScreenState extends State<ChatListScreen>
       unreadByChat[cId] = (unreadByChat[cId] ?? 0) + 1;
     }
 
+    final seriousByChat = <String, int>{};
+    for (var msg in _unreadMessages.where((m) => m['sender_id'] != _myId)) {
+      final cId = msg['chat_id'].toString();
+      final s = msg['seriousness'] as int? ?? 0;
+      if (s > (seriousByChat[cId] ?? 0)) seriousByChat[cId] = s;
+    }
+
     return RefreshIndicator(
       color: themeColor,
       onRefresh: _handleRefresh,
@@ -500,6 +516,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                   amIAdmin: amIAdmin,
                   hasMention: hasMention,
                   onClearUnread: _clearUnreadForChat,
+                  seriousness: seriousByChat[chatIdStr] ?? 0,
                 );
               },
             ),
@@ -559,6 +576,7 @@ class _ChatTile extends StatefulWidget {
   final bool amIAdmin;
   final bool hasMention;
   final Function(String) onClearUnread;
+  final int seriousness;
 
   const _ChatTile({
     super.key,
@@ -573,6 +591,7 @@ class _ChatTile extends StatefulWidget {
     required this.onClearUnread,
     this.searchQuery = '',
     this.hasMention = false,
+    this.seriousness = 0,
   });
 
   @override
@@ -584,10 +603,6 @@ class _ChatTileState extends State<_ChatTile> {
   Map<String, dynamic>? _metaData;
   bool _isLoadingMeta = true;
 
-  late final Stream<List<Map<String, dynamic>>> _lastMessageStream;
-  String _cachedLastMessage = "Tap to chat";
-  String _cachedLastMessageTime = "";
-
   // 🔥 NEW: Auto-clearing typing timer
   bool _localIsTyping = false;
   Timer? _typingClearTimer;
@@ -595,15 +610,8 @@ class _ChatTileState extends State<_ChatTile> {
   @override
   void initState() {
     super.initState();
-    _lastMessageStream = supabase
-        .from('messages')
-        .stream(primaryKey: ['id'])
-        .eq('chat_id', widget.chat['id'])
-        .order('created_at', ascending: false)
-        .limit(1);
-
     _fetchMetaData();
-    _handleTypingProp(widget.isTyping); // Initialize typing state
+    _handleTypingProp(widget.isTyping);
   }
 
   // 🔥 NEW: Listens for changes from the database stream
@@ -637,19 +645,11 @@ class _ChatTileState extends State<_ChatTile> {
 
   Future<void> _fetchMetaData() async {
     final prefs = await SharedPreferences.getInstance();
-
-    // 1. INSTANT OFFLINE CACHE LOAD
     final cachedMeta = prefs
         .getString('profile_cache_${widget.targetUserId}_${widget.chat['id']}');
-    final cachedLastMsg = prefs.getString('last_msg_${widget.chat['id']}');
 
     if (mounted) {
       if (cachedMeta != null) _metaData = jsonDecode(cachedMeta);
-      if (cachedLastMsg != null) {
-        final decodedMsg = jsonDecode(cachedLastMsg);
-        _cachedLastMessage = decodedMsg['content'] ?? '📷 Media';
-        _cachedLastMessageTime = _formatTime(decodedMsg['time']);
-      }
       if (_metaData != null) setState(() => _isLoadingMeta = false);
     }
 
@@ -675,7 +675,6 @@ class _ChatTileState extends State<_ChatTile> {
 
       if (widget.targetUserId.isEmpty) return;
 
-      // 2. NETWORK SYNC
       final profileData = await supabase
           .from('profiles')
           .select('username, avatar_url, school_name, subscription_tier')
@@ -699,13 +698,11 @@ class _ChatTileState extends State<_ChatTile> {
       prefs.setString(
           'profile_cache_${widget.targetUserId}_${widget.chat['id']}',
           jsonEncode(newMeta));
-
-      if (mounted) {
+      if (mounted)
         setState(() {
           _metaData = newMeta;
           _isLoadingMeta = false;
         });
-      }
     } catch (e) {
       if (mounted && _metaData == null) {
         setState(() {
@@ -780,8 +777,9 @@ class _ChatTileState extends State<_ChatTile> {
 
     final title = _metaData?['title'] ?? "Chat";
     if (widget.searchQuery.isNotEmpty &&
-        !title.toLowerCase().contains(widget.searchQuery))
+        !title.toLowerCase().contains(widget.searchQuery)) {
       return const SizedBox.shrink();
+    }
 
     final avatarUrl = _metaData?['avatar_url'];
     final chatId = widget.chat['id'];
@@ -789,45 +787,49 @@ class _ChatTileState extends State<_ChatTile> {
     final isPlus = _metaData?['is_plus'] == true;
     final isGroup = widget.chat['is_group'] == true;
 
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: _lastMessageStream,
-      builder: (context, msgSnapshot) {
-        int seriousness = 0;
-        String? serverMediaType;
-        String serverLastMessage = _cachedLastMessage;
-        String serverLastTime = _cachedLastMessageTime;
+    // 🔥 Last message from chat row, updated instantly on send
+    String rawContent =
+        (widget.chat['last_message'] ?? 'Tap to chat').toString();
+    if (rawContent == 'Sticker/GIF') rawContent = '🎭 Sticker';
+    final String lastMessageTime = _formatTime(
+        (widget.chat['updated_at'] ?? widget.chat['created_at'])?.toString());
 
-        // 🔥 FIX: Always read the REAL server message first
-        if (msgSnapshot.hasData && msgSnapshot.data!.isNotEmpty) {
-          final msg = msgSnapshot.data!.first;
-          seriousness = msg['seriousness'] as int? ?? 0;
-          serverMediaType = msg['media_type']?.toString();
+    return ValueListenableBuilder<List<Map<String, dynamic>>>(
+      valueListenable: ChatSyncService.instance.pendingMessages,
+      builder: (context, pending, child) {
+        final myPending = pending
+            .where((m) => m['chat_id'].toString() == chatId.toString())
+            .toList();
+        final liveMsg = myPending.isNotEmpty ? myPending.first : null;
 
-          String rawContent = msg['content'] ?? '📷 Media';
-          if (rawContent == 'Sticker/GIF') rawContent = '🎭 Sticker';
-          if (serverMediaType?.startsWith('view_once') == true)
-            rawContent = '📷 View once message';
-          // 🔥 FIX: Pretty-print event reminders
-          if (serverMediaType == 'event') {
-            rawContent =
-                '📅 ${rawContent.replaceAll('⏳ ', '').replaceAll('🎉 ', '').split('\n').first}';
+        String displayMsg = _localIsTyping ? "typing..." : rawContent;
+        Color timeColor = (widget.unreadCount > 0 && widget.seriousness > 0)
+            ? Colors.redAccent
+            : Colors.white54;
+        String displayTime = lastMessageTime;
+        Color msgColor = _localIsTyping ? widget.themeColor : Colors.white54;
+
+        if (liveMsg != null && !_localIsTyping) {
+          displayTime = _formatTime(liveMsg['created_at']?.toString());
+          final content = (liveMsg['content'] ?? '').toString().trim();
+          displayMsg = content.isEmpty ? '📷 Media' : content;
+          if (displayMsg == 'Sticker/GIF') displayMsg = '🎭 Sticker';
+          if (liveMsg['media_type']?.toString().startsWith('view_once') ==
+              true) {
+            displayMsg = '📷 View once message';
           }
-
-          serverLastMessage = rawContent;
-          serverLastTime = _formatTime(msg['created_at']);
-          _cachedLastMessage = serverLastMessage;
-          _cachedLastMessageTime = serverLastTime;
-
-          SharedPreferences.getInstance().then((prefs) => prefs.setString(
-              'last_msg_$chatId',
-              jsonEncode(
-                  {'content': _cachedLastMessage, 'time': msg['created_at']})));
+          if (liveMsg['is_failed'] == true) {
+            displayMsg = '❌ Failed to send';
+            timeColor = Colors.redAccent;
+            msgColor = Colors.redAccent;
+          } else if (liveMsg['is_pending'] == true) {
+            displayMsg = '🕒 $displayMsg';
+          }
         }
 
         return ListTile(
           onTap: () async {
             widget.onClearUnread(chatId.toString());
-
             if (isGroup) {
               await Navigator.push(
                   context,
@@ -900,21 +902,8 @@ class _ChatTileState extends State<_ChatTile> {
                   ],
                 ),
               ),
-              ValueListenableBuilder<List<Map<String, dynamic>>>(
-                  valueListenable: ChatSyncService.instance.pendingMessages,
-                  builder: (context, pending, child) {
-                    final myPending =
-                        pending.where((m) => m['chat_id'] == chatId).toList();
-                    return Text(
-                        myPending.isNotEmpty
-                            ? _formatTime(myPending.first['created_at'])
-                            : serverLastTime,
-                        style: TextStyle(
-                            color: (widget.unreadCount > 0 && seriousness > 0)
-                                ? Colors.redAccent
-                                : Colors.white54,
-                            fontSize: 12));
-                  }),
+              Text(displayTime,
+                  style: TextStyle(color: timeColor, fontSize: 12)),
             ],
           ),
           subtitle: Row(
@@ -929,63 +918,15 @@ class _ChatTileState extends State<_ChatTile> {
                           style: TextStyle(
                               color: widget.themeColor.withOpacity(0.7),
                               fontSize: 12)),
-                    ValueListenableBuilder<List<Map<String, dynamic>>>(
-                        valueListenable:
-                            ChatSyncService.instance.pendingMessages,
-                        builder: (context, pending, child) {
-                          final myPending = pending
-                              .where((m) => m['chat_id'] == chatId)
-                              .toList();
-
-                          // 🔥 FIX: Priority: server message > typing > pending
-                          String displayMsg;
-                          Color msgColor;
-
-                          if (_localIsTyping) {
-                            displayMsg = "typing...";
-                            msgColor = widget.themeColor;
-                          } else if (myPending.isNotEmpty &&
-                              msgSnapshot.hasData &&
-                              msgSnapshot.data!.isEmpty) {
-                            // Only show pending if there's NO server message at all
-                            final lastMsg = myPending.first;
-                            final pendingMediaType =
-                                lastMsg['media_type']?.toString() ?? 'text';
-
-                            displayMsg =
-                                lastMsg['content'].toString().trim().isEmpty
-                                    ? '📷 Media'
-                                    : lastMsg['content'];
-                            if (displayMsg == 'Sticker/GIF')
-                              displayMsg = '🎭 Sticker';
-                            if (pendingMediaType.startsWith('view_once'))
-                              displayMsg = '📷 View once message';
-
-                            if (lastMsg['is_failed'] == true) {
-                              displayMsg = '❌ Failed to send';
-                              msgColor = Colors.redAccent;
-                            } else if (lastMsg['is_pending'] == true) {
-                              displayMsg = '🕒 $displayMsg';
-                              msgColor = Colors.white54;
-                            } else {
-                              msgColor = Colors.white54;
-                            }
-                          } else {
-                            // Use the server message (which includes events)
-                            displayMsg = serverLastMessage;
-                            msgColor = Colors.white54;
-                          }
-
-                          return Text(displayMsg,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                  color: msgColor,
-                                  fontStyle: _localIsTyping
-                                      ? FontStyle.italic
-                                      : FontStyle.normal,
-                                  fontSize: 14));
-                        }),
+                    Text(displayMsg,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: msgColor,
+                            fontStyle: _localIsTyping
+                                ? FontStyle.italic
+                                : FontStyle.normal,
+                            fontSize: 14)),
                   ],
                 ),
               ),
@@ -1006,7 +947,7 @@ class _ChatTileState extends State<_ChatTile> {
                     Container(
                         padding: const EdgeInsets.all(6),
                         decoration: BoxDecoration(
-                            color: seriousness > 0
+                            color: widget.seriousness > 0
                                 ? Colors.redAccent
                                 : widget.themeColor,
                             shape: BoxShape.circle),
