@@ -2194,7 +2194,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                         ConstrainedBox(
                           constraints: BoxConstraints(
                               maxHeight:
-                                  MediaQuery.of(context).size.height * 0.4),
+                                  MediaQuery.sizeOf(context).height * 0.4),
                           child: FutureBuilder(
                               future: supabase
                                   .from('saved_stickers')
@@ -2527,7 +2527,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 if (evtHasMedia)
                   Positioned.fill(
                     child: CachedNetworkImage(
-                      imageUrl: evtMediaUrl!.split(',').first,
+                      imageUrl: evtMediaUrl.split(',').first,
                       fit: BoxFit.cover,
                       placeholder: (context, url) =>
                           Container(color: const Color(0xFF0F172A)),
@@ -5627,7 +5627,7 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
                 color: Color(0xFF121212),
                 borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
             padding: EdgeInsets.fromLTRB(
-                24, 24, 24, MediaQuery.of(modalContext).viewInsets.bottom + 24),
+                24, 24, 24, MediaQuery.viewInsetsOf(modalContext).bottom + 24),
             child: Form(
               key: formKey,
               child: ListView(

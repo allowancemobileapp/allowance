@@ -18,15 +18,28 @@ class ChatSyncService {
       ValueNotifier([]);
   final ValueNotifier<Map<String, double?>> uploadProgress = ValueNotifier({});
   final Map<String, Timer> _simulatedTimers = {}; // <--- The Timer Engine
+  final Set<String> _processingIds = {}; // ← Prevents duplicate processing
+  final Set<String> _sentLocalIds = {}; // ← Tracks successfully sent messages
 
   Future<void> _loadPending() async {
     final prefs = await SharedPreferences.getInstance();
     final stored = prefs.getString('pending_chat_msgs');
     if (stored != null) {
-      pendingMessages.value =
-          List<Map<String, dynamic>>.from(jsonDecode(stored));
-      for (var msg in pendingMessages.value) {
-        if (msg['is_failed'] != true) _processQueueItem(msg);
+      final loaded = List<Map<String, dynamic>>.from(jsonDecode(stored));
+      // Only keep messages that haven't been sent yet
+      final unsent = loaded.where((m) {
+        final wasSent = m['is_pending'] == false && m['is_failed'] != true;
+        if (wasSent) _sentLocalIds.add(m['local_id'] as String);
+        return !wasSent;
+      }).toList();
+
+      pendingMessages.value = unsent;
+
+      // Only retry failed ones, not pending ones (they might be in-flight)
+      for (var msg in unsent) {
+        if (msg['is_failed'] == true) {
+          _processQueueItem(msg);
+        }
       }
     }
   }
@@ -41,6 +54,13 @@ class ChatSyncService {
       {List<String>? localPaths}) {
     final localId =
         '${DateTime.now().millisecondsSinceEpoch}_${message.hashCode}';
+
+    // Guard: Never enqueue a duplicate
+    if (_sentLocalIds.contains(localId) ||
+        pendingMessages.value.any((m) => m['local_id'] == localId)) {
+      return;
+    }
+
     final msg = {
       ...message,
       'local_id': localId,
@@ -70,10 +90,14 @@ class ChatSyncService {
   }
 
   void retryMessage(String localId) {
+    // Don't retry if already being processed
+    if (_processingIds.contains(localId)) return;
+
     final msgs = List<Map<String, dynamic>>.from(pendingMessages.value);
     final index = msgs.indexWhere((m) => m['local_id'] == localId);
     if (index != -1) {
       msgs[index]['is_failed'] = false;
+      msgs[index]['is_pending'] = true;
       pendingMessages.value = msgs;
       _savePending();
       _processQueueItem(msgs[index]);
@@ -104,8 +128,29 @@ class ChatSyncService {
     });
   }
 
+  void _removeFromPending(String localId) {
+    _simulatedTimers[localId]?.cancel();
+    _simulatedTimers.remove(localId);
+    uploadProgress.value = Map.from(uploadProgress.value)..remove(localId);
+
+    pendingMessages.value =
+        pendingMessages.value.where((m) => m['local_id'] != localId).toList();
+    _savePending();
+  }
+
   Future<void> _processQueueItem(Map<String, dynamic> msg) async {
     final localId = msg['local_id'] as String;
+
+    // 🔒 CRITICAL: Prevent duplicate processing of same message
+    if (_processingIds.contains(localId)) return;
+    if (_sentLocalIds.contains(localId)) {
+      // Already sent successfully, clean from pending
+      _removeFromPending(localId);
+      return;
+    }
+
+    _processingIds.add(localId);
+
     final supabase = Supabase.instance.client;
 
     try {
@@ -116,6 +161,7 @@ class ChatSyncService {
         _simulateProgress(localId);
 
         for (String path in localPaths) {
+          // ... (upload logic stays the same) ...
           Uint8List fileBytes;
           String fileName;
           final String mType = msg['media_type']?.toString() ?? 'image';
@@ -170,7 +216,7 @@ class ChatSyncService {
         uploadProgress.value = Map.from(uploadProgress.value)..[localId] = 1.0;
       }
 
-      // 🔒 Sanitize reply_to_id — events/stories aren't real messages
+      // Sanitize reply_to_id
       String? replyToId = msg['reply_to_id']?.toString();
       final String? replyContent = msg['reply_content']?.toString();
       final bool isSyntheticReply = replyToId != null &&
@@ -201,22 +247,24 @@ class ChatSyncService {
 
       await supabase.from('messages').insert(payload);
 
+      // ✅ SUCCESS: Mark as sent, remove from pending
+      _sentLocalIds.add(localId);
+      _removeFromPending(localId);
+
+      // Update chat last_message from the REAL successful insert
+      final preview = (msg['content'] ?? '').toString().trim();
+      await supabase.from('chats').update({
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+        'last_message': preview.isEmpty ? 'Media' : preview,
+      }).eq('id', msg['chat_id']);
+    } catch (e) {
+      debugPrint("Message send failed: $e");
+
       _simulatedTimers[localId]?.cancel();
       _simulatedTimers.remove(localId);
       uploadProgress.value = Map.from(uploadProgress.value)..remove(localId);
 
-      final msgs = List<Map<String, dynamic>>.from(pendingMessages.value);
-      final idx = msgs.indexWhere((m) => m['local_id'] == localId);
-      if (idx != -1) {
-        msgs[idx]['is_pending'] = false;
-        msgs[idx]['is_failed'] = false;
-        pendingMessages.value = msgs;
-        _savePending();
-      }
-    } catch (e) {
-      _simulatedTimers[localId]?.cancel();
-      _simulatedTimers.remove(localId);
-
+      // Mark as failed but keep in pending for retry
       final msgs = List<Map<String, dynamic>>.from(pendingMessages.value);
       final index = msgs.indexWhere((m) => m['local_id'] == localId);
       if (index != -1) {
@@ -225,6 +273,8 @@ class ChatSyncService {
         pendingMessages.value = msgs;
         _savePending();
       }
+    } finally {
+      _processingIds.remove(localId);
     }
   }
 }

@@ -606,12 +606,69 @@ class _ChatTileState extends State<_ChatTile> {
   // 🔥 NEW: Auto-clearing typing timer
   bool _localIsTyping = false;
   Timer? _typingClearTimer;
+  String _lastMessageFallback = '';
+  bool _hasLastMessageFallback = false;
 
   @override
   void initState() {
     super.initState();
     _fetchMetaData();
+    _fetchLastMessage(); // <-- ADD THIS LINE
     _handleTypingProp(widget.isTyping);
+  }
+
+  // 🔥 NEW: Fetches the real last message when the chat row cache is empty
+  Future<void> _fetchLastMessage() async {
+    final cached = widget.chat['last_message']?.toString() ?? '';
+    if (cached.isNotEmpty) {
+      _hasLastMessageFallback = true;
+      _lastMessageFallback = cached;
+      return;
+    }
+
+    try {
+      final msg = await supabase
+          .from('messages')
+          .select('content, media_type')
+          .eq('chat_id', widget.chat['id'])
+          .order('created_at', ascending: false)
+          .limit(1)
+          .maybeSingle();
+
+      if (mounted && msg != null) {
+        final content = msg['content']?.toString() ?? '';
+        final mType = msg['media_type']?.toString() ?? '';
+
+        String text = content;
+        if (text.isEmpty) {
+          if (mType == 'image' || mType == 'video')
+            text = '📷 Media';
+          else if (mType.startsWith('view_once'))
+            text = '📷 View once message';
+          else if (mType == 'sticker')
+            text = '🎭 Sticker';
+          else if (mType == 'audio')
+            text = '🎤 Voice message';
+          else if (mType == 'file')
+            text = '📎 File';
+          else if (mType == 'order')
+            text = '🛒 Order';
+          else if (mType == 'event')
+            text = '📅 Event';
+          else
+            text = 'Tap to chat';
+        }
+
+        setState(() {
+          _lastMessageFallback = text;
+          _hasLastMessageFallback = true;
+        });
+      } else if (mounted) {
+        setState(() => _hasLastMessageFallback = true);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _hasLastMessageFallback = true);
+    }
   }
 
   // 🔥 NEW: Listens for changes from the database stream
@@ -788,8 +845,12 @@ class _ChatTileState extends State<_ChatTile> {
     final isGroup = widget.chat['is_group'] == true;
 
     // 🔥 Last message from chat row, updated instantly on send
-    String rawContent =
-        (widget.chat['last_message'] ?? 'Tap to chat').toString();
+    String rawContent = widget.chat['last_message']?.toString() ?? '';
+    if (rawContent.isEmpty && _hasLastMessageFallback) {
+      rawContent = _lastMessageFallback; // <-- USE REAL DB FALLBACK
+    } else if (rawContent.isEmpty) {
+      rawContent = 'Tap to chat';
+    }
     if (rawContent == 'Sticker/GIF') rawContent = '🎭 Sticker';
     final String lastMessageTime = _formatTime(
         (widget.chat['updated_at'] ?? widget.chat['created_at'])?.toString());

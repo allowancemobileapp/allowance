@@ -1,6 +1,7 @@
 // lib/main.dart
 import 'dart:async';
 import 'dart:developer' as developer;
+import 'package:allowance/screens/chat/group_invite_screen.dart';
 import 'package:allowance/screens/introduction/reset_password_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -146,7 +147,6 @@ class _AllowanceAppState extends State<AllowanceApp> {
   }
 
   void _handleDeepLink(Uri uri) {
-    // 1. Catch the Rich Preview Share Links from WhatsApp/Twitter
     if (uri.pathSegments.contains('share')) {
       final type = uri.queryParameters['type'];
       final id = uri.queryParameters['id'];
@@ -156,7 +156,6 @@ class _AllowanceAppState extends State<AllowanceApp> {
           navigatorKey.currentState?.pushNamed('/gist', arguments: {'id': id});
         });
       } else if (type == 'moment' && id != null) {
-        // Handle opening a shared Moment natively
         Future.delayed(const Duration(milliseconds: 500), () {
           navigatorKey.currentState
               ?.pushNamed('/moment', arguments: {'id': id});
@@ -165,20 +164,43 @@ class _AllowanceAppState extends State<AllowanceApp> {
       return;
     }
 
-    // 🔥 NEW: Catch Referral Links!
     if (uri.pathSegments.contains('join')) {
       final refCode = uri.queryParameters['ref'];
       if (refCode != null && refCode.isNotEmpty) {
-        // Save the referral code to local storage so the Signup screen can use it
         SharedPreferences.getInstance().then((prefs) {
           prefs.setString('pending_referral_code', refCode);
           developer.log('Saved referral code: $refCode', name: 'DeepLink');
         });
       }
-      return; // App will naturally continue to the Introduction/Signup screen
+      return;
     }
 
-    // 2. Handle standard fallback links
+    // 🔥 NEW: Group invite links — allowance://group/<chatId>
+    if (uri.host == 'group' || uri.pathSegments.contains('group')) {
+      final chatId = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : null;
+      if (chatId == null || chatId.isEmpty) return;
+
+      final currentUser = Supabase.instance.client.auth.currentUser;
+      if (currentUser == null) {
+        // Not logged in yet — save it and consume it right after
+        // sign-in/signup, same pattern as the referral code above.
+        SharedPreferences.getInstance().then((prefs) {
+          prefs.setString('pending_group_join_id', chatId);
+          developer.log('Saved pending group join: $chatId', name: 'DeepLink');
+        });
+        return;
+      }
+
+      Future.delayed(const Duration(milliseconds: 500), () {
+        navigatorKey.currentState?.push(
+          MaterialPageRoute(
+              builder: (_) => GroupInviteScreen(
+                  chatId: chatId, userPreferences: _userPreferences)),
+        );
+      });
+      return;
+    }
+
     if (uri.pathSegments.contains('gist')) {
       final gistId = uri.pathSegments.last;
       Future.delayed(const Duration(milliseconds: 500), () {
@@ -197,7 +219,6 @@ class _AllowanceAppState extends State<AllowanceApp> {
       return;
     }
 
-    // 3. Handle Reset Password
     if (uri.host == 'reset-password' ||
         uri.pathSegments.contains('reset-password')) {
       Future.delayed(const Duration(milliseconds: 500), () {
@@ -206,6 +227,21 @@ class _AllowanceAppState extends State<AllowanceApp> {
         );
       });
     }
+  }
+
+  Future<void> _checkPendingGroupJoin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final pendingChatId = prefs.getString('pending_group_join_id');
+    if (pendingChatId == null || pendingChatId.isEmpty) return;
+    await prefs.remove('pending_group_join_id');
+
+    Future.delayed(const Duration(milliseconds: 800), () {
+      navigatorKey.currentState?.push(
+        MaterialPageRoute(
+            builder: (_) => GroupInviteScreen(
+                chatId: pendingChatId, userPreferences: _userPreferences)),
+      );
+    });
   }
 
   Future<void> _initializeApp() async {
@@ -229,13 +265,16 @@ class _AllowanceAppState extends State<AllowanceApp> {
           return;
         }
 
-        // 🔥 THE FIX: ONLY rebuild the app on major auth changes!
         if (event == AuthChangeEvent.initialSession ||
             event == AuthChangeEvent.signedIn ||
             event == AuthChangeEvent.signedOut) {
           if (session != null) {
             await _userPreferences.loadPreferences();
             await _setupFcmAndListeners();
+            if (event == AuthChangeEvent.signedIn ||
+                event == AuthChangeEvent.initialSession) {
+              _checkPendingGroupJoin(); // 🔥 NEW
+            }
           } else {
             await _userPreferences.clearLocal();
           }
