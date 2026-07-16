@@ -64,19 +64,20 @@
             </intent-filter>
 
             <!-- ============================================================== -->
-            <!-- APP LINKS INTENT FILTER (Handles allowanceapp.org/gist/XXX)    -->
+            <!-- 🔥 FIXED: APP LINKS INTENT FILTER (Catches ALL domain links)   -->
             <!-- ============================================================== -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 
-                <data android:scheme="https" android:host="allowanceapp.org" android:pathPrefix="/gist" />
-                <data android:scheme="https" android:host="www.allowanceapp.org" android:pathPrefix="/gist" />
+                <!-- Removed pathPrefix so it catches /share, /join, /group, /gist, etc. -->
+                <data android:scheme="https" android:host="allowanceapp.org" />
+                <data android:scheme="https" android:host="www.allowanceapp.org" />
             </intent-filter>
 
             <!-- ============================================================== -->
-            <!-- CUSTOM SCHEME INTENT FILTER (Handles Password Reset & Google)  -->
+            <!-- CUSTOM SCHEME INTENT FILTER (Handles allowance://group/xxx)    -->
             <!-- ============================================================== -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

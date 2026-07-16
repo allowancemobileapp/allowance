@@ -388,7 +388,7 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(8),
                         child: Image.asset('assets/images/allowance_logo.png',
-                            width: MediaQuery.of(context).size.width * 0.7,
+                            width: MediaQuery.sizeOf(context).width * 0.7,
                             height: 70,
                             fit: BoxFit.contain),
                       ),

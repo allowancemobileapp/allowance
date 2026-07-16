@@ -61,6 +61,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   Map<String, dynamic>? _replyMessage;
   bool _showScrollToBottom = false; // <-- REMOVED "final"
   Timer? _remoteTypingTimer;
+  AppLifecycleState? _lastLifecycleState; // <-- ADD THIS
+  Timer? _resumeDebounceTimer; // <-- ADD THIS
 
   // For file/media logic
   final Map<String, Color> _userColors = {};
@@ -86,11 +88,16 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
 
   // (Deleted the unused _messageStream entirely)
 
+  bool _isDisposed = false; // Add this field at the top of your State class
+
   @override
   void initState() {
     WidgetsBinding.instance.addObserver(this);
     super.initState();
     activeChatId = widget.chatId;
+
+    // 🔥 FIX: Add the scroll listener that was MISSING
+    _scrollController.addListener(_scrollListener);
 
     final po = widget.recipientProfile['pending_order'];
     if (po != null) {
@@ -101,7 +108,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
       }
     }
 
-    // 🔥 FIX: Check Local Cache FIRST to stop the "Follow" button from flashing!
     SharedPreferences.getInstance().then((prefs) {
       final cachedFolls =
           prefs.getString('cached_folls_${supabase.auth.currentUser!.id}');
@@ -116,16 +122,30 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
 
     _setupMessageStream();
     _setupTypingListener();
-    _checkFollowStatus(); // Silent network update
+    _checkFollowStatus();
     _markMessagesAsRead();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _setupMessageStream();
-      _setupTypingListener();
-      _markMessagesAsRead();
+    final previousState = _lastLifecycleState;
+    _lastLifecycleState = state;
+
+    // 🔥 FIX: Only run the heavy DB cascade if the app actually went to the background.
+    final wasActuallyBackgrounded = previousState == AppLifecycleState.paused ||
+        previousState == AppLifecycleState.detached;
+
+    if (state == AppLifecycleState.resumed &&
+        wasActuallyBackgrounded &&
+        mounted &&
+        !_isDisposed) {
+      _resumeDebounceTimer?.cancel();
+      _resumeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
+        if (!mounted || _isDisposed) return;
+        _setupMessageStream();
+        _setupTypingListener();
+        _markMessagesAsRead();
+      });
     }
   }
 
@@ -297,9 +317,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   }
 
   Future<void> _setupMessageStream() async {
-    final localMessages = await ChatLocalDB.instance
-        .getMessagesForChat(widget.chatId, limit: 100);
-    if (localMessages.isNotEmpty && mounted) {
+    final localMessages =
+        await ChatLocalDB.instance.getMessagesForChat(widget.chatId, limit: 50);
+    if (localMessages.isNotEmpty && mounted && !_isDisposed) {
       setState(() {
         _messages = localMessages;
         if (!_unreadCalculated) {
@@ -317,9 +337,14 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
         .stream(primaryKey: ['id'])
         .eq('chat_id', widget.chatId)
         .order('created_at', ascending: false)
-        .limit(100)
+        .limit(50)
         .listen((data) async {
-          if (!mounted) return;
+          // 🔥 FIX: Guard against disposed screen
+          if (!mounted || _isDisposed) return;
+
+          await Future.delayed(const Duration(milliseconds: 50));
+          if (!mounted || _isDisposed) return;
+
           setState(() {
             _messages = List<Map<String, dynamic>>.from(data);
             if (!_unreadCalculated && _messages.isNotEmpty) {
@@ -355,15 +380,24 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
         .stream(primaryKey: ['chat_id', 'user_id'])
         .eq('chat_id', widget.chatId)
         .listen((data) {
-          if (!mounted) return;
+          // 🔥 FIX: Guard against disposed screen
+          if (!mounted || _isDisposed) return;
+
           final myId = supabase.auth.currentUser?.id;
           final remoteTyping = data.any((p) =>
               p['user_id']?.toString() != myId && p['is_typing'] == true);
-          setState(() => _remoteUserIsTyping = remoteTyping);
+
+          // 🔥 FIX: Extra mounted check before setState
+          if (mounted && !_isDisposed) {
+            setState(() => _remoteUserIsTyping = remoteTyping);
+          }
+
           if (remoteTyping) {
             _remoteTypingTimer?.cancel();
             _remoteTypingTimer = Timer(const Duration(seconds: 5), () {
-              if (mounted) setState(() => _remoteUserIsTyping = false);
+              if (mounted && !_isDisposed) {
+                setState(() => _remoteUserIsTyping = false);
+              }
             });
           }
         });
@@ -378,10 +412,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
 
   Future<void> _setTypingStatus(bool status) async {
     final myId = supabase.auth.currentUser?.id;
-    if (myId == null || _isTyping == status) return;
+    if (myId == null || _isTyping == status || _isDisposed) return;
 
-    // 🔥 FIX 1: Removed setState()! The UI doesn't need to rebuild
-    // just because we are telling the database we are typing.
     _isTyping = status;
 
     try {
@@ -462,26 +494,30 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
       if (await _audioRecorder.hasPermission()) {
         String? filePath;
 
-        // 🔥 FIX: Web doesn't use file paths. Mobile does.
         if (!kIsWeb) {
           final dir = await getApplicationDocumentsDirectory();
           filePath =
               '${dir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
         }
 
-        // Passing empty string for path on web triggers the browser blob memory
         await _audioRecorder.start(
             const RecordConfig(encoder: AudioEncoder.aacLc),
             path: filePath ?? '');
 
-        setState(() {
-          _isRecording = true;
-          _recordSeconds = 0;
-          _recordDuration = "00:00";
-        });
+        // 🔥 FIX: Guard setState
+        if (mounted && !_isDisposed) {
+          setState(() {
+            _isRecording = true;
+            _recordSeconds = 0;
+            _recordDuration = "00:00";
+          });
+        }
 
         _recordTimer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
-          if (!mounted) return;
+          if (!mounted || _isDisposed) {
+            t.cancel();
+            return;
+          }
           setState(() {
             _recordSeconds++;
             final minutes =
@@ -498,12 +534,12 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
 
   Future<void> _stopAndSendRecording() async {
     _recordTimer?.cancel();
-    if (!mounted) return;
+    if (!mounted || _isDisposed) return;
+
     setState(() => _isRecording = false);
 
     final path = await _audioRecorder.stop();
     if (path != null && _recordSeconds >= 1) {
-      // Prevents accidental 0-second taps
       _uploadAndSendAudio(path);
     }
   }
@@ -554,7 +590,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     final currentOrder = _pendingOrder;
 
     _messageController.clear();
-    _focusNode.requestFocus();
+
     setState(() {
       _replyMessage = null;
       _pendingOrder = null;
@@ -587,39 +623,69 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
 
   // --- ADD THIS MISSING SCROLL LISTENER ---
   void _scrollListener() {
-    if (!_scrollController.hasClients) return; // <-- Prevents layout crashes
-    if (_scrollController.offset >= 300 && !_showScrollToBottom) {
-      setState(() => _showScrollToBottom = true);
-    } else if (_scrollController.offset < 300 && _showScrollToBottom) {
-      setState(() => _showScrollToBottom = false);
+    if (!_scrollController.hasClients) return;
+    if (!mounted || _isDisposed) return;
+
+    final offset = _scrollController.offset;
+    final shouldShow = offset >= 300;
+
+    if (shouldShow != _showScrollToBottom) {
+      setState(() => _showScrollToBottom = shouldShow);
     }
   }
 
   // --- REPLACE YOUR DISPOSE METHOD WITH THIS (Fixed errors) ---
   @override
   void dispose() {
+    // 🔥 FIX: Set disposed flag FIRST so no async work sneaks in
+    _isDisposed = true;
+
     WidgetsBinding.instance.removeObserver(this);
-    if (activeChatId == widget.chatId) {
-      activeChatId = null;
-    }
+
+    // 🔥 FIX: Cancel ALL subscriptions BEFORE anything else
     _msgSub?.cancel();
-    _scrollController.removeListener(_scrollListener);
-    _typingTimer?.cancel();
-    _remoteTypingTimer?.cancel();
+    _msgSub = null;
+    _typingStatusSub?.cancel();
+    _typingStatusSub = null;
 
-    // 🔥 THE FIX: Tell the database we stopped typing when we leave the chat!
-    final myId = supabase.auth.currentUser?.id;
-    if (myId != null && _isTyping) {
-      supabase.from('chat_participants').update({
-        'is_typing': false,
-      }).match({'chat_id': widget.chatId, 'user_id': myId});
+    // 🔥 FIX: Cancel ALL timers
+    _typingTimer?.cancel();
+    _typingTimer = null;
+    _remoteTypingTimer?.cancel();
+    _remoteTypingTimer = null;
+    _recordTimer?.cancel();
+    _recordTimer = null;
+    _resumeDebounceTimer?.cancel();
+    _resumeDebounceTimer = null;
+
+    // 🔥 FIX: Remove scroll listener BEFORE disposing controller
+    _scrollController.removeListener(_scrollListener);
+
+    // 🔥 FIX: Stop any active recording before disposing
+    if (_isRecording) {
+      _audioRecorder.stop().catchError((_) => null);
+      _isRecording = false;
     }
 
+    // 🔥 FIX: Dispose controllers in correct order
     _messageController.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
     _audioRecorder.dispose();
-    _recordTimer?.cancel();
+
+    // 🔥 FIX: Clear the typing status in DB but DON'T await it
+    // (awaiting here can hang dispose if network is slow)
+    final myId = supabase.auth.currentUser?.id;
+    if (myId != null) {
+      supabase.from('chat_participants').update({
+        'is_typing': false,
+      }).match({'chat_id': widget.chatId, 'user_id': myId}).catchError((_) {});
+    }
+
+    if (activeChatId == widget.chatId) {
+      activeChatId = null;
+    }
+
     super.dispose();
   }
 
@@ -802,109 +868,149 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   }
 
   // --- UPDATED: WEB KEYBOARD FIX & UNREAD MESSAGES SEPARATOR ---
-  // --- UPDATED: MOBILE KEYBOARD PERFORMANCE FIX & UNREAD MESSAGES SEPARATOR ---
+  // --- UPDATED: MOBILE KEYBOARD PERFORMANCE FIX ---
   @override
   Widget build(BuildContext context) {
     final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
     final myId = supabase.auth.currentUser?.id;
 
+    // 🔥 Get real-time keyboard height locally
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+
     return Scaffold(
       backgroundColor: Colors.black,
-      resizeToAvoidBottomInset: true,
+      // 🔥 THE REAL FIX: Disable native window resizing
+      resizeToAvoidBottomInset: false,
       appBar: _buildAppBar(),
-      body: Column(
-        children: [
-          Expanded(
-            child: GestureDetector(
-              onTap: () => FocusScope.of(context).unfocus(),
+      body: Padding(
+        // 🔥 Let Flutter's ultra-fast engine handle the upward shift
+        padding: EdgeInsets.only(bottom: bottomInset),
+        child: Column(
+          children: [
+            Expanded(
               child: Stack(
                 children: [
-                  // 🔥 FIX: isolated so the keyboard's resize animation doesn't
-                  // force this heavy list to repaint every frame.
-                  RepaintBoundary(
-                    child: ValueListenableBuilder<List<Map<String, dynamic>>>(
-                      valueListenable: ChatSyncService.instance.pendingMessages,
-                      builder: (context, pendingList, _) {
-                        // 🔥 FIX: memoized — see _computeCombinedMessages above.
-                        final combinedMessages =
-                            _computeCombinedMessages(pendingList, myId);
+                  ValueListenableBuilder<List<Map<String, dynamic>>>(
+                    valueListenable: ChatSyncService.instance.pendingMessages,
+                    builder: (context, pendingList, _) {
+                      final combinedMessages =
+                          _computeCombinedMessages(pendingList, myId);
 
-                        if (combinedMessages.isEmpty) {
-                          return const Center(
-                              child: Text("Send a message to start chatting!",
-                                  style: TextStyle(color: Colors.white54)));
+                      if (combinedMessages.isEmpty) {
+                        return const Center(
+                            child: Text("Send a message to start chatting!",
+                                style: TextStyle(color: Colors.white54)));
+                      }
+
+                      if (!_unreadCalculated && combinedMessages.isNotEmpty) {
+                        try {
+                          _firstUnreadIndex =
+                              combinedMessages.lastIndexWhere((m) {
+                            final senderId = m['sender_id']?.toString();
+                            final isRead = m['is_read'] == true;
+                            return !isRead &&
+                                senderId != null &&
+                                senderId != myId;
+                          });
+                        } catch (e) {
+                          _firstUnreadIndex = -1;
                         }
+                        _unreadCalculated = true;
+                      }
 
-                        if (!_unreadCalculated && combinedMessages.isNotEmpty) {
-                          _firstUnreadIndex = combinedMessages.lastIndexWhere(
-                              (m) =>
-                                  m['is_read'] == false &&
-                                  m['sender_id'] != myId);
-                          _unreadCalculated = true;
-                        }
-
-                        return ListView.builder(
-                          controller: _scrollController,
-                          reverse: true,
-                          addAutomaticKeepAlives: false,
-                          keyboardDismissBehavior:
-                              ScrollViewKeyboardDismissBehavior.onDrag,
-                          padding: const EdgeInsets.all(12),
-                          itemCount: combinedMessages.length,
-                          itemBuilder: (context, index) {
+                      return ListView.builder(
+                        controller: _scrollController,
+                        reverse: true,
+                        // 🔥 FIX: Increased cache stops bubbles from destroying/rebuilding
+                        cacheExtent: 400,
+                        // 🔥 FIX: Native swipe-down to close keyboard
+                        keyboardDismissBehavior:
+                            ScrollViewKeyboardDismissBehavior.onDrag,
+                        padding: const EdgeInsets.all(12),
+                        itemCount: combinedMessages.length,
+                        itemBuilder: (context, index) {
+                          try {
                             final msg = combinedMessages[index];
-                            final date =
-                                DateTime.parse(msg['created_at']).toLocal();
-                            bool showDateHeader = false;
+                            final messageId =
+                                (msg['id'] ?? msg['local_id'] ?? 'idx_$index')
+                                    .toString();
 
+                            DateTime date;
+                            try {
+                              final createdAt = msg['created_at']?.toString();
+                              date = (createdAt != null && createdAt.isNotEmpty)
+                                  ? DateTime.parse(createdAt).toLocal()
+                                  : DateTime.now();
+                            } catch (e) {
+                              date = DateTime.now();
+                            }
+
+                            bool showDateHeader = false;
                             if (index == combinedMessages.length - 1) {
                               showDateHeader = true;
                             } else {
-                              final prevDate = DateTime.parse(
-                                      combinedMessages[index + 1]['created_at'])
-                                  .toLocal();
-                              if (date.day != prevDate.day ||
-                                  date.year != prevDate.year) {
-                                showDateHeader = true;
+                              try {
+                                final prevMsg = combinedMessages[index + 1];
+                                final prevCreatedAt =
+                                    prevMsg['created_at']?.toString();
+                                if (prevCreatedAt != null &&
+                                    prevCreatedAt.isNotEmpty) {
+                                  final prevDate =
+                                      DateTime.parse(prevCreatedAt).toLocal();
+                                  if (date.day != prevDate.day ||
+                                      date.year != prevDate.year) {
+                                    showDateHeader = true;
+                                  }
+                                }
+                              } catch (e) {
+                                showDateHeader = false;
                               }
                             }
 
-                            return Column(
-                              children: [
-                                if (showDateHeader)
-                                  Padding(
-                                      padding: const EdgeInsets.symmetric(
+                            return RepaintBoundary(
+                              key: ValueKey('msg_row_$messageId'),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (showDateHeader)
+                                    Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 16),
+                                        child: Center(
+                                            child: Text(_getDateLabel(date),
+                                                style: const TextStyle(
+                                                    color: Colors.white54,
+                                                    fontSize: 12)))),
+                                  if (index == _firstUnreadIndex &&
+                                      _firstUnreadIndex != -1)
+                                    Container(
+                                      margin: const EdgeInsets.symmetric(
                                           vertical: 16),
-                                      child: Center(
-                                          child: Text(_getDateLabel(date),
-                                              style: const TextStyle(
-                                                  color: Colors.white54,
-                                                  fontSize: 12)))),
-                                if (index == _firstUnreadIndex &&
-                                    _firstUnreadIndex != -1)
-                                  Container(
-                                    margin: const EdgeInsets.symmetric(
-                                        vertical: 16),
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 12, vertical: 4),
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF1E1E1E),
-                                        borderRadius:
-                                            BorderRadius.circular(12)),
-                                    child: const Text("UNREAD MESSAGES",
-                                        style: TextStyle(
-                                            color: Colors.amber,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.bold)),
-                                  ),
-                                _buildBubble(
-                                    combinedMessages, index, maxBubbleWidth),
-                              ],
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 4),
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFF1E1E1E),
+                                          borderRadius:
+                                              BorderRadius.circular(12)),
+                                      child: const Text("UNREAD MESSAGES",
+                                          style: TextStyle(
+                                              color: Colors.amber,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold)),
+                                    ),
+                                  _buildBubble(
+                                      combinedMessages, index, maxBubbleWidth),
+                                ],
+                              ),
                             );
-                          },
-                        );
-                      },
-                    ),
+                          } catch (e) {
+                            debugPrint(
+                                '💀 Message render error at index $index: $e');
+                            return const SizedBox.shrink();
+                          }
+                        },
+                      );
+                    },
                   ),
                   if (_showScrollToBottom)
                     Positioned(
@@ -922,15 +1028,19 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                 ],
               ),
             ),
-          ),
-          // 🔥 FIX: own boundary so the input bar's caret/focus changes don't
-          // ripple a repaint into the message list above it.
-          RepaintBoundary(child: _buildInputBar()),
-        ],
+            SafeArea(
+              top: false,
+              // 🔥 Only apply bottom safe area if keyboard is closed to avoid double-padding
+              bottom: bottomInset == 0,
+              child: RepaintBoundary(child: _buildInputBar()),
+            ),
+          ],
+        ),
       ),
     );
   }
 
+  // 4. INPUT BAR (With Gboard GIF/Sticker Injection)
   // 4. INPUT BAR (With Gboard GIF/Sticker Injection)
   Widget _buildInputBar() {
     return Container(
@@ -987,10 +1097,13 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                         style: const TextStyle(color: Colors.white),
                         maxLines: 5,
                         minLines: 1,
-                        textInputAction: TextInputAction.newline,
                         keyboardType: TextInputType.multiline,
-
-                        // 🔥 ENABLES GBOARD GIFS AND STICKERS!
+                        scrollPadding: EdgeInsets.zero,
+                        // 🔥 RESTORED: enableSuggestions and autocorrect false flags removed!
+                        // This allows Gboard to enable swipe-to-text, GIFs, and stickers again.
+                        enableInteractiveSelection: true,
+                        textInputAction: TextInputAction.newline,
+                        onChanged: _handleTyping,
                         contentInsertionConfiguration:
                             ContentInsertionConfiguration(
                           onContentInserted:
@@ -1009,19 +1122,23 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                                   .from('chat_media')
                                   .getPublicUrl(storagePath);
 
-                              // Uses the fixed ChatSyncService!
+                              final replyId = _replyMessage?['id'];
+                              final replySummary = _getReplySummary();
+                              setState(() => _replyMessage = null);
+
                               ChatSyncService.instance.enqueueMessage({
                                 'chat_id': widget.chatId,
                                 'sender_id': myId,
                                 'content': 'Sticker/GIF',
                                 'media_type': 'sticker',
-                                'media_url': publicUrl
+                                'media_url': publicUrl,
+                                if (replyId != null) 'reply_to_id': replyId,
+                                if (replyId != null)
+                                  'reply_content': replySummary,
                               });
                             }
                           },
                         ),
-
-                        onChanged: _handleTyping,
                         decoration: InputDecoration(
                           hintText: 'Message...',
                           hintStyle: const TextStyle(color: Colors.white54),
@@ -1053,11 +1170,16 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                   valueListenable: _messageController,
                   builder: (context, value, child) {
                     final hasText = value.text.trim().isNotEmpty;
-                    if (hasText) {
-                      return IconButton(
-                          icon:
-                              const Icon(Icons.send, color: Color(0xFF4CAF50)),
-                          onPressed: () => _sendMessage());
+                    if (hasText || _pendingOrder != null) {
+                      return GestureDetector(
+                        onTap: () => _sendMessage(),
+                        child: Container(
+                          margin: const EdgeInsets.only(left: 8, bottom: 4),
+                          padding: const EdgeInsets.all(10),
+                          child: const Icon(Icons.send,
+                              color: Color(0xFF4CAF50), size: 24),
+                        ),
+                      );
                     } else {
                       return GestureDetector(
                           onTap: () {
@@ -2128,7 +2250,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                 if (evtHasMedia)
                   Positioned.fill(
                     child: CachedNetworkImage(
-                      imageUrl: evtMediaUrl!.split(',').first,
+                      imageUrl: evtMediaUrl.split(',').first,
                       fit: BoxFit.cover,
                       placeholder: (context, url) =>
                           Container(color: const Color(0xFF0F172A)),
@@ -2544,9 +2666,14 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                                   ? Radius.zero
                                   : const Radius.circular(20),
                             ),
-                            child: IntrinsicWidth(
+                            child: ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxWidth: maxWidth,
+                                minWidth: 0,
+                              ),
                               child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
                                   if (isOrder)
                                     _buildOrderCard(
@@ -3039,6 +3166,19 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
             fit: BoxFit.cover,
             width: double.infinity,
             height: height ?? 200,
+            memCacheWidth: 800, // 🔥 CAP memory usage
+            memCacheHeight: 800,
+            maxWidthDiskCache: 1200,
+            maxHeightDiskCache: 1200,
+            placeholder: (context, url) => Container(
+                  color: Colors.grey[900],
+                  child: const Center(
+                    child: CircularProgressIndicator(
+                      color: Color(0xFF4CAF50),
+                      strokeWidth: 2,
+                    ),
+                  ),
+                ),
             errorWidget: (c, u, e) => _buildErrorPlaceholder(false));
       }
     }
@@ -3679,8 +3819,8 @@ class AudioPlayerService {
   bool _isDownloaded = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
+  bool _initialized = false; // 🔥 guards against re-subscribing
 
-  // Stream controllers for UI to listen to
   final _playingController = StreamController<bool>.broadcast();
   final _loadingController = StreamController<bool>.broadcast();
   final _durationController = StreamController<Duration>.broadcast();
@@ -3704,6 +3844,9 @@ class AudioPlayerService {
   Duration get position => _position;
 
   Future<void> init() async {
+    if (_initialized) return;
+    _initialized = true;
+
     _player.playerStateStream.listen((state) {
       _isPlaying = state.playing;
       _playingController.add(_isPlaying);
@@ -3740,26 +3883,20 @@ class AudioPlayerService {
   }
 
   Future<void> togglePlay(String url) async {
-    // If same URL is playing, pause it
     if (_currentUrl == url && _isPlaying) {
       await _player.pause();
       return;
     }
-
-    // If same URL is paused, resume
     if (_currentUrl == url && !_isPlaying && _isLoaded) {
       await _player.play();
       return;
     }
-
-    // New URL — load and play
     if (_currentUrl != url) {
       _isLoaded = false;
       _isLoading = true;
       _loadingController.add(true);
       _currentUrl = url;
       _urlController.add(url);
-
       try {
         await _player.setUrl(url);
         _isLoaded = true;
@@ -3767,7 +3904,6 @@ class AudioPlayerService {
       } catch (e) {
         debugPrint("Audio load error: $e");
       }
-
       _isLoading = false;
       _loadingController.add(false);
     }
@@ -4028,6 +4164,7 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
   bool _isDownloaded = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
+  final List<StreamSubscription> _subs = [];
 
   @override
   void initState() {
@@ -4035,39 +4172,37 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
     _service.init();
     _service.checkDownloaded(widget.url);
 
-    // Subscribe to persistent service streams
-    _service.playingStream.listen((playing) {
+    _subs.add(_service.playingStream.listen((playing) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() => _isPlaying = playing);
       }
-    });
-    _service.loadingStream.listen((loading) {
+    }));
+    _subs.add(_service.loadingStream.listen((loading) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() => _isLoading = loading);
       }
-    });
-    _service.durationStream.listen((d) {
+    }));
+    _subs.add(_service.durationStream.listen((d) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() {
           _duration = d;
           _isLoaded = true;
         });
       }
-    });
-    _service.positionStream.listen((p) {
+    }));
+    _subs.add(_service.positionStream.listen((p) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() => _position = p);
       }
-    });
-    _service.downloadedStream.listen((downloaded) {
+    }));
+    _subs.add(_service.downloadedStream.listen((downloaded) {
       if (mounted) setState(() => _isDownloaded = downloaded);
-    });
-    _service.urlStream.listen((url) {
+    }));
+    _subs.add(_service.urlStream.listen((url) {
       if (mounted && url != widget.url) {
-        // Another voice note started playing — show as paused
         setState(() => _isPlaying = false);
       }
-    });
+    }));
   }
 
   Future<void> _togglePlay() async {
@@ -4082,6 +4217,14 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
     final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return "$minutes:$seconds";
+  }
+
+  @override
+  void dispose() {
+    for (final s in _subs) {
+      s.cancel();
+    }
+    super.dispose();
   }
 
   @override

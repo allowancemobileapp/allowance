@@ -473,7 +473,7 @@ class _TicketSubmissionScreenState extends State<TicketSubmissionScreen> {
                         if (!snapshot.hasData) return const SizedBox();
                         return Image.memory(
                           snapshot.data!,
-                          height: MediaQuery.of(context).size.width * 0.6,
+                          height: MediaQuery.sizeOf(context).width * 0.6,
                           fit: BoxFit.cover,
                         );
                       },

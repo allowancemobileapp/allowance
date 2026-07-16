@@ -20,6 +20,7 @@ import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
@@ -64,9 +65,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   final FocusNode _focusNode = FocusNode(); // <--- KEEPS KEYBOARD STABLE
   final Map<String, Uint8List> _chatVideoThumbCache = {};
   final AudioRecorder _audioRecorder = AudioRecorder();
+  List<Map<String, dynamic>> _mentionSuggestions = [];
+  int? _mentionStartIndex;
   bool _isRecording = false;
   String _recordDuration = "00:00";
   Timer? _recordTimer;
+  AppLifecycleState? _lastLifecycleState;
+  Timer? _resumeDebounceTimer;
   int _recordSeconds = 0;
 
   bool _isTyping = false;
@@ -96,11 +101,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   // Add next to _unreadCalculated:
   List<Map<String, dynamic>>? _cachedCombinedMessages;
   String _lastComputeSignature = '';
+  bool _isDisposed = false;
 
   @override
   void initState() {
-    super.initState();
     WidgetsBinding.instance.addObserver(this);
+    super.initState();
     activeChatId = widget.chatId;
 
     _chatMeta = {
@@ -109,7 +115,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       'group_description': 'Loading group info...',
     };
 
+    // 🔥 FIX: Add the scroll listener that was already there, but add _isDisposed guard
     _scrollController.addListener(_scrollListener);
+    _messageController.addListener(_onMessageTextChanged);
+
     _setupMessageStream();
     _loadChatMeta();
     _setupTypingListener();
@@ -118,11 +127,32 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _setupMessageStream();
-      _setupTypingListener();
-      _loadChatMeta();
-      _markMessagesAsRead();
+    final previousState = _lastLifecycleState;
+    _lastLifecycleState = state;
+
+    // 🔥 FIX: Only re-run the full setup cascade (2 realtime resubscribes +
+    // 3 DB queries + a messages UPDATE) when we ACTUALLY come back from
+    // being backgrounded. Soft-keyboard show/hide on Android — ColorOS
+    // especially — can fire a transient `inactive` -> `resumed` blip
+    // without the app ever really leaving the foreground. Treating that
+    // blip as a real resume was what re-triggered everything on every
+    // keyboard toggle, piling up overlapping subscriptions/queries until
+    // the phone couldn't keep up.
+    final wasActuallyBackgrounded = previousState == AppLifecycleState.paused ||
+        previousState == AppLifecycleState.detached;
+
+    if (state == AppLifecycleState.resumed &&
+        wasActuallyBackgrounded &&
+        mounted &&
+        !_isDisposed) {
+      _resumeDebounceTimer?.cancel();
+      _resumeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
+        if (!mounted || _isDisposed) return;
+        _setupMessageStream();
+        _setupTypingListener();
+        _loadChatMeta();
+        _markMessagesAsRead();
+      });
     }
   }
 
@@ -290,17 +320,24 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         .stream(primaryKey: ['chat_id', 'user_id'])
         .eq('chat_id', widget.chatId)
         .listen((data) {
-          if (!mounted) return;
+          // 🔥 FIX: Guard against disposed screen
+          if (!mounted || _isDisposed) return;
+
           final myId = supabase.auth.currentUser?.id;
           final remoteTyping = data.any((p) =>
               p['user_id']?.toString() != myId && p['is_typing'] == true);
 
-          setState(() => _remoteUserIsTyping = remoteTyping);
+          // 🔥 FIX: Extra mounted check before setState
+          if (mounted && !_isDisposed) {
+            setState(() => _remoteUserIsTyping = remoteTyping);
+          }
 
           if (remoteTyping) {
             _remoteTypingTimer?.cancel();
             _remoteTypingTimer = Timer(const Duration(seconds: 5), () {
-              if (mounted) setState(() => _remoteUserIsTyping = false);
+              if (mounted && !_isDisposed) {
+                setState(() => _remoteUserIsTyping = false);
+              }
             });
           }
         });
@@ -315,10 +352,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
   Future<void> _setTypingStatus(bool status) async {
     final myId = supabase.auth.currentUser?.id;
-    if (myId == null || _isTyping == status) return;
+    if (myId == null || _isTyping == status || _isDisposed) return;
 
-    // 🔥 FIX 1: Removed setState()! The UI doesn't need to rebuild
-    // just because we are telling the database we are typing.
     _isTyping = status;
 
     try {
@@ -341,26 +376,30 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       if (await _audioRecorder.hasPermission()) {
         String? filePath;
 
-        // 🔥 FIX: Web doesn't use file paths. Mobile does.
         if (!kIsWeb) {
           final dir = await getApplicationDocumentsDirectory();
           filePath =
               '${dir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
         }
 
-        // Passing empty string for path on web triggers the browser blob memory
         await _audioRecorder.start(
             const RecordConfig(encoder: AudioEncoder.aacLc),
             path: filePath ?? '');
 
-        setState(() {
-          _isRecording = true;
-          _recordSeconds = 0;
-          _recordDuration = "00:00";
-        });
+        // 🔥 FIX: Guard setState
+        if (mounted && !_isDisposed) {
+          setState(() {
+            _isRecording = true;
+            _recordSeconds = 0;
+            _recordDuration = "00:00";
+          });
+        }
 
         _recordTimer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
-          if (!mounted) return;
+          if (!mounted || _isDisposed) {
+            t.cancel();
+            return;
+          }
           setState(() {
             _recordSeconds++;
             final minutes =
@@ -377,12 +416,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
   Future<void> _stopAndSendRecording() async {
     _recordTimer?.cancel();
-    if (!mounted) return;
+    if (!mounted || _isDisposed) return;
+
     setState(() => _isRecording = false);
 
     final path = await _audioRecorder.stop();
     if (path != null && _recordSeconds >= 1) {
-      // Prevents accidental 0-second taps
       _uploadAndSendAudio(path);
     }
   }
@@ -420,6 +459,71 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     ]);
   }
 
+  void _onMessageTextChanged() {
+    _detectMention(_messageController.text);
+  }
+
+  void _detectMention(String text) {
+    final cursor = _messageController.selection.baseOffset;
+    if (cursor < 0 || cursor > text.length) {
+      if (_mentionSuggestions.isNotEmpty)
+        setState(() => _mentionSuggestions = []);
+      return;
+    }
+
+    int at = -1;
+    for (int i = cursor - 1; i >= 0; i--) {
+      final ch = text[i];
+      if (ch == '@') {
+        at = i;
+        break;
+      }
+      if (ch == ' ' || ch == '\n') break;
+    }
+
+    if (at == -1) {
+      if (_mentionSuggestions.isNotEmpty)
+        setState(() => _mentionSuggestions = []);
+      return;
+    }
+
+    final partial = text.substring(at + 1, cursor).toLowerCase();
+    final myUsername = widget.userPreferences.username?.toLowerCase();
+    final matches = _memberProfiles
+        .where((p) {
+          final uname = (p['username'] ?? '').toString().toLowerCase();
+          if (uname.isEmpty || uname == myUsername) return false;
+          return partial.isEmpty || uname.startsWith(partial);
+        })
+        .take(5)
+        .toList();
+
+    setState(() {
+      _mentionStartIndex = at;
+      _mentionSuggestions = matches;
+    });
+  }
+
+  void _applyMention(Map<String, dynamic> profile) {
+    final username = profile['username']?.toString() ?? '';
+    final text = _messageController.text;
+    final cursor = _messageController.selection.baseOffset;
+    final start = _mentionStartIndex ?? cursor;
+    final before = text.substring(0, start);
+    final after = text.substring(cursor);
+    final newText = '$before@$username $after';
+    final newCursor = before.length + username.length + 2;
+
+    _messageController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newCursor),
+    );
+    setState(() {
+      _mentionSuggestions = [];
+      _mentionStartIndex = null;
+    });
+  }
+
   Future<void> _sendMessage({String? mediaUrl, String? type}) async {
     final text = _messageController.text.trim();
     final myId = supabase.auth.currentUser?.id;
@@ -431,7 +535,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     final replySummary = _getReplySummary();
 
     _messageController.clear();
-    _focusNode.requestFocus();
     setState(() => _replyMessage = null);
 
     ChatSyncService.instance.enqueueMessage({
@@ -671,6 +774,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
               Navigator.pop(ctx);
               await _pickAndUploadMedia(ImageSource.camera, 'image');
             }),
+            _menuTile(Icons.poll, 'Create Poll', () {
+              Navigator.pop(ctx);
+              _showCreatePollSheet();
+            }),
 
             // 🔥 OPEN STICKERS MENU
             if (allowPhotos)
@@ -682,6 +789,431 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
             const SizedBox(height: 12),
           ],
         ),
+      ),
+    );
+  }
+
+  void _createPoll(String question, List<String> options, bool allowMultiple) {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    ChatSyncService.instance.enqueueMessage({
+      'chat_id': widget.chatId,
+      'sender_id': myId,
+      'content': question,
+      'media_type': 'poll',
+      'poll_options': options,
+      'poll_allow_multiple': allowMultiple,
+    });
+  }
+
+  void _showCreatePollSheet() {
+    final questionController = TextEditingController();
+    final optionControllers = <TextEditingController>[
+      TextEditingController(),
+      TextEditingController()
+    ];
+    bool allowMultiple = false;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) => Padding(
+          padding: EdgeInsets.only(
+            left: 20,
+            right: 20,
+            top: 20,
+            bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Create Poll',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: questionController,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: 'Ask a question...',
+                    hintStyle: const TextStyle(color: Colors.white54),
+                    filled: true,
+                    fillColor: const Color(0xFF121212),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                ...optionControllers.asMap().entries.map((entry) {
+                  final i = entry.key;
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: entry.value,
+                            style: const TextStyle(color: Colors.white),
+                            decoration: InputDecoration(
+                              hintText: 'Option ${i + 1}',
+                              hintStyle: const TextStyle(color: Colors.white54),
+                              filled: true,
+                              fillColor: const Color(0xFF121212),
+                              border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide.none),
+                            ),
+                          ),
+                        ),
+                        if (optionControllers.length > 2)
+                          IconButton(
+                            icon: const Icon(Icons.remove_circle_outline,
+                                color: Colors.redAccent),
+                            onPressed: () => setModalState(
+                                () => optionControllers.removeAt(i)),
+                          ),
+                      ],
+                    ),
+                  );
+                }),
+                if (optionControllers.length < 8)
+                  TextButton.icon(
+                    onPressed: () => setModalState(
+                        () => optionControllers.add(TextEditingController())),
+                    icon: const Icon(Icons.add, color: Color(0xFF4CAF50)),
+                    label: const Text('Add option',
+                        style: TextStyle(color: Color(0xFF4CAF50))),
+                  ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Allow multiple answers',
+                      style: TextStyle(color: Colors.white)),
+                  value: allowMultiple,
+                  activeColor: const Color(0xFF4CAF50),
+                  onChanged: (v) => setModalState(() => allowMultiple = v),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF4CAF50),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    onPressed: () {
+                      final question = questionController.text.trim();
+                      final options = optionControllers
+                          .map((c) => c.text.trim())
+                          .where((o) => o.isNotEmpty)
+                          .toList();
+                      if (question.isEmpty || options.length < 2) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text(
+                                    'Add a question and at least 2 options')));
+                        return;
+                      }
+                      Navigator.pop(ctx);
+                      _createPoll(question, options, allowMultiple);
+                    },
+                    child: const Text('Send Poll',
+                        style: TextStyle(
+                            color: Colors.black,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPollBubble(
+      Map<String, dynamic> message, bool isMe, String timeStr) {
+    final messageId = message['id'] is int
+        ? message['id']
+        : int.tryParse(message['id'].toString());
+    final question = (message['content'] ?? '').toString();
+
+    // 🔥 THE ABSOLUTE BULLETPROOF OPTIONS PARSER
+    List<String> options = [];
+    final rawOptions = message['poll_options'];
+
+    if (rawOptions != null) {
+      if (rawOptions is List) {
+        options = rawOptions.map((e) => e.toString()).toList();
+      } else {
+        final String strVal = rawOptions.toString().trim();
+        try {
+          // 1. Try to parse as strict JSON: ["Option 1", "Option 2"]
+          final decoded = jsonDecode(strVal);
+          if (decoded is List) {
+            options = decoded.map((e) => e.toString()).toList();
+          }
+        } catch (_) {
+          // 2. Fallback for Postgres arrays {Opt 1, Opt 2} or Dart strings [Opt 1, Opt 2]
+          String cleanStr = strVal;
+          if (cleanStr.startsWith('{') && cleanStr.endsWith('}')) {
+            cleanStr = cleanStr.substring(1, cleanStr.length - 1);
+          } else if (cleanStr.startsWith('[') && cleanStr.endsWith(']')) {
+            cleanStr = cleanStr.substring(1, cleanStr.length - 1);
+          }
+
+          if (cleanStr.isNotEmpty) {
+            // Split by comma and clean up quotes/spaces
+            options = cleanStr.split(',').map((e) {
+              String s = e.trim();
+              if (s.startsWith('"') && s.endsWith('"'))
+                s = s.substring(1, s.length - 1);
+              if (s.startsWith("'") && s.endsWith("'"))
+                s = s.substring(1, s.length - 1);
+              return s;
+            }).toList();
+          }
+        }
+      }
+    }
+
+    // Safety fallback so you never see a completely blank green bubble again
+    if (options.isEmpty) {
+      options = ["Options unavailable"];
+    }
+
+    final allowMultiple = message['poll_allow_multiple'] == true;
+    final myId = supabase.auth.currentUser?.id;
+    final isPending = message['is_pending'] == true;
+
+    if (messageId == null || isPending) {
+      return Container(
+        constraints: const BoxConstraints(minWidth: 240, maxWidth: 280),
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(children: [
+              Icon(Icons.poll,
+                  size: 16,
+                  color: isMe ? Colors.black87 : const Color(0xFF4CAF50)),
+              const SizedBox(width: 6),
+              Text('POLL',
+                  style: TextStyle(
+                      color: isMe ? Colors.black54 : const Color(0xFF4CAF50),
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold)),
+            ]),
+            const SizedBox(height: 8),
+            Text(question,
+                style: TextStyle(
+                    color: isMe ? Colors.black : Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            ...options.map((opt) => Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Container(
+                    height: 32,
+                    width: double
+                        .infinity, // 🔧 keep pill full-width, matches sent state below
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        color: isMe ? Colors.black12 : Colors.white10),
+                    alignment: Alignment.centerLeft,
+                    child: Text(opt,
+                        style: TextStyle(
+                            color: isMe ? Colors.black54 : Colors.white70,
+                            fontSize: 13)),
+                  ),
+                )),
+            Text('Sending...',
+                style: TextStyle(
+                    color: isMe ? Colors.black45 : Colors.white38,
+                    fontSize: 11,
+                    fontStyle: FontStyle.italic)),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      constraints: const BoxConstraints(minWidth: 240, maxWidth: 280),
+      padding: const EdgeInsets.all(14),
+      child: StreamBuilder<List<Map<String, dynamic>>>(
+        stream: supabase
+            .from('chat_poll_votes')
+            .stream(primaryKey: ['id']).eq('message_id', messageId),
+        builder: (context, snapshot) {
+          final votes = snapshot.data ?? [];
+          final myVotes = votes
+              .where((v) => v['user_id'] == myId)
+              .map((v) => v['option'] as String)
+              .toSet();
+          final totalVoters = votes.map((v) => v['user_id']).toSet().length;
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(children: [
+                Icon(Icons.poll,
+                    size: 16,
+                    color: isMe ? Colors.black87 : const Color(0xFF4CAF50)),
+                const SizedBox(width: 6),
+                Text('POLL',
+                    style: TextStyle(
+                        color: isMe ? Colors.black54 : const Color(0xFF4CAF50),
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 0.5)),
+              ]),
+              const SizedBox(height: 8),
+              Text(question,
+                  style: TextStyle(
+                      color: isMe ? Colors.black : Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 12),
+
+              // 🔥 THE OPTIONS LOOP
+              ...options.map((opt) {
+                final isSelected = myVotes.contains(opt);
+                final optCount = votes.where((v) => v['option'] == opt).length;
+                final percent =
+                    votes.isEmpty ? 0 : (optCount / votes.length * 100).round();
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: GestureDetector(
+                    onTap: () async {
+                      if (myId == null || opt == "Options unavailable") return;
+                      try {
+                        if (isSelected) {
+                          await supabase
+                              .from('chat_poll_votes')
+                              .delete()
+                              .match({
+                            'message_id': messageId,
+                            'user_id': myId,
+                            'option': opt
+                          });
+                        } else {
+                          if (!allowMultiple && myVotes.isNotEmpty) {
+                            await supabase
+                                .from('chat_poll_votes')
+                                .delete()
+                                .match(
+                                    {'message_id': messageId, 'user_id': myId});
+                          }
+                          await supabase.from('chat_poll_votes').insert({
+                            'message_id': messageId,
+                            'user_id': myId,
+                            'option': opt
+                          });
+                        }
+                      } catch (e) {
+                        debugPrint('Vote error: $e');
+                      }
+                    },
+                    child: Stack(
+                      children: [
+                        Container(
+                          height: 36,
+                          width: double
+                              .infinity, // 🔧 THE FIX — without this, this track
+                          // Container shrinks to match its FractionallySizedBox child's
+                          // width. At 0 votes, percent=0 → widthFactor=0 → the whole
+                          // Stack (and the Positioned.fill holding the label) collapses
+                          // to 0px and disappears, which is exactly what you were seeing.
+                          decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(8),
+                              color: isMe ? Colors.black12 : Colors.white10),
+                          child: FractionallySizedBox(
+                            alignment: Alignment.centerLeft,
+                            widthFactor: (percent / 100).clamp(0.0, 1.0),
+                            child: Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(8),
+                                color: (isMe
+                                        ? const Color(0xFF388E3C)
+                                        : const Color(0xFF4CAF50))
+                                    .withOpacity(isSelected ? 0.9 : 0.35),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned.fill(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            child: Row(
+                              children: [
+                                Icon(
+                                    isSelected
+                                        ? Icons.check_circle
+                                        : Icons.circle_outlined,
+                                    size: 16,
+                                    color:
+                                        isMe ? Colors.black87 : Colors.white),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                    child: Text(opt,
+                                        style: TextStyle(
+                                            color: isMe
+                                                ? Colors.black87
+                                                : Colors.white,
+                                            fontSize: 13),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis)),
+                                Text('$percent%',
+                                    style: TextStyle(
+                                        color: isMe
+                                            ? Colors.black54
+                                            : Colors.white70,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold)),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                      '$totalVoters vote${totalVoters == 1 ? '' : 's'}${allowMultiple ? ' • Multiple answers' : ''}',
+                      style: TextStyle(
+                          color: isMe ? Colors.black54 : Colors.white54,
+                          fontSize: 11)),
+                  Text(timeStr,
+                      style: TextStyle(
+                          color: isMe ? Colors.black54 : Colors.white54,
+                          fontSize: 10)),
+                ],
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -973,16 +1505,26 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                   await _editGroup();
                 }),
 
-              if (allowShareLink)
+              if (allowShareLink) ...[
+                _menuTile(Icons.ios_share, 'Share Group Invite', () async {
+                  Navigator.pop(ctx);
+                  final link =
+                      'https://www.allowanceapp.org/share?type=group&id=${widget.chatId}';
+                  final groupName =
+                      _chatMeta?['group_name'] ?? widget.chatTitle;
+                  await Share.share('Join "$groupName" on Allowance!\n$link');
+                }, color: const Color(0xFF4CAF50)),
                 _menuTile(Icons.link, 'Copy Group Link', () async {
                   Navigator.pop(ctx);
-                  final link = 'allowance://group/${widget.chatId}';
+                  final link =
+                      'https://www.allowanceapp.org/share?type=group&id=${widget.chatId}';
                   await Clipboard.setData(ClipboardData(text: link));
                   if (mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(content: Text('Group link copied!')));
                   }
                 }),
+              ],
 
               _menuTile(Icons.logout, 'Leave Group', () {
                 Navigator.pop(ctx);
@@ -3014,6 +3556,78 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       );
     }
 
+    // --- POLL BUBBLE ---
+    if (mediaType == 'poll') {
+      return RepaintBoundary(
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Dismissible(
+            key: ValueKey('poll_$messageId'),
+            direction: DismissDirection.startToEnd,
+            confirmDismiss: (_) {
+              _onSwipeToReply(message);
+              return Future.value(false);
+            },
+            background: Container(
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.only(left: 20),
+                child: const Icon(Icons.reply, color: Color(0xFF4CAF50))),
+            child: Row(
+              mainAxisAlignment:
+                  isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!isMe) ...[
+                  SizedBox(
+                    width: 30,
+                    child: showAvatar
+                        ? CircleAvatar(
+                            radius: 15,
+                            backgroundImage:
+                                (avatarUrl != null && avatarUrl.isNotEmpty)
+                                    ? NetworkImage(avatarUrl)
+                                    : null,
+                            backgroundColor: isStillInGroup
+                                ? Colors.grey[800]
+                                : Colors.grey[900],
+                            child: (avatarUrl == null || avatarUrl.isEmpty)
+                                ? const Icon(Icons.person,
+                                    size: 18, color: Colors.white54)
+                                : null,
+                          )
+                        : const SizedBox.shrink(),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Flexible(
+                  child: GestureDetector(
+                    onLongPress: () => _showMessageOptions(message, isMe),
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      margin:
+                          const EdgeInsets.only(bottom: 8, left: 8, right: 8),
+                      constraints: BoxConstraints(maxWidth: maxWidth),
+                      decoration: BoxDecoration(
+                        color: bubbleColor,
+                        borderRadius: BorderRadius.circular(20).copyWith(
+                          topRight:
+                              isMe ? Radius.zero : const Radius.circular(20),
+                          topLeft: (!isMe && showAvatar)
+                              ? Radius.zero
+                              : const Radius.circular(20),
+                        ),
+                      ),
+                      child: _buildPollBubble(message, isMe, timeStr),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     // --- NORMAL CHAT BUBBLE ---
     return RepaintBoundary(
       child: Container(
@@ -3094,9 +3708,14 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                   ? Radius.zero
                                   : const Radius.circular(20),
                             ),
-                            child: IntrinsicWidth(
+                            child: ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxWidth: maxWidth,
+                                minWidth: 0,
+                              ),
                               child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
                                   if (message['reply_to_id'] != null ||
                                       (message['reply_content']
@@ -3498,11 +4117,24 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       if (isVideo) {
         if (thumbUrl != null && thumbUrl.isNotEmpty) {
           mediaWidget = CachedNetworkImage(
-              imageUrl: thumbUrl,
+              imageUrl: url,
               fit: BoxFit.cover,
               width: double.infinity,
               height: height ?? 200,
-              errorWidget: (c, u, e) => _buildErrorPlaceholder(true));
+              memCacheWidth: 800, // CAP memory usage
+              memCacheHeight: 800,
+              maxWidthDiskCache: 1200,
+              maxHeightDiskCache: 1200,
+              placeholder: (context, url) => Container(
+                    color: Colors.grey[900],
+                    child: const Center(
+                      child: CircularProgressIndicator(
+                        color: Color(0xFF4CAF50),
+                        strokeWidth: 2,
+                      ),
+                    ),
+                  ),
+              errorWidget: (c, u, e) => _buildErrorPlaceholder(false));
         } else {
           if (kIsWeb) {
             // 🔥 THE FIX: Extract first frame natively for Web Network videos
@@ -3789,46 +4421,65 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
   List<Map<String, dynamic>> _computeCombinedMessages(
       List<Map<String, dynamic>> pendingList, String? myId) {
-    final myPending =
-        pendingList.where((m) => m['chat_id'] == widget.chatId).toList();
+    try {
+      final myPending =
+          pendingList.where((m) => m['chat_id'] == widget.chatId).toList();
 
-    int hash = myPending.length.hashCode ^ _messages.length.hashCode;
-    for (final p in myPending) {
-      hash ^= (p['local_id'] ?? '').hashCode;
-      hash ^= (p['is_failed'] == true ? 1 : 0).hashCode;
-      hash ^= (p['is_pending'] == true ? 2 : 0).hashCode;
+      // Build signature for caching
+      int hash = myPending.length.hashCode ^ _messages.length.hashCode;
+      for (final p in myPending) {
+        hash ^= (p['local_id'] ?? '').hashCode;
+        hash ^= (p['is_failed'] == true ? 1 : 0).hashCode;
+        hash ^= (p['is_pending'] == true ? 2 : 0).hashCode;
+      }
+      for (final m in _messages) {
+        hash ^= (m['id'] ?? '').hashCode;
+        hash ^= (m['is_edited'] == true ? 1 : 0).hashCode;
+      }
+      final signature = hash.toString();
+
+      if (_cachedCombinedMessages != null &&
+          signature == _lastComputeSignature) {
+        return _cachedCombinedMessages!;
+      }
+
+      final confirmedLocalIds = _messages
+          .map((m) => m['local_id']?.toString())
+          .where((id) => id != null && id.isNotEmpty)
+          .toSet();
+
+      final visiblePending = myPending.where((p) {
+        if (p['is_failed'] == true) return true;
+        return !confirmedLocalIds.contains(p['local_id']?.toString());
+      }).toList();
+
+      final combined = [...visiblePending, ..._messages];
+
+      // 🔥 FIX: Safe sort — if created_at is missing/invalid, shove it to the bottom
+      combined.sort((a, b) {
+        try {
+          final aStr = a['created_at']?.toString();
+          final bStr = b['created_at']?.toString();
+          final dateA = (aStr != null && aStr.isNotEmpty)
+              ? DateTime.parse(aStr).toLocal()
+              : DateTime.fromMillisecondsSinceEpoch(0);
+          final dateB = (bStr != null && bStr.isNotEmpty)
+              ? DateTime.parse(bStr).toLocal()
+              : DateTime.fromMillisecondsSinceEpoch(0);
+          return dateB.compareTo(dateA);
+        } catch (e) {
+          return 0; // Keep original order if parsing fails
+        }
+      });
+
+      _cachedCombinedMessages = combined;
+      _lastComputeSignature = signature;
+      return combined;
+    } catch (e, stack) {
+      debugPrint('💀 _computeCombinedMessages crash: $e\n$stack');
+      // Return cached list if available, otherwise empty (prevents UI freeze)
+      return _cachedCombinedMessages ?? [];
     }
-    for (final m in _messages) {
-      hash ^= (m['id'] ?? '').hashCode;
-      hash ^= (m['is_edited'] == true ? 1 : 0).hashCode;
-    }
-    final signature = hash.toString();
-
-    if (_cachedCombinedMessages != null && signature == _lastComputeSignature) {
-      return _cachedCombinedMessages!;
-    }
-
-    // 🔥 Exact match by local_id — no more time-window guessing
-    final confirmedLocalIds = _messages
-        .map((m) => m['local_id']?.toString())
-        .where((id) => id != null && id.isNotEmpty)
-        .toSet();
-
-    final visiblePending = myPending.where((p) {
-      if (p['is_failed'] == true) return true;
-      return !confirmedLocalIds.contains(p['local_id']?.toString());
-    }).toList();
-
-    final combined = [...visiblePending, ..._messages];
-    combined.sort((a, b) {
-      final dateA = DateTime.parse(a['created_at']).toLocal();
-      final dateB = DateTime.parse(b['created_at']).toLocal();
-      return dateB.compareTo(dateA);
-    });
-
-    _cachedCombinedMessages = combined;
-    _lastComputeSignature = signature;
-    return combined;
   }
 
   // --- NEW: FETCHES ALL MEDIA FROM ENTIRE CHAT HISTORY ---
@@ -3999,28 +4650,25 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
   // NEW: Checks if user scrolled up
   void _scrollListener() {
-    if (!_scrollController.hasClients) return; // <-- Prevents layout crashes
-    if (_scrollController.offset >= 300 && !_showScrollToBottom) {
-      setState(() => _showScrollToBottom = true);
-    } else if (_scrollController.offset < 300 && _showScrollToBottom) {
-      setState(() => _showScrollToBottom = false);
+    if (!_scrollController.hasClients) return;
+    if (!mounted || _isDisposed) return;
+
+    final offset = _scrollController.offset;
+    final shouldShow = offset >= 300;
+
+    if (shouldShow != _showScrollToBottom) {
+      setState(() => _showScrollToBottom = shouldShow);
     }
   }
 
   // NEW: Jumps back to the present chat
 
   Future<void> _setupMessageStream() async {
-    final localMessages = await ChatLocalDB.instance
-        .getMessagesForChat(widget.chatId, limit: 100);
-    if (localMessages.isNotEmpty && mounted) {
+    final localMessages =
+        await ChatLocalDB.instance.getMessagesForChat(widget.chatId, limit: 50);
+    if (localMessages.isNotEmpty && mounted && !_isDisposed) {
       setState(() {
         _messages = localMessages;
-        if (!_unreadCalculated) {
-          _firstUnreadIndex = _messages.lastIndexWhere((m) =>
-              m['is_read'] == false &&
-              m['sender_id'] != supabase.auth.currentUser?.id);
-          _unreadCalculated = true;
-        }
       });
     }
 
@@ -4030,17 +4678,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         .stream(primaryKey: ['id'])
         .eq('chat_id', widget.chatId)
         .order('created_at', ascending: false)
-        .limit(100)
+        .limit(50)
         .listen((data) async {
-          if (!mounted) return;
+          // 🔥 FIX: Guard against disposed screen
+          if (!mounted || _isDisposed) return;
+
+          await Future.delayed(const Duration(milliseconds: 50));
+          if (!mounted || _isDisposed) return;
+
           setState(() {
             _messages = List<Map<String, dynamic>>.from(data);
-            if (!_unreadCalculated && _messages.isNotEmpty) {
-              _firstUnreadIndex = _messages.lastIndexWhere((m) =>
-                  m['is_read'] == false &&
-                  m['sender_id'] != supabase.auth.currentUser?.id);
-              _unreadCalculated = true;
-            }
           });
           await ChatLocalDB.instance.cacheMessages(widget.chatId, data);
         });
@@ -4048,46 +4695,82 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
   @override
   void dispose() {
+    // 🔥 FIX: Set disposed flag FIRST so no async work sneaks in
+    _isDisposed = true;
+
     WidgetsBinding.instance.removeObserver(this);
-    if (activeChatId == widget.chatId) {
-      activeChatId = null;
-    }
+
+    // 🔥 FIX: Cancel ALL subscriptions BEFORE anything else
     _msgSub?.cancel();
+    _msgSub = null;
     _typingStatusSub?.cancel();
-    _scrollController.removeListener(_scrollListener);
-    _memberSearchController.dispose();
-    _typingTimer?.cancel();
-    _remoteTypingTimer?.cancel();
+    _typingStatusSub = null;
 
-    final myId = supabase.auth.currentUser?.id;
-    if (myId != null && _isTyping) {
-      supabase.from('chat_participants').update({'is_typing': false}).match(
-          {'chat_id': widget.chatId, 'user_id': myId});
+    // 🔥 FIX: Cancel ALL timers
+    _typingTimer?.cancel();
+    _typingTimer = null;
+    _remoteTypingTimer?.cancel();
+    _remoteTypingTimer = null;
+    _recordTimer?.cancel();
+    _recordTimer = null;
+
+    // 🔥 FIX: Remove scroll listener BEFORE disposing controller
+    _scrollController.removeListener(_scrollListener);
+    _messageController.removeListener(_onMessageTextChanged);
+
+    // 🔥 FIX: Stop any active recording before disposing
+    if (_isRecording) {
+      _audioRecorder.stop().catchError((_) => null);
+      _isRecording = false;
     }
 
+    // 🔥 FIX: Dispose controllers in correct order
     _messageController.dispose();
+    _memberSearchController.dispose(); // 🔥 EXTRA: ChatRoomScreen has this too
     _scrollController.dispose();
     _focusNode.dispose();
     _audioRecorder.dispose();
-    _recordTimer?.cancel();
+    _resumeDebounceTimer?.cancel();
+
+    // 🔥 FIX: Clear the typing status in DB but DON'T await it
+    final myId = supabase.auth.currentUser?.id;
+    if (myId != null) {
+      supabase.from('chat_participants').update({
+        'is_typing': false,
+      }).match({'chat_id': widget.chatId, 'user_id': myId}).catchError(
+          (_) => null);
+    }
+
+    if (activeChatId == widget.chatId) {
+      activeChatId = null;
+    }
+
     super.dispose();
   }
 
+  // --- UPDATED: MOBILE KEYBOARD PERFORMANCE FIX & UNREAD MESSAGES SEPARATOR ---
   // --- UPDATED: MOBILE KEYBOARD PERFORMANCE FIX & UNREAD MESSAGES SEPARATOR ---
   @override
   Widget build(BuildContext context) {
     final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
     final myId = supabase.auth.currentUser?.id;
 
+    // 🔥 Get real-time keyboard height locally
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+
     return Scaffold(
       backgroundColor: Colors.black,
-      resizeToAvoidBottomInset: true,
+      // 🔥 THE REAL FIX: Disable native window resizing. It forces Android's
+      // OS compositor to recalculate the entire SurfaceView every frame of
+      // the keyboard animation, which completely chokes low-RAM phones!
+      resizeToAvoidBottomInset: false,
       appBar: _buildAppBar(),
-      body: Column(
-        children: [
-          Expanded(
-            child: GestureDetector(
-              onTap: () => FocusScope.of(context).unfocus(),
+      body: Padding(
+        // 🔥 Instead, let Flutter's ultra-fast engine handle the upward shift
+        padding: EdgeInsets.only(bottom: bottomInset),
+        child: Column(
+          children: [
+            Expanded(
               child: Stack(
                 children: [
                   ValueListenableBuilder<List<Map<String, dynamic>>>(
@@ -4103,73 +4786,111 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                       }
 
                       if (!_unreadCalculated && combinedMessages.isNotEmpty) {
-                        _firstUnreadIndex = combinedMessages.lastIndexWhere(
-                            (m) =>
-                                m['is_read'] == false &&
-                                m['sender_id'] != myId);
+                        try {
+                          _firstUnreadIndex =
+                              combinedMessages.lastIndexWhere((m) {
+                            final senderId = m['sender_id']?.toString();
+                            final isRead = m['is_read'] == true;
+                            return !isRead &&
+                                senderId != null &&
+                                senderId != myId;
+                          });
+                        } catch (e) {
+                          _firstUnreadIndex = -1;
+                        }
                         _unreadCalculated = true;
                       }
 
                       return ListView.builder(
                         controller: _scrollController,
                         reverse: true,
-                        addAutomaticKeepAlives: false,
-                        addRepaintBoundaries:
-                            false, // 🔥 Web: prevents box.dart crash
-                        cacheExtent: 150,
+                        // 🔥 FIX: Increased cache stops bubbles from destroying/rebuilding during keyboard shift!
+                        cacheExtent: 400,
+                        // 🔥 FIX: Native swipe-down to close keyboard (clears gesture lag natively)
                         keyboardDismissBehavior:
                             ScrollViewKeyboardDismissBehavior.onDrag,
                         padding: const EdgeInsets.all(12),
                         itemCount: combinedMessages.length,
                         itemBuilder: (context, index) {
-                          final msg = combinedMessages[index];
-                          final date =
-                              DateTime.parse(msg['created_at']).toLocal();
-                          bool showDateHeader = false;
+                          try {
+                            final msg = combinedMessages[index];
+                            final messageId =
+                                (msg['id'] ?? msg['local_id'] ?? 'idx_$index')
+                                    .toString();
 
-                          if (index == combinedMessages.length - 1) {
-                            showDateHeader = true;
-                          } else {
-                            final prevDate = DateTime.parse(
-                                    combinedMessages[index + 1]['created_at'])
-                                .toLocal();
-                            if (date.day != prevDate.day ||
-                                date.year != prevDate.year) {
-                              showDateHeader = true;
+                            DateTime date;
+                            try {
+                              final createdAt = msg['created_at']?.toString();
+                              date = (createdAt != null && createdAt.isNotEmpty)
+                                  ? DateTime.parse(createdAt).toLocal()
+                                  : DateTime.now();
+                            } catch (e) {
+                              date = DateTime.now();
                             }
-                          }
 
-                          return Column(
-                            children: [
-                              if (showDateHeader)
-                                Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                        vertical: 16),
-                                    child: Center(
-                                        child: Text(_getDateLabel(date),
-                                            style: const TextStyle(
-                                                color: Colors.white54,
-                                                fontSize: 12)))),
-                              if (index == _firstUnreadIndex &&
-                                  _firstUnreadIndex != -1)
-                                Container(
-                                  margin:
-                                      const EdgeInsets.symmetric(vertical: 16),
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 12, vertical: 4),
-                                  decoration: BoxDecoration(
-                                      color: const Color(0xFF1E1E1E),
-                                      borderRadius: BorderRadius.circular(12)),
-                                  child: const Text("UNREAD MESSAGES",
-                                      style: TextStyle(
-                                          color: Colors.amber,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.bold)),
-                                ),
-                              _buildBubble(
-                                  combinedMessages, index, maxBubbleWidth),
-                            ],
-                          );
+                            bool showDateHeader = false;
+                            if (index == combinedMessages.length - 1) {
+                              showDateHeader = true;
+                            } else {
+                              try {
+                                final prevMsg = combinedMessages[index + 1];
+                                final prevCreatedAt =
+                                    prevMsg['created_at']?.toString();
+                                if (prevCreatedAt != null &&
+                                    prevCreatedAt.isNotEmpty) {
+                                  final prevDate =
+                                      DateTime.parse(prevCreatedAt).toLocal();
+                                  if (date.day != prevDate.day ||
+                                      date.year != prevDate.year) {
+                                    showDateHeader = true;
+                                  }
+                                }
+                              } catch (e) {
+                                showDateHeader = false;
+                              }
+                            }
+
+                            return RepaintBoundary(
+                              key: ValueKey('msg_row_$messageId'),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (showDateHeader)
+                                    Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 16),
+                                        child: Center(
+                                            child: Text(_getDateLabel(date),
+                                                style: const TextStyle(
+                                                    color: Colors.white54,
+                                                    fontSize: 12)))),
+                                  if (index == _firstUnreadIndex &&
+                                      _firstUnreadIndex != -1)
+                                    Container(
+                                      margin: const EdgeInsets.symmetric(
+                                          vertical: 16),
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 4),
+                                      decoration: BoxDecoration(
+                                          color: const Color(0xFF1E1E1E),
+                                          borderRadius:
+                                              BorderRadius.circular(12)),
+                                      child: const Text("UNREAD MESSAGES",
+                                          style: TextStyle(
+                                              color: Colors.amber,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold)),
+                                    ),
+                                  _buildBubble(
+                                      combinedMessages, index, maxBubbleWidth),
+                                ],
+                              ),
+                            );
+                          } catch (e) {
+                            debugPrint(
+                                '💀 Message render error at index $index: $e');
+                            return const SizedBox.shrink();
+                          }
                         },
                       );
                     },
@@ -4190,13 +4911,19 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 ],
               ),
             ),
-          ),
-          RepaintBoundary(child: _buildInputBar()),
-        ],
+            SafeArea(
+              top: false,
+              // 🔥 Only apply bottom safe area if keyboard is closed to avoid double-padding
+              bottom: bottomInset == 0,
+              child: RepaintBoundary(child: _buildInputBar()),
+            ),
+          ],
+        ),
       ),
     );
   }
 
+  // 4. INPUT BAR (With Gboard GIF/Sticker Injection)
   // 4. INPUT BAR (With Gboard GIF/Sticker Injection)
   Widget _buildInputBar() {
     return Container(
@@ -4207,6 +4934,55 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (_mentionSuggestions.isNotEmpty)
+            SizedBox(
+              height: 44,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: _mentionSuggestions.length,
+                itemBuilder: (context, i) {
+                  final p = _mentionSuggestions[i];
+                  final uname = p['username']?.toString() ?? '';
+                  final avatarUrl = p['avatar_url']?.toString();
+                  return GestureDetector(
+                    onTap: () => _applyMention(p),
+                    child: Container(
+                      margin: const EdgeInsets.only(right: 8, bottom: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1C1C1E),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(
+                            color: const Color(0xFF4CAF50).withOpacity(0.4)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircleAvatar(
+                            radius: 12,
+                            backgroundColor: Colors.grey[800],
+                            backgroundImage:
+                                (avatarUrl != null && avatarUrl.isNotEmpty)
+                                    ? NetworkImage(avatarUrl)
+                                    : null,
+                            child: (avatarUrl == null || avatarUrl.isEmpty)
+                                ? const Icon(Icons.person,
+                                    size: 14, color: Colors.white54)
+                                : null,
+                          ),
+                          const SizedBox(width: 6),
+                          Text('@$uname',
+                              style: const TextStyle(
+                                  color: Color(0xFF4CAF50),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13)),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
           if (_replyMessage != null) _buildReplyPreview(),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
@@ -4252,8 +5028,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                         style: const TextStyle(color: Colors.white),
                         maxLines: 5,
                         minLines: 1,
-                        textInputAction: TextInputAction.newline,
                         keyboardType: TextInputType.multiline,
+                        scrollPadding: EdgeInsets.zero,
+                        // 🔥 RESTORED: enableSuggestions and autocorrect default to true!
+                        // This allows Gboard to enable swipe-to-text, GIFs, and stickers again.
+                        enableInteractiveSelection: true,
+                        textInputAction: TextInputAction.newline,
+                        onChanged: _handleTyping,
                         contentInsertionConfiguration:
                             ContentInsertionConfiguration(
                           onContentInserted:
@@ -4272,7 +5053,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                   .from('chat_media')
                                   .getPublicUrl(storagePath);
 
-                              // 🔥 CAPTURE REPLY STATE FOR GBOARD STICKERS
                               final replyId = _replyMessage?['id'];
                               final replySummary = _getReplySummary();
                               setState(() => _replyMessage = null);
@@ -4290,7 +5070,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                             }
                           },
                         ),
-                        onChanged: _handleTyping,
                         decoration: InputDecoration(
                           hintText: 'Message...',
                           hintStyle: const TextStyle(color: Colors.white54),
@@ -4323,10 +5102,15 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                   builder: (context, value, child) {
                     final hasText = value.text.trim().isNotEmpty;
                     if (hasText) {
-                      return IconButton(
-                          icon:
-                              const Icon(Icons.send, color: Color(0xFF4CAF50)),
-                          onPressed: () => _sendMessage());
+                      return GestureDetector(
+                        onTap: () => _sendMessage(),
+                        child: Container(
+                          margin: const EdgeInsets.only(left: 8, bottom: 4),
+                          padding: const EdgeInsets.all(10),
+                          child: const Icon(Icons.send,
+                              color: Color(0xFF4CAF50), size: 24),
+                        ),
+                      );
                     } else {
                       return GestureDetector(
                           onTap: () {
@@ -4810,6 +5594,7 @@ class AudioPlayerService {
   bool _isDownloaded = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
+  bool _initialized = false; // 🔥 guards against re-subscribing
 
   final _playingController = StreamController<bool>.broadcast();
   final _loadingController = StreamController<bool>.broadcast();
@@ -4834,6 +5619,9 @@ class AudioPlayerService {
   Duration get position => _position;
 
   Future<void> init() async {
+    if (_initialized) return;
+    _initialized = true;
+
     _player.playerStateStream.listen((state) {
       _isPlaying = state.playing;
       _playingController.add(_isPlaying);
@@ -4952,6 +5740,7 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
   bool _isDownloaded = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
+  final List<StreamSubscription> _subs = [];
 
   @override
   void initState() {
@@ -4959,37 +5748,37 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
     _service.init();
     _service.checkDownloaded(widget.url);
 
-    _service.playingStream.listen((playing) {
+    _subs.add(_service.playingStream.listen((playing) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() => _isPlaying = playing);
       }
-    });
-    _service.loadingStream.listen((loading) {
+    }));
+    _subs.add(_service.loadingStream.listen((loading) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() => _isLoading = loading);
       }
-    });
-    _service.durationStream.listen((d) {
+    }));
+    _subs.add(_service.durationStream.listen((d) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() {
           _duration = d;
           _isLoaded = true;
         });
       }
-    });
-    _service.positionStream.listen((p) {
+    }));
+    _subs.add(_service.positionStream.listen((p) {
       if (mounted && _service.currentUrl == widget.url) {
         setState(() => _position = p);
       }
-    });
-    _service.downloadedStream.listen((downloaded) {
+    }));
+    _subs.add(_service.downloadedStream.listen((downloaded) {
       if (mounted) setState(() => _isDownloaded = downloaded);
-    });
-    _service.urlStream.listen((url) {
+    }));
+    _subs.add(_service.urlStream.listen((url) {
       if (mounted && url != widget.url) {
         setState(() => _isPlaying = false);
       }
-    });
+    }));
   }
 
   Future<void> _togglePlay() async {
@@ -5004,6 +5793,14 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
     final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return "$minutes:$seconds";
+  }
+
+  @override
+  void dispose() {
+    for (final s in _subs) {
+      s.cancel();
+    }
+    super.dispose();
   }
 
   @override

@@ -2,9 +2,11 @@
 import 'dart:async';
 import 'dart:developer' as developer;
 import 'package:allowance/screens/chat/group_invite_screen.dart';
+import 'package:allowance/screens/home/moment_viewer_screen.dart';
 import 'package:allowance/screens/introduction/reset_password_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -44,6 +46,15 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // 🔥 FIX: Draw behind Android navigation bar so input bar sits ABOVE it
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarIconBrightness: Brightness.light,
+    ),
+  );
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+
   await dotenv.load(fileName: ".env");
 
   final supabaseUrl = dotenv.env['SUPABASE_URL'];
@@ -57,13 +68,11 @@ Future<void> main() async {
   if (!kIsWeb) {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
-    // 🔥 2. Create the channel on the device
     await flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
         ?.createNotificationChannel(channel);
 
-    // 🔥 3. Force iOS/Foreground notifications to present aggressively
     await FirebaseMessaging.instance
         .setForegroundNotificationPresentationOptions(
       alert: true,
@@ -71,7 +80,6 @@ Future<void> main() async {
       sound: true,
     );
 
-    // 🔥 4. Listen for notifications WHILE the app is open and pop them down!
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       RemoteNotification? notification = message.notification;
       AndroidNotification? android = message.notification?.android;
@@ -86,8 +94,7 @@ Future<void> main() async {
               channel.id,
               channel.name,
               channelDescription: channel.description,
-              icon:
-                  '@mipmap/ic_launcher', // Make sure this matches your app icon!
+              icon: '@mipmap/ic_launcher',
               importance: Importance.max,
               priority: Priority.max,
               playSound: true,
@@ -160,6 +167,8 @@ class _AllowanceAppState extends State<AllowanceApp> {
           navigatorKey.currentState
               ?.pushNamed('/moment', arguments: {'id': id});
         });
+      } else if (type == 'group' && id != null) {
+        _routeToGroupInvite(id);
       }
       return;
     }
@@ -172,32 +181,6 @@ class _AllowanceAppState extends State<AllowanceApp> {
           developer.log('Saved referral code: $refCode', name: 'DeepLink');
         });
       }
-      return;
-    }
-
-    // 🔥 NEW: Group invite links — allowance://group/<chatId>
-    if (uri.host == 'group' || uri.pathSegments.contains('group')) {
-      final chatId = uri.pathSegments.isNotEmpty ? uri.pathSegments.last : null;
-      if (chatId == null || chatId.isEmpty) return;
-
-      final currentUser = Supabase.instance.client.auth.currentUser;
-      if (currentUser == null) {
-        // Not logged in yet — save it and consume it right after
-        // sign-in/signup, same pattern as the referral code above.
-        SharedPreferences.getInstance().then((prefs) {
-          prefs.setString('pending_group_join_id', chatId);
-          developer.log('Saved pending group join: $chatId', name: 'DeepLink');
-        });
-        return;
-      }
-
-      Future.delayed(const Duration(milliseconds: 500), () {
-        navigatorKey.currentState?.push(
-          MaterialPageRoute(
-              builder: (_) => GroupInviteScreen(
-                  chatId: chatId, userPreferences: _userPreferences)),
-        );
-      });
       return;
     }
 
@@ -227,6 +210,24 @@ class _AllowanceAppState extends State<AllowanceApp> {
         );
       });
     }
+  }
+
+  void _routeToGroupInvite(String chatId) {
+    final currentUser = Supabase.instance.client.auth.currentUser;
+    if (currentUser == null) {
+      SharedPreferences.getInstance().then((prefs) {
+        prefs.setString('pending_group_join_id', chatId);
+        developer.log('Saved pending group join: $chatId', name: 'DeepLink');
+      });
+      return;
+    }
+    Future.delayed(const Duration(milliseconds: 500), () {
+      navigatorKey.currentState?.push(
+        MaterialPageRoute(
+            builder: (_) => GroupInviteScreen(
+                chatId: chatId, userPreferences: _userPreferences)),
+      );
+    });
   }
 
   Future<void> _checkPendingGroupJoin() async {
@@ -351,10 +352,17 @@ class _AllowanceAppState extends State<AllowanceApp> {
               builder: (_) => SingleGistScreen(gistId: id),
             );
           } else if (type == 'moment' && id != null) {
-            // Uncomment this once you have MomentViewerScreen ready!
-            // return MaterialPageRoute(
-            //   builder: (_) => MomentViewerScreen(...),
-            // );
+            return MaterialPageRoute(
+              builder: (_) => MomentViewerScreen(
+                moments: [],
+                initialIndex: 0,
+                userPreferences: _userPreferences,
+              ),
+            );
+          } else if (type == 'group' && id != null) {
+            return MaterialPageRoute(
+                builder: (_) => GroupInviteScreen(
+                    chatId: id, userPreferences: _userPreferences));
           }
         }
 

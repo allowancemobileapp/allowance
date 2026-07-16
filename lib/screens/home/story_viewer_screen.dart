@@ -975,7 +975,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
           // 2. THE TOP PROGRESS BAR
           Positioned(
-            top: MediaQuery.of(context).padding.top + 8,
+            top: MediaQuery.paddingOf(context).top + 8,
             left: 16,
             right: 16,
             child: Row(
@@ -1100,7 +1100,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
           // 6. THE TOP HEADER BAR (AVATAR, USERNAME, CLOSE BUTTON)
           Positioned(
-            top: MediaQuery.of(context).padding.top + 25,
+            top: MediaQuery.paddingOf(context).top + 25,
             left: 16,
             right: 16,
             child: Row(
@@ -1179,7 +1179,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           // 🔥 7. SHARED GIST / MOMENT PREVIEW TAG 🔥
           if (isSharedGist)
             Positioned(
-              top: MediaQuery.of(context).padding.top + 90,
+              top: MediaQuery.paddingOf(context).top + 90,
               left: 16,
               child: FutureBuilder<Map<String, dynamic>?>(
                 future: _getCachedSharedItemData(
@@ -1279,8 +1279,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           // 8. THE BOTTOM INPUT BAR (REPLY / ACTIONS)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 200),
-            bottom: MediaQuery.of(context).viewInsets.bottom > 0
-                ? MediaQuery.of(context).viewInsets.bottom + 10
+            bottom: MediaQuery.viewInsetsOf(context).bottom > 0
+                ? MediaQuery.viewInsetsOf(context).bottom + 10
                 : 30,
             left: 16,
             right: 16,

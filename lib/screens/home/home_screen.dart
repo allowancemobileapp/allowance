@@ -84,6 +84,7 @@ class _HomeScreenState extends State<HomeScreen> {
   final supabase = Supabase.instance.client;
   late PageController _pageController;
   Timer? _slideshowTimer;
+  Timer? _feedRefreshDebounce;
   List<Map<String, dynamic>> _fetchedGists = [];
   final ValueNotifier<bool> _showBackToTopButton = ValueNotifier(false);
 
@@ -191,6 +192,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _restaurantFocusNode.dispose();
     _scrollController.dispose();
     _showBackToTopButton.dispose(); // <-- Dispose notifier
+    _feedRefreshDebounce?.cancel();
     super.dispose();
   }
 
@@ -202,7 +204,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     entry = OverlayEntry(
       builder: (context) => Positioned(
-        top: MediaQuery.of(context).padding.top + 10,
+        top: MediaQuery.paddingOf(context).top + 10,
         left: 16,
         right: 16,
         child: Material(
@@ -2215,7 +2217,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // ── NEW: Sticky Gist Filter Bar (used by the SliverPersistentHeader) ──
   Widget _buildGistFilterBar() {
     final String label = _isGistsLoading ? "Loading..." : _gistFilter;
-    final horizontalBarWidth = MediaQuery.of(context).size.width * 0.85;
+    final horizontalBarWidth = MediaQuery.sizeOf(context).width * 0.85;
 
     return GestureDetector(
       onTap: _showGistFilterSheet,
@@ -2545,28 +2547,30 @@ class _HomeScreenState extends State<HomeScreen> {
           }
         });
 
+    // 🔥 FIX: new gists still refresh the feed, but debounced — several
+    // posts landing in quick succession now coalesce into ONE reload
+    // instead of one full feed wipe-and-refetch per post.
     _globalChatChannel!.onPostgresChanges(
         event: PostgresChangeEvent.insert,
         schema: 'public',
         table: 'gists',
-        callback: (_) => _handleRefresh());
-    _globalChatChannel!.onPostgresChanges(
-        event: PostgresChangeEvent.all,
-        schema: 'public',
-        table: 'gist_likes',
-        callback: (_) => _handleRefresh());
-    _globalChatChannel!.onPostgresChanges(
-        event: PostgresChangeEvent.all,
-        schema: 'public',
-        table: 'gist_comments',
-        callback: (_) => _handleRefresh());
-    _globalChatChannel!.onPostgresChanges(
-        event: PostgresChangeEvent.all,
-        schema: 'public',
-        table: 'poll_votes',
-        callback: (_) => _handleRefresh());
+        callback: (_) => _scheduleDebouncedRefresh());
+
+    // 🔥 REMOVED: gist_likes / gist_comments / poll_votes listeners.
+    // Those tables broadcast to every connected client with no filter,
+    // and each one was nuking your whole feed. Your own likes/comments
+    // already update instantly via optimistic UI (_toggleLike). Other
+    // people's now catch up next time you naturally refresh instead of
+    // forcing a reload continuously in the background.
 
     _globalChatChannel!.subscribe();
+  }
+
+  void _scheduleDebouncedRefresh() {
+    _feedRefreshDebounce?.cancel();
+    _feedRefreshDebounce = Timer(const Duration(seconds: 4), () {
+      if (mounted) _handleRefresh();
+    });
   }
 
   // --- UPDATED: BUILD METHOD WITH WHATSAPP LOADING SCREEN ---
@@ -2619,7 +2623,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                       },
                                       child: Container(
                                         width:
-                                            MediaQuery.of(context).size.width *
+                                            MediaQuery.sizeOf(context).width *
                                                 0.85,
                                         height: 44,
                                         decoration: BoxDecoration(
@@ -2663,7 +2667,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                     const SizedBox(height: 16),
                                     Container(
-                                      width: MediaQuery.of(context).size.width *
+                                      width: MediaQuery.sizeOf(context).width *
                                           0.85,
                                       height: 44,
                                       decoration: BoxDecoration(
@@ -2719,7 +2723,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ),
                                     const SizedBox(height: 12),
                                     SizedBox(
-                                      width: MediaQuery.of(context).size.width *
+                                      width: MediaQuery.sizeOf(context).width *
                                           0.85,
                                       height: 60,
                                       child: Row(
@@ -3435,7 +3439,7 @@ class _HomeScreenState extends State<HomeScreen> {
               left: 24.0,
               right: 24.0,
               top: 24.0,
-              bottom: MediaQuery.of(context).viewInsets.bottom +
+              bottom: MediaQuery.viewInsetsOf(context).bottom +
                   24.0, // Safe padding for bottom
             ),
             child: Column(
@@ -4257,7 +4261,7 @@ class _GistBarHeaderDelegate extends SliverPersistentHeaderDelegate {
           .scaffoldBackgroundColor, // Prevents gists from showing behind the bar
       child: Center(
         child: SizedBox(
-          width: MediaQuery.of(context).size.width,
+          width: MediaQuery.sizeOf(context).width,
           child: child,
         ),
       ),
@@ -5344,7 +5348,7 @@ class _GistItemCardState extends State<_GistItemCard>
           ? Container(height: 300, color: Colors.grey[900])
           : SizedBox(
               width: double.infinity,
-              height: MediaQuery.of(context).size.width,
+              height: MediaQuery.sizeOf(context).width,
               child: Stack(
                 children: [
                   PageView.builder(
@@ -5793,7 +5797,7 @@ class _GistCommentsSheetState extends State<GistCommentsSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return Container(
       constraints: BoxConstraints(

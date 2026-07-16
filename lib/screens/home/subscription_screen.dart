@@ -427,7 +427,7 @@ class _SubscriptionScreenState extends State<SubscriptionScreen> {
 
     return Center(
       child: SizedBox(
-        width: MediaQuery.of(context).size.width,
+        width: MediaQuery.sizeOf(context).width,
         height: 330,
         child: Card(
           color: Color(0xFF1E1E1E),

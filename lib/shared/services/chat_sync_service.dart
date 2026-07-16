@@ -240,6 +240,9 @@ class ChatSyncService {
         if (msg['thumbnail_url'] != null) 'thumbnail_url': msg['thumbnail_url'],
         if (msg['file_size_bytes'] != null)
           'file_size_bytes': msg['file_size_bytes'],
+        if (msg['poll_options'] != null) 'poll_options': msg['poll_options'],
+        if (msg['poll_allow_multiple'] != null)
+          'poll_allow_multiple': msg['poll_allow_multiple'],
         if (replyToId != null) 'reply_to_id': replyToId,
         if (replyContent != null && replyContent.isNotEmpty)
           'reply_content': replyContent,

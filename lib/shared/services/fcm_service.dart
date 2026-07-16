@@ -146,7 +146,7 @@ void _showTopNotification(BuildContext context, String title, String body,
 
   entry = OverlayEntry(
     builder: (context) => Positioned(
-      top: MediaQuery.of(context).padding.top +
+      top: MediaQuery.paddingOf(context).top +
           10, // Drops right below the phone notch
       left: 16,
       right: 16,

@@ -43,6 +43,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   bool _isLoading = true;
   String? _myId;
   late PageController _pageController; // <--- ADD THIS
+  bool _isDisposed = false;
 
   @override
   bool get wantKeepAlive => true;
@@ -65,14 +66,16 @@ class _ChatListScreenState extends State<ChatListScreen>
       _setupStreams();
 
       Future.delayed(const Duration(milliseconds: 1500), () {
-        if (mounted && _isLoading) setState(() => _isLoading = false);
+        if (mounted && !_isDisposed && _isLoading) {
+          setState(() => _isLoading = false);
+        }
       });
     }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _myId != null) {
+    if (state == AppLifecycleState.resumed && _myId != null && !_isDisposed) {
       _fetchLatestData();
       _setupStreams();
     }
@@ -116,34 +119,37 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   // Set up streams ONCE so the app doesn't freeze when typing in search
   void _setupStreams() {
+    if (_isDisposed) return;
+
     // 1. Fetch initial data instantly
     _fetchLatestData();
 
     final myId = _myId!;
+    if (myId.isEmpty) return;
 
-    // 2. Real-time Unread Messages Stream (Fast & Native)
+    // 2. Real-time Unread Messages Stream
     _unreadSub?.cancel();
     _unreadSub = supabase
         .from('messages')
         .stream(primaryKey: ['id'])
         .eq('is_read', false)
         .listen((msgs) {
-          if (mounted) setState(() => _unreadMessages = msgs);
+          if (!mounted || _isDisposed) return;
+          setState(() => _unreadMessages = msgs);
         });
 
-    // 3. Real-time Followers Stream (Fixes the unused variable warning!)
+    // 3. Real-time Followers Stream
     _followersSub?.cancel();
     _followersSub = supabase
         .from('followers')
         .stream(primaryKey: ['follower_id', 'following_id'])
         .eq('follower_id', myId)
         .listen((folls) async {
-          if (mounted) {
-            setState(() {
-              _followingIds =
-                  folls.map((f) => f['following_id'].toString()).toSet();
-            });
-          }
+          if (!mounted || _isDisposed) return;
+          setState(() {
+            _followingIds =
+                folls.map((f) => f['following_id'].toString()).toSet();
+          });
           final prefs = await SharedPreferences.getInstance();
           prefs.setString(
               'cached_folls_$myId', jsonEncode(_followingIds.toList()));
@@ -156,9 +162,9 @@ class _ChatListScreenState extends State<ChatListScreen>
         .stream(primaryKey: ['chat_id', 'user_id'])
         .eq('user_id', myId)
         .listen((records) {
-          // 🔥 FIX: Cast to Object to satisfy Supabase strict typing
-          final myChatIds = records.map((p) => p['chat_id'] as Object).toList();
+          if (!mounted || _isDisposed) return;
 
+          final myChatIds = records.map((p) => p['chat_id'] as Object).toList();
           if (myChatIds.isEmpty) return;
 
           _chatsSub?.cancel();
@@ -167,7 +173,8 @@ class _ChatListScreenState extends State<ChatListScreen>
               .stream(primaryKey: ['id'])
               .inFilter('id', myChatIds)
               .listen((chats) {
-                if (mounted) setState(() => _chats = chats);
+                if (!mounted || _isDisposed) return;
+                setState(() => _chats = chats);
               });
 
           _allParticipantsSub?.cancel();
@@ -176,7 +183,8 @@ class _ChatListScreenState extends State<ChatListScreen>
               .stream(primaryKey: ['chat_id', 'user_id'])
               .inFilter('chat_id', myChatIds)
               .listen((parts) {
-                if (mounted) setState(() => _allParticipants = parts);
+                if (!mounted || _isDisposed) return;
+                setState(() => _allParticipants = parts);
               });
         });
   }
@@ -185,7 +193,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   Future<void> _fetchLatestData() async {
     final myId = _myId!;
     try {
-      // 1. Get my chat IDs
       final myParts = await supabase
           .from('chat_participants')
           .select('chat_id')
@@ -193,11 +200,10 @@ class _ChatListScreenState extends State<ChatListScreen>
       final myChatIds = (myParts as List).map((p) => p['chat_id']).toList();
 
       if (myChatIds.isEmpty) {
-        if (mounted) setState(() => _isLoading = false);
+        if (mounted && !_isDisposed) setState(() => _isLoading = false);
         return;
       }
 
-      // 2. Fetch everything else AT THE EXACT SAME TIME (Massive Speed Boost)
       final futures = await Future.wait([
         supabase.from('chats').select().inFilter('id', myChatIds),
         supabase
@@ -208,7 +214,6 @@ class _ChatListScreenState extends State<ChatListScreen>
             .from('followers')
             .select('following_id')
             .eq('follower_id', myId),
-        // Instantly grab all unread messages meant for me
         supabase
             .from('messages')
             .select()
@@ -216,7 +221,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             .neq('sender_id', myId),
       ]);
 
-      if (mounted) {
+      if (mounted && !_isDisposed) {
         setState(() {
           _chats = List<Map<String, dynamic>>.from(futures[0]);
           _allParticipants = List<Map<String, dynamic>>.from(futures[1]);
@@ -224,7 +229,6 @@ class _ChatListScreenState extends State<ChatListScreen>
               .map((f) => f['following_id'].toString())
               .toSet();
 
-          // Filter unread messages to only include those in my active chats
           final allUnread = List<Map<String, dynamic>>.from(futures[3]);
           _unreadMessages =
               allUnread.where((m) => myChatIds.contains(m['chat_id'])).toList();
@@ -233,7 +237,6 @@ class _ChatListScreenState extends State<ChatListScreen>
         });
       }
 
-      // Cache them for instant offline loading
       final prefs = await SharedPreferences.getInstance();
       prefs.setString('cached_chats_$myId', jsonEncode(_chats));
       prefs.setString('cached_parts_$myId', jsonEncode(_allParticipants));
@@ -246,13 +249,23 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   @override
   void dispose() {
+    _isDisposed = true;
+
     WidgetsBinding.instance.removeObserver(this);
-    _pageController.dispose();
+
+    // Cancel ALL subscriptions and NULL them
     _participantsSub?.cancel();
+    _participantsSub = null;
     _chatsSub?.cancel();
+    _chatsSub = null;
     _followersSub?.cancel();
+    _followersSub = null;
     _allParticipantsSub?.cancel();
+    _allParticipantsSub = null;
     _unreadSub?.cancel();
+    _unreadSub = null;
+
+    _pageController.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -503,8 +516,9 @@ class _ChatListScreenState extends State<ChatListScreen>
                 final amIAdmin =
                     myPart['role'] == 'admin' || myPart['is_admin'] == true;
 
-                return _ChatTile(
-                  key: Key(chatIdStr),
+                return RepaintBoundary(
+                    child: _ChatTile(
+                  key: ValueKey(chatIdStr),
                   chat: chat,
                   myId: _myId!,
                   themeColor: themeColor,
@@ -517,7 +531,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                   hasMention: hasMention,
                   onClearUnread: _clearUnreadForChat,
                   seriousness: seriousByChat[chatIdStr] ?? 0,
-                );
+                ));
               },
             ),
     );
@@ -608,12 +622,13 @@ class _ChatTileState extends State<_ChatTile> {
   Timer? _typingClearTimer;
   String _lastMessageFallback = '';
   bool _hasLastMessageFallback = false;
+  bool _isDisposed = false;
 
   @override
   void initState() {
     super.initState();
     _fetchMetaData();
-    _fetchLastMessage(); // <-- ADD THIS LINE
+    _fetchLastMessage();
     _handleTypingProp(widget.isTyping);
   }
 
@@ -621,8 +636,12 @@ class _ChatTileState extends State<_ChatTile> {
   Future<void> _fetchLastMessage() async {
     final cached = widget.chat['last_message']?.toString() ?? '';
     if (cached.isNotEmpty) {
-      _hasLastMessageFallback = true;
-      _lastMessageFallback = cached;
+      if (mounted && !_isDisposed) {
+        setState(() {
+          _hasLastMessageFallback = true;
+          _lastMessageFallback = cached;
+        });
+      }
       return;
     }
 
@@ -635,7 +654,7 @@ class _ChatTileState extends State<_ChatTile> {
           .limit(1)
           .maybeSingle();
 
-      if (mounted && msg != null) {
+      if (mounted && !_isDisposed && msg != null) {
         final content = msg['content']?.toString() ?? '';
         final mType = msg['media_type']?.toString() ?? '';
 
@@ -655,6 +674,8 @@ class _ChatTileState extends State<_ChatTile> {
             text = '🛒 Order';
           else if (mType == 'event')
             text = '📅 Event';
+          else if (mType == 'poll')
+            text = '📊 Poll';
           else
             text = 'Tap to chat';
         }
@@ -663,11 +684,12 @@ class _ChatTileState extends State<_ChatTile> {
           _lastMessageFallback = text;
           _hasLastMessageFallback = true;
         });
-      } else if (mounted) {
+      } else if (mounted && !_isDisposed) {
         setState(() => _hasLastMessageFallback = true);
       }
     } catch (_) {
-      if (mounted) setState(() => _hasLastMessageFallback = true);
+      if (mounted && !_isDisposed)
+        setState(() => _hasLastMessageFallback = true);
     }
   }
 
@@ -682,21 +704,28 @@ class _ChatTileState extends State<_ChatTile> {
 
   // 🔥 NEW: Kills the typing indicator after 4 seconds automatically!
   void _handleTypingProp(bool isTyping) {
+    if (_isDisposed) return;
+
     if (isTyping) {
-      setState(() => _localIsTyping = true);
+      if (mounted) setState(() => _localIsTyping = true);
       _typingClearTimer?.cancel();
       _typingClearTimer = Timer(const Duration(seconds: 4), () {
-        if (mounted) setState(() => _localIsTyping = false);
+        if (mounted && !_isDisposed) {
+          setState(() => _localIsTyping = false);
+        }
       });
     } else {
       _typingClearTimer?.cancel();
-      if (_localIsTyping) setState(() => _localIsTyping = false);
+      if (_localIsTyping && mounted && !_isDisposed) {
+        setState(() => _localIsTyping = false);
+      }
     }
   }
 
   @override
   void dispose() {
-    _typingClearTimer?.cancel(); // Clean up timer
+    _isDisposed = true;
+    _typingClearTimer?.cancel();
     super.dispose();
   }
 
@@ -705,7 +734,7 @@ class _ChatTileState extends State<_ChatTile> {
     final cachedMeta = prefs
         .getString('profile_cache_${widget.targetUserId}_${widget.chat['id']}');
 
-    if (mounted) {
+    if (mounted && !_isDisposed) {
       if (cachedMeta != null) _metaData = jsonDecode(cachedMeta);
       if (_metaData != null) setState(() => _isLoadingMeta = false);
     }
@@ -722,21 +751,26 @@ class _ChatTileState extends State<_ChatTile> {
         prefs.setString(
             'profile_cache_${widget.targetUserId}_${widget.chat['id']}',
             jsonEncode(newMeta));
-        if (mounted)
+        if (mounted && !_isDisposed) {
           setState(() {
             _metaData = newMeta;
             _isLoadingMeta = false;
           });
+        }
         return;
       }
 
-      if (widget.targetUserId.isEmpty) return;
+      if (widget.targetUserId.isEmpty) {
+        if (mounted && !_isDisposed) setState(() => _isLoadingMeta = false);
+        return;
+      }
 
       final profileData = await supabase
           .from('profiles')
           .select('username, avatar_url, school_name, subscription_tier')
           .eq('id', widget.targetUserId)
           .maybeSingle();
+
       final storyCheck = await supabase
           .from('stories')
           .select('id')
@@ -745,23 +779,25 @@ class _ChatTileState extends State<_ChatTile> {
           .limit(1);
 
       final newMeta = {
-        'title': profileData?['username'] ?? "User",
-        'avatar_url': profileData?['avatar_url'],
-        'school_name': profileData?['school_name'],
-        'is_plus': profileData?['subscription_tier'] == 'Membership',
+        'title': profileData?['username']?.toString() ?? 'User',
+        'avatar_url': profileData?['avatar_url']?.toString(),
+        'school_name': profileData?['school_name']?.toString(),
+        'is_plus':
+            profileData?['subscription_tier']?.toString() == 'Membership',
         'has_story': storyCheck.isNotEmpty,
       };
 
       prefs.setString(
           'profile_cache_${widget.targetUserId}_${widget.chat['id']}',
           jsonEncode(newMeta));
-      if (mounted)
+      if (mounted && !_isDisposed) {
         setState(() {
           _metaData = newMeta;
           _isLoadingMeta = false;
         });
+      }
     } catch (e) {
-      if (mounted && _metaData == null) {
+      if (mounted && !_isDisposed && _metaData == null) {
         setState(() {
           _metaData = {
             'title': "Chat",
@@ -930,15 +966,23 @@ class _ChatTileState extends State<_ChatTile> {
                       shape: BoxShape.circle,
                       border: Border.all(color: widget.themeColor, width: 2))
                   : null,
-              child: CircleAvatar(
-                radius: 28,
-                backgroundColor: const Color(0xFF121212),
-                backgroundImage:
-                    avatarUrl != null ? NetworkImage(avatarUrl) : null,
-                child: avatarUrl == null
-                    ? Icon(isGroup ? Icons.group : Icons.person,
-                        color: widget.themeColor)
-                    : null,
+              // NEW (smooth — isolated repaint, cached image):
+              child: RepaintBoundary(
+                child: CircleAvatar(
+                  radius: 28,
+                  backgroundColor: const Color(0xFF121212),
+                  backgroundImage: avatarUrl != null
+                      ? ResizeImage(
+                          NetworkImage(avatarUrl),
+                          width: 112, // 28 * 4 for high DPI, capped memory
+                          height: 112,
+                        )
+                      : null,
+                  child: avatarUrl == null
+                      ? Icon(isGroup ? Icons.group : Icons.person,
+                          color: widget.themeColor)
+                      : null,
+                ),
               ),
             ),
           ),

@@ -513,7 +513,7 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
           ? Container(height: 300, color: Colors.grey[900])
           : SizedBox(
               width: double.infinity,
-              height: MediaQuery.of(context).size.width,
+              height: MediaQuery.sizeOf(context).width,
               child: Stack(
                 children: [
                   PageView.builder(
