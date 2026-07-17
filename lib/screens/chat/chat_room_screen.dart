@@ -34,6 +34,233 @@ import 'package:just_audio/just_audio.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:uuid/uuid.dart';
 
+Map<String, dynamic> _materialTypeStyle(String type) {
+  switch (type) {
+    case 'video':
+      return {
+        'icon': Icons.play_circle_fill,
+        'color': const Color(0xFF9C27B0),
+        'label': 'VIDEO'
+      };
+    case 'image':
+      return {
+        'icon': Icons.image,
+        'color': const Color(0xFF2196F3),
+        'label': 'IMAGE'
+      };
+    case 'pdf':
+      return {
+        'icon': Icons.picture_as_pdf,
+        'color': const Color(0xFFE53935),
+        'label': 'PDF'
+      };
+    case 'doc':
+      return {
+        'icon': Icons.description,
+        'color': const Color(0xFF00BFA5),
+        'label': 'DOC'
+      };
+    case 'link':
+      return {
+        'icon': Icons.link,
+        'color': const Color(0xFFFFA000),
+        'label': 'LINK'
+      };
+    default:
+      return {
+        'icon': Icons.insert_drive_file,
+        'color': const Color(0xFF757575),
+        'label': 'FILE'
+      };
+  }
+}
+
+Widget _buildMaterialChip({
+  required Map<String, dynamic> material,
+  required bool isLocked,
+  required int fallbackIndex,
+  required VoidCallback onTap,
+}) {
+  final style = _materialTypeStyle(material['type']?.toString() ?? 'file');
+  final Color color = style['color'] as Color;
+  final IconData icon = style['icon'] as IconData;
+  final String label = style['label'] as String;
+  final String realTitle = material['title']?.toString().isNotEmpty == true
+      ? material['title'].toString()
+      : 'Untitled';
+  final String displayTitle =
+      isLocked ? '$label ${fallbackIndex + 1}' : realTitle;
+
+  return GestureDetector(
+    onTap: isLocked ? null : onTap,
+    child: Container(
+      margin: const EdgeInsets.only(right: 8, bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: color.withOpacity(isLocked ? 0.12 : 0.18),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+            color: color.withOpacity(isLocked ? 0.35 : 0.55), width: 1.2),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 140),
+            child: Text(displayTitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                // 🔥 FIX: Changed to FontWeight.bold for web support
+                style: TextStyle(
+                    color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+          ),
+          if (isLocked) ...[
+            const SizedBox(width: 5),
+            Icon(Icons.lock_outline, size: 11, color: color.withOpacity(0.8)),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
+Widget _buildManagerChip(
+    BuildContext context, Map<String, dynamic> manager, UserPreferences prefs) {
+  final username = manager['username']?.toString() ?? 'user';
+  final avatarUrl = manager['avatar_url']?.toString();
+  return GestureDetector(
+    onTap: () =>
+        UniversalProfileCard.show(context, manager['id'].toString(), prefs),
+    child: Container(
+      margin: const EdgeInsets.only(right: 8, bottom: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.35),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircleAvatar(
+            radius: 9,
+            backgroundColor: Colors.grey[800],
+            backgroundImage: (avatarUrl != null && avatarUrl.isNotEmpty)
+                ? NetworkImage(avatarUrl)
+                : null,
+            child: (avatarUrl == null || avatarUrl.isEmpty)
+                ? const Icon(Icons.person, size: 10, color: Colors.white54)
+                : null,
+          ),
+          const SizedBox(width: 6),
+          Text('@$username',
+              // 🔥 FIX: Changed to FontWeight.bold for web support
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold)),
+        ],
+      ),
+    ),
+  );
+}
+
+Widget _buildEventExtras(
+    BuildContext context, dynamic eventId, UserPreferences prefs) {
+  if (eventId == null) return const SizedBox.shrink();
+  final id = eventId is int ? eventId : int.tryParse(eventId.toString());
+  if (id == null) return const SizedBox.shrink();
+
+  return StreamBuilder<List<Map<String, dynamic>>>(
+    stream: Supabase.instance.client
+        .from('chat_events')
+        .stream(primaryKey: ['id']).eq('id', id),
+    builder: (context, snapshot) {
+      final rows = snapshot.data ?? [];
+      if (rows.isEmpty) return const SizedBox.shrink();
+      final ev = rows.first;
+
+      final materials = List<Map<String, dynamic>>.from(
+          (ev['materials'] as List? ?? [])
+              .map((m) => Map<String, dynamic>.from(m as Map)));
+      final managerIds = List<String>.from(
+          (ev['manager_ids'] as List? ?? []).map((e) => e.toString()));
+      final locked = ev['materials_locked'] == true;
+      final hasStarted = DateTime.now()
+          .toUtc()
+          .isAfter(DateTime.parse(ev['start_time']).toUtc());
+      final effectivelyLocked = locked && !hasStarted;
+
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (materials.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Builder(builder: (context) {
+              final typeCounters = <String, int>{};
+              return Wrap(
+                children: materials.map((m) {
+                  final type = m['type']?.toString() ?? 'file';
+                  final idx = typeCounters.update(type, (v) => v + 1,
+                          ifAbsent: () => 1) -
+                      1;
+                  return _buildMaterialChip(
+                    material: m,
+                    isLocked: effectivelyLocked,
+                    fallbackIndex: idx,
+                    onTap: () => _openMaterial(context, m),
+                  );
+                }).toList(),
+              );
+            }),
+          ],
+          if (managerIds.isNotEmpty)
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: Supabase.instance.client
+                  .from('profiles')
+                  .select('id, username, avatar_url')
+                  .inFilter('id', managerIds),
+              builder: (context, snap) {
+                final managers = snap.data ?? [];
+                if (managers.isEmpty) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Wrap(
+                      children: managers
+                          .map((m) => _buildManagerChip(context, m, prefs))
+                          .toList()),
+                );
+              },
+            ),
+        ],
+      );
+    },
+  );
+}
+
+Future<void> _openMaterial(
+    BuildContext context, Map<String, dynamic> material) async {
+  final type = material['type']?.toString() ?? 'file';
+  final url = material['url']?.toString() ?? '';
+  if (url.isEmpty) return;
+  if (type == 'video' || type == 'image') {
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => FullScreenMediaPlayer(mediaItems: [
+            {'url': url, 'type': type}
+          ], initialIndex: 0),
+        ));
+    return;
+  }
+  final uri = Uri.tryParse(url);
+  if (uri != null && await canLaunchUrl(uri)) {
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+}
+
 class ChatRoomScreen extends StatefulWidget {
   final String chatId;
   final String chatTitle;
@@ -65,6 +292,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   final FocusNode _focusNode = FocusNode(); // <--- KEEPS KEYBOARD STABLE
   final Map<String, Uint8List> _chatVideoThumbCache = {};
   final AudioRecorder _audioRecorder = AudioRecorder();
+  final Map<String, Future<Uint8List?>> _pendingThumbFutures = {};
+  final ValueNotifier<List<Map<String, dynamic>>> _memberProfilesNotifier =
+      ValueNotifier([]);
+  final ValueNotifier<List<Map<String, dynamic>>> _participantsNotifier =
+      ValueNotifier([]);
   List<Map<String, dynamic>> _mentionSuggestions = [];
   int? _mentionStartIndex;
   bool _isRecording = false;
@@ -102,6 +334,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   List<Map<String, dynamic>>? _cachedCombinedMessages;
   String _lastComputeSignature = '';
   bool _isDisposed = false;
+  List<Map<String, dynamic>> _pinnedMessages = [];
+  StreamSubscription? _pinnedSub;
+  String _lastPinnedSignature = '';
 
   @override
   void initState() {
@@ -115,14 +350,61 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       'group_description': 'Loading group info...',
     };
 
-    // 🔥 FIX: Add the scroll listener that was already there, but add _isDisposed guard
     _scrollController.addListener(_scrollListener);
     _messageController.addListener(_onMessageTextChanged);
 
     _setupMessageStream();
+    _setupPinnedMessagesStream(); // 🔥 NEW
     _loadChatMeta();
     _setupTypingListener();
     _markMessagesAsRead();
+  }
+
+  Future<void> _setupPinnedMessagesStream() async {
+    final cached =
+        await ChatLocalDB.instance.getPinnedMessagesForChat(widget.chatId);
+    if (cached.isNotEmpty && mounted && !_isDisposed) {
+      setState(() => _pinnedMessages = cached);
+    }
+
+    try {
+      final resp = await supabase
+          .from('messages')
+          .select()
+          .eq('chat_id', widget.chatId)
+          .inFilter('media_type', ['poll', 'event']).order('created_at',
+              ascending: false);
+      if (mounted && !_isDisposed) {
+        final rows = List<Map<String, dynamic>>.from(resp);
+        setState(() => _pinnedMessages = rows);
+        await ChatLocalDB.instance.cacheMessages(widget.chatId, rows);
+      }
+    } catch (e) {
+      debugPrint("Pinned messages fetch error: $e");
+    }
+
+    _pinnedSub?.cancel();
+    _pinnedSub = supabase
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('chat_id', widget.chatId)
+        .order('created_at', ascending: false)
+        .limit(300)
+        .listen((data) async {
+          if (!mounted || _isDisposed) return;
+          final pinned = data.where((m) {
+            final t = m['media_type']?.toString();
+            return t == 'poll' || t == 'event';
+          }).toList();
+
+          final signature = pinned.map((m) => m['id'].toString()).join(',');
+          if (signature == _lastPinnedSignature) return; // skip no-op rebuilds
+          _lastPinnedSignature = signature;
+
+          setState(
+              () => _pinnedMessages = List<Map<String, dynamic>>.from(pinned));
+          await ChatLocalDB.instance.cacheMessages(widget.chatId, pinned);
+        });
   }
 
   @override
@@ -130,14 +412,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     final previousState = _lastLifecycleState;
     _lastLifecycleState = state;
 
-    // 🔥 FIX: Only re-run the full setup cascade (2 realtime resubscribes +
-    // 3 DB queries + a messages UPDATE) when we ACTUALLY come back from
-    // being backgrounded. Soft-keyboard show/hide on Android — ColorOS
-    // especially — can fire a transient `inactive` -> `resumed` blip
-    // without the app ever really leaving the foreground. Treating that
-    // blip as a real resume was what re-triggered everything on every
-    // keyboard toggle, piling up overlapping subscriptions/queries until
-    // the phone couldn't keep up.
     final wasActuallyBackgrounded = previousState == AppLifecycleState.paused ||
         previousState == AppLifecycleState.detached;
 
@@ -149,8 +423,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       _resumeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
         if (!mounted || _isDisposed) return;
         _setupMessageStream();
-        _setupTypingListener();
+        _setupPinnedMessagesStream(); // 🔥 NEW
         _loadChatMeta();
+        _setupTypingListener();
         _markMessagesAsRead();
       });
     }
@@ -161,8 +436,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       final prefs = await SharedPreferences.getInstance();
       final cachedParticipants =
           prefs.getString('cached_parts_${supabase.auth.currentUser!.id}');
-      final cachedProfiles = prefs.getString(
-          'cached_profiles_${widget.chatId}'); // 🔥 NEW: Cache lookup
+      final cachedProfiles =
+          prefs.getString('cached_profiles_${widget.chatId}');
 
       if (cachedParticipants != null && mounted) {
         final allParts =
@@ -172,13 +447,15 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
             .toList();
         if (myGroupParts.isNotEmpty) {
           setState(() => _participants = myGroupParts);
+          _participantsNotifier.value = myGroupParts;
         }
       }
 
-      // 🔥 FIX: Instantly load usernames from cache to prevent the `@User` flash!
       if (cachedProfiles != null && mounted) {
-        setState(() => _memberProfiles =
-            List<Map<String, dynamic>>.from(jsonDecode(cachedProfiles)));
+        final profs =
+            List<Map<String, dynamic>>.from(jsonDecode(cachedProfiles));
+        setState(() => _memberProfiles = profs);
+        _memberProfilesNotifier.value = profs;
       }
 
       final chatResp = await supabase
@@ -217,8 +494,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
             .select('id, username, avatar_url, school_name')
             .inFilter('id', userIdsToFetch.toList());
         profiles = List<Map<String, dynamic>>.from(profileResp);
-
-        // 🔥 FIX: Save to cache for next time
         prefs.setString(
             'cached_profiles_${widget.chatId}', jsonEncode(profiles));
       }
@@ -240,6 +515,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         _creatorId = creatorId;
         _isGroupCreator = currentUserId != null && creatorId == currentUserId;
       });
+
+      // 🔥 FIX: push the fresh lists to the notifiers too, so any open
+      // group-info sheet updates live instead of freezing at whatever was
+      // true the moment it was opened.
+      _participantsNotifier.value = participants;
+      _memberProfilesNotifier.value = profiles;
     } catch (e) {
       debugPrint("Load chat meta error: $e");
     }
@@ -1487,80 +1768,78 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            if (widget.isGroup) ...[
-              // 🔥 THE FIX: Allows Admins & Creators to ADD members
-              if (amICreator || amIAdmin)
-                _menuTile(Icons.person_add, 'Add Members', () {
+        child: SingleChildScrollView(
+          // <-- FIX: prevents bottom overflow
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              if (widget.isGroup) ...[
+                if (amICreator || amIAdmin)
+                  _menuTile(Icons.person_add, 'Add Members', () {
+                    Navigator.pop(ctx);
+                    _showAddMemberSheet();
+                  }, color: const Color(0xFF4CAF50)),
+                if (amICreator)
+                  _menuTile(Icons.edit, 'Edit Group', () async {
+                    Navigator.pop(ctx);
+                    await _editGroup();
+                  }),
+                if (allowShareLink) ...[
+                  _menuTile(Icons.ios_share, 'Share Group Invite', () async {
+                    Navigator.pop(ctx);
+                    final link =
+                        'https://www.allowanceapp.org/share?type=group&id=${widget.chatId}';
+                    final groupName =
+                        _chatMeta?['group_name'] ?? widget.chatTitle;
+                    await Share.share('Join "$groupName" on Allowance!\n$link');
+                  }, color: const Color(0xFF4CAF50)),
+                  _menuTile(Icons.link, 'Copy Group Link', () async {
+                    Navigator.pop(ctx);
+                    final link =
+                        'https://www.allowanceapp.org/share?type=group&id=${widget.chatId}';
+                    await Clipboard.setData(ClipboardData(text: link));
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Group link copied!')));
+                    }
+                  }),
+                ],
+                _menuTile(Icons.logout, 'Leave Group', () {
                   Navigator.pop(ctx);
-                  _showAddMemberSheet();
-                }, color: const Color(0xFF4CAF50)),
-
-              if (amICreator)
-                _menuTile(Icons.edit, 'Edit Group', () async {
-                  Navigator.pop(ctx);
-                  await _editGroup();
-                }),
-
-              if (allowShareLink) ...[
-                _menuTile(Icons.ios_share, 'Share Group Invite', () async {
-                  Navigator.pop(ctx);
-                  final link =
-                      'https://www.allowanceapp.org/share?type=group&id=${widget.chatId}';
-                  final groupName =
-                      _chatMeta?['group_name'] ?? widget.chatTitle;
-                  await Share.share('Join "$groupName" on Allowance!\n$link');
-                }, color: const Color(0xFF4CAF50)),
-                _menuTile(Icons.link, 'Copy Group Link', () async {
-                  Navigator.pop(ctx);
-                  final link =
-                      'https://www.allowanceapp.org/share?type=group&id=${widget.chatId}';
-                  await Clipboard.setData(ClipboardData(text: link));
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Group link copied!')));
-                  }
-                }),
+                  _confirmLeaveGroup();
+                }, color: Colors.orangeAccent),
+                if (amICreator)
+                  _menuTile(Icons.delete_forever, 'Delete Group', () {
+                    Navigator.pop(ctx);
+                    _confirmDeleteGroup();
+                  }, color: Colors.redAccent),
               ],
-
-              _menuTile(Icons.logout, 'Leave Group', () {
-                Navigator.pop(ctx);
-                _confirmLeaveGroup();
-              }, color: Colors.orangeAccent),
-
-              if (amICreator)
-                _menuTile(Icons.delete_forever, 'Delete Group', () {
-                  Navigator.pop(ctx);
-                  _confirmDeleteGroup();
-                }, color: Colors.redAccent),
-            ],
-            StatefulBuilder(
-              builder: (context, setModalState) => ListTile(
-                leading: Icon(
-                  widget.userPreferences.autoDownloadMedia
-                      ? Icons.file_download_done
-                      : Icons.file_download,
-                  color: const Color(0xFF4CAF50),
-                ),
-                title: const Text('Auto-Download Media',
-                    style: TextStyle(color: Colors.white)),
-                trailing: Switch(
-                  value: widget.userPreferences.autoDownloadMedia,
-                  activeColor: const Color(0xFF4CAF50),
-                  onChanged: (val) async {
-                    setModalState(
-                        () => widget.userPreferences.autoDownloadMedia = val);
-                    setState(() {});
-                    await widget.userPreferences.savePreferences();
-                  },
+              StatefulBuilder(
+                builder: (context, setModalState) => ListTile(
+                  leading: Icon(
+                    widget.userPreferences.autoDownloadMedia
+                        ? Icons.file_download_done
+                        : Icons.file_download,
+                    color: const Color(0xFF4CAF50),
+                  ),
+                  title: const Text('Auto-Download Media',
+                      style: TextStyle(color: Colors.white)),
+                  trailing: Switch(
+                    value: widget.userPreferences.autoDownloadMedia,
+                    activeColor: const Color(0xFF4CAF50),
+                    onChanged: (val) async {
+                      setModalState(
+                          () => widget.userPreferences.autoDownloadMedia = val);
+                      setState(() {});
+                      await widget.userPreferences.savePreferences();
+                    },
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 12),
-          ],
+              const SizedBox(height: 12),
+            ],
+          ),
         ),
       ),
     );
@@ -1847,7 +2126,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     }
   }
 
-  // --- FIXED: EDITING WITH OFFLINE SUPPORT & SERIOUSNESS MENU ---
+  // --- FIXED: EDITING WITH OFFLINE SUPPORT, MOODS, & FORWARD HIDDEN ---
   void _showMessageOptions(Map<String, dynamic> message, bool isMe) {
     final createdAt = DateTime.parse(message['created_at']).toLocal();
     final canEdit = DateTime.now().difference(createdAt).inMinutes <= 5;
@@ -1859,6 +2138,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         (message['media_type'] == 'image' &&
             message['content'] == 'Sticker/GIF');
     final stickerUrl = isSticker ? message['media_url']?.toString() : null;
+
+    // 🔥 FIX 1: Check if this is an event banner to hide forwarding!
+    final isEventBanner = message['media_type'] == 'event';
 
     final currentReaction = message['reactions'];
     final defaultEmojis = ['❤️', '😂', '😮', '😢', '🙏'];
@@ -1932,15 +2214,17 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 },
               ),
 
-              // Forward
-              ListTile(
-                  leading: const Icon(Icons.forward, color: Colors.blueAccent),
-                  title: const Text('Forward',
-                      style: TextStyle(color: Colors.blueAccent)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showForwardSheet(message);
-                  }),
+              // Forward (🔥 Hidden for Event Banners!)
+              if (!isEventBanner)
+                ListTile(
+                    leading:
+                        const Icon(Icons.forward, color: Colors.blueAccent),
+                    title: const Text('Forward',
+                        style: TextStyle(color: Colors.blueAccent)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showForwardSheet(message);
+                    }),
 
               // Mood — always available on your own messages
               if (isMe)
@@ -2488,215 +2772,216 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         minChildSize: 0.6,
         maxChildSize: 0.95,
         builder: (_, controller) {
-          final filteredMembers = _memberProfiles.where((m) {
-            final name = (m['username'] ?? '').toString().toLowerCase();
-            return name.contains(_memberSearchQuery.toLowerCase());
-          }).toList();
+          return ValueListenableBuilder<List<Map<String, dynamic>>>(
+            valueListenable: _memberProfilesNotifier,
+            builder: (context, memberProfiles, __) {
+              return ValueListenableBuilder<List<Map<String, dynamic>>>(
+                valueListenable: _participantsNotifier,
+                builder: (context, participants, ___) {
+                  final filteredMembers = memberProfiles.where((m) {
+                    final name = (m['username'] ?? '').toString().toLowerCase();
+                    return name.contains(_memberSearchQuery.toLowerCase());
+                  }).toList();
 
-          final creatorProfile = _memberProfiles.firstWhere(
-            (p) => p['id'].toString() == _creatorId,
-            orElse: () => <String, dynamic>{},
-          );
+                  final creatorProfile = memberProfiles.firstWhere(
+                    (p) => p['id'].toString() == _creatorId,
+                    orElse: () => <String, dynamic>{},
+                  );
 
-          return Container(
-            decoration: const BoxDecoration(
-              color: Color(0xFF111111),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-            ),
-            child: ListView(
-              controller: controller,
-              padding: const EdgeInsets.all(20),
-              children: [
-                Center(
-                  child: Container(
-                    width: 44,
-                    height: 5,
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(999),
+                  return Container(
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF111111),
+                      borderRadius:
+                          BorderRadius.vertical(top: Radius.circular(24)),
                     ),
-                  ),
-                ),
-                const SizedBox(height: 18),
-
-                // Group Header
-                Row(
-                  children: [
-                    CircleAvatar(
-                      radius: 35,
-                      backgroundImage: _chatMeta?['group_avatar'] != null
-                          ? NetworkImage(_chatMeta!['group_avatar'])
-                          : null,
-                      child: _chatMeta?['group_avatar'] == null
-                          ? const Icon(Icons.groups,
-                              size: 40, color: Colors.white54)
-                          : null,
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _chatMeta?['group_name'] ?? widget.chatTitle,
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 22,
-                                fontWeight: FontWeight.bold),
-                          ),
-                          Text(
-                            _isGroupCreator
-                                ? 'You created this group'
-                                : 'Group',
-                            style: const TextStyle(color: Colors.white70),
-                          ),
-                          if (_chatMeta?['group_description']?.isNotEmpty ==
-                              true)
-                            Text(
-                              _chatMeta!['group_description'],
-                              style: const TextStyle(
-                                  color: Colors.white70, height: 1.4),
+                    child: ListView(
+                      controller: controller,
+                      padding: const EdgeInsets.all(20),
+                      children: [
+                        Center(
+                          child: Container(
+                            width: 44,
+                            height: 5,
+                            decoration: BoxDecoration(
+                              color: Colors.white24,
+                              borderRadius: BorderRadius.circular(999),
                             ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 24),
-
-                // Creator Section
-                if (creatorProfile.isNotEmpty) ...[
-                  const Text('Creator',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  ListTile(
-                    leading: CircleAvatar(
-                      backgroundImage: creatorProfile['avatar_url'] != null
-                          ? NetworkImage(creatorProfile['avatar_url'])
-                          : null,
-                    ),
-                    title: Text('@${creatorProfile['username'] ?? 'Unknown'}',
-                        style: const TextStyle(color: Colors.white)),
-                    subtitle: const Text('Creator',
-                        style: TextStyle(
-                            color: Colors.amberAccent,
-                            fontWeight: FontWeight.bold)),
-                    onTap: () => _showMemberOptions(
-                        creatorProfile), // <-- Tappable creator
-                  ),
-                  const Divider(color: Colors.white24),
-                ],
-
-                // Members Section
-                Text('Members (${filteredMembers.length})',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-
-                CupertinoSearchTextField(
-                  controller: _memberSearchController,
-                  style: const TextStyle(color: Colors.white),
-                  placeholder: 'Search members...',
-                  onChanged: (value) =>
-                      setState(() => _memberSearchQuery = value),
-                ),
-
-                const SizedBox(height: 16),
-
-                // --- 3-COLUMN GRID VIEW FOR MEMBERS ---
-                GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
-                    crossAxisSpacing: 10,
-                    mainAxisSpacing: 16,
-                    childAspectRatio: 0.80,
-                  ),
-                  itemCount: filteredMembers.length,
-                  itemBuilder: (context, index) {
-                    final member = filteredMembers[index];
-                    final userId = member['id'].toString();
-                    final isCreator = userId == _creatorId;
-
-                    // --- FIX: Relies strictly on `role == 'admin'` ---
-                    final isAdmin = _participants.any((p) =>
-                        p['user_id']?.toString() == userId &&
-                        p['role'] == 'admin');
-
-                    return GestureDetector(
-                      onTap: () => _showMemberOptions(member),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircleAvatar(
-                            radius: 32,
-                            backgroundColor: Colors.grey[800],
-                            backgroundImage: member['avatar_url'] != null
-                                ? NetworkImage(member['avatar_url'])
-                                : null,
-                            child: member['avatar_url'] == null
-                                ? Text(
-                                    (member['username'] ?? 'U')[0]
-                                        .toUpperCase(),
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 35,
+                              backgroundImage:
+                                  _chatMeta?['group_avatar'] != null
+                                      ? NetworkImage(_chatMeta!['group_avatar'])
+                                      : null,
+                              child: _chatMeta?['group_avatar'] == null
+                                  ? const Icon(Icons.groups,
+                                      size: 40, color: Colors.white54)
+                                  : null,
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _chatMeta?['group_name'] ??
+                                        widget.chatTitle,
                                     style: const TextStyle(
-                                        color: Colors.white, fontSize: 20))
-                                : null,
-                          ),
+                                        color: Colors.white,
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.bold),
+                                  ),
+                                  Text(
+                                    _isGroupCreator
+                                        ? 'You created this group'
+                                        : 'Group',
+                                    style:
+                                        const TextStyle(color: Colors.white70),
+                                  ),
+                                  if (_chatMeta?['group_description']
+                                          ?.isNotEmpty ==
+                                      true)
+                                    Text(
+                                      _chatMeta!['group_description'],
+                                      style: const TextStyle(
+                                          color: Colors.white70, height: 1.4),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 24),
+                        if (creatorProfile.isNotEmpty) ...[
+                          const Text('Creator',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold)),
                           const SizedBox(height: 8),
-                          Text(
-                            '@${member['username'] ?? 'User'}',
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          if (isCreator)
-                            const Text('Creator',
+                          ListTile(
+                            leading: CircleAvatar(
+                              backgroundImage: creatorProfile['avatar_url'] !=
+                                      null
+                                  ? NetworkImage(creatorProfile['avatar_url'])
+                                  : null,
+                            ),
+                            title: Text(
+                                '@${creatorProfile['username'] ?? 'Unknown'}',
+                                style: const TextStyle(color: Colors.white)),
+                            subtitle: const Text('Creator',
                                 style: TextStyle(
                                     color: Colors.amberAccent,
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold))
-                          else if (isAdmin)
-                            const Text('Admin',
-                                style: TextStyle(
-                                    color: Color(0xFF4CAF50),
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold))
-                          else
-                            Text(
-                              member['school_name'] ?? '',
-                              style: const TextStyle(
-                                  color: Colors.white54, fontSize: 10),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
+                                    fontWeight: FontWeight.bold)),
+                            onTap: () => _showMemberOptions(creatorProfile),
+                          ),
+                          const Divider(color: Colors.white24),
                         ],
-                      ),
-                    );
-                  },
-                ),
+                        Text('Members (${filteredMembers.length})',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 8),
+                        CupertinoSearchTextField(
+                          controller: _memberSearchController,
+                          style: const TextStyle(color: Colors.white),
+                          placeholder: 'Search members...',
+                          onChanged: (value) =>
+                              setState(() => _memberSearchQuery = value),
+                        ),
+                        const SizedBox(height: 16),
+                        GridView.builder(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          gridDelegate:
+                              const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 10,
+                            mainAxisSpacing: 16,
+                            childAspectRatio: 0.80,
+                          ),
+                          itemCount: filteredMembers.length,
+                          itemBuilder: (context, index) {
+                            final member = filteredMembers[index];
+                            final userId = member['id'].toString();
+                            final isCreator = userId == _creatorId;
+                            final isAdmin = participants.any((p) =>
+                                p['user_id']?.toString() == userId &&
+                                p['role'] == 'admin');
 
-                const SizedBox(height: 30),
-                ElevatedButton.icon(
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close),
-                  label: const Text('Close'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF4CAF50),
-                    foregroundColor: Colors.black,
-                  ),
-                ),
-              ],
-            ),
+                            return GestureDetector(
+                              onTap: () => _showMemberOptions(member),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  CircleAvatar(
+                                    radius: 32,
+                                    backgroundColor: Colors.grey[800],
+                                    backgroundImage:
+                                        member['avatar_url'] != null
+                                            ? NetworkImage(member['avatar_url'])
+                                            : null,
+                                    child: member['avatar_url'] == null
+                                        ? Text(
+                                            (member['username'] ?? 'U')[0]
+                                                .toUpperCase(),
+                                            style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 20))
+                                        : null,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text('@${member['username'] ?? 'User'}',
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 12),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis),
+                                  if (isCreator)
+                                    const Text('Creator',
+                                        style: TextStyle(
+                                            color: Colors.amberAccent,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold))
+                                  else if (isAdmin)
+                                    const Text('Admin',
+                                        style: TextStyle(
+                                            color: Color(0xFF4CAF50),
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.bold))
+                                  else
+                                    Text(member['school_name'] ?? '',
+                                        style: const TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 10),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 30),
+                        ElevatedButton.icon(
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(Icons.close),
+                          label: const Text('Close'),
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF4CAF50),
+                              foregroundColor: Colors.black),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              );
+            },
           );
         },
       ),
@@ -3031,219 +3316,19 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     }
 
     // =========================================================================
-    // EVENT BANNER (Clean, no "STARTING NOW" text)
+    // EVENT BANNER (GORGEOUS NEW DESIGN)
     // =========================================================================
     if (mediaType == 'event') {
-      final String? evtMediaUrl = message['media_url']?.toString();
-      final bool evtHasMedia =
-          evtMediaUrl != null && evtMediaUrl.trim().isNotEmpty;
-
       return GestureDetector(
         onLongPress: () => _showMessageOptions(message, isMe),
         behavior: HitTestBehavior.opaque,
-        child: Center(
-          child: Container(
-            width: double.infinity,
-            margin: const EdgeInsets.symmetric(vertical: 20, horizontal: 12),
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              gradient: evtHasMedia
-                  ? null
-                  : const LinearGradient(
-                      colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.4),
-                  blurRadius: 24,
-                  spreadRadius: 2,
-                  offset: const Offset(0, 8),
-                ),
-              ],
-            ),
-            child: Stack(
-              children: [
-                if (evtHasMedia)
-                  Positioned.fill(
-                    child: CachedNetworkImage(
-                      imageUrl: evtMediaUrl.split(',').first,
-                      fit: BoxFit.cover,
-                      placeholder: (context, url) =>
-                          Container(color: const Color(0xFF0F172A)),
-                      errorWidget: (context, url, error) =>
-                          Container(color: const Color(0xFF0F172A)),
-                    ),
-                  ),
-                Positioned.fill(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          Colors.black.withOpacity(0.1),
-                          Colors.black.withOpacity(0.5),
-                          Colors.black.withOpacity(evtHasMedia ? 0.88 : 0.95),
-                        ],
-                        stops: const [0.0, 0.35, 1.0],
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                      ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  child: Container(
-                    height: 3,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          const Color(0xFF4CAF50),
-                          const Color(0xFF4CAF50).withOpacity(0.0),
-                        ],
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                      ),
-                    ),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.all(20.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF4CAF50).withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: const Color(0xFF4CAF50).withOpacity(0.25),
-                            width: 1,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.event_available_rounded,
-                              color: const Color(0xFF4CAF50),
-                              size: 13,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              'EVENT',
-                              style: TextStyle(
-                                color: const Color(0xFF4CAF50),
-                                fontSize: 11,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0.8,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        content,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w800,
-                          height: 1.2,
-                          letterSpacing: -0.5,
-                        ),
-                      ),
-                      if (message['description']?.toString().isNotEmpty ==
-                          true) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          message['description'].toString(),
-                          style: TextStyle(
-                            color: Colors.white.withOpacity(0.75),
-                            fontSize: 14,
-                            height: 1.4,
-                            fontWeight: FontWeight.w400,
-                          ),
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                      const SizedBox(height: 20),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: Colors.black.withOpacity(0.35),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: Colors.white.withOpacity(0.08),
-                            width: 1,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.access_time_rounded,
-                              color: const Color(0xFF4CAF50),
-                              size: 15,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              timeStr,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            if (message['location']?.toString().isNotEmpty ==
-                                true) ...[
-                              const SizedBox(width: 12),
-                              Container(
-                                width: 4,
-                                height: 4,
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withOpacity(0.4),
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Icon(
-                                Icons.location_on_outlined,
-                                color: Colors.white.withOpacity(0.6),
-                                size: 14,
-                              ),
-                              const SizedBox(width: 6),
-                              Flexible(
-                                child: Text(
-                                  message['location'].toString(),
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.7),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
+        child: EventBannerWidget(
+          eventId: message['event_id'] is int
+              ? message['event_id']
+              : int.tryParse(message['event_id']?.toString() ?? '0') ?? 0,
+          isMe: isMe,
+          prefs: widget.userPreferences,
+          originalMessage: message,
         ),
       );
     }
@@ -4055,11 +4140,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
     Widget mediaWidget;
 
-    // --- 1. PENDING MEDIA (PREVIEWING LOCAL FILE OR WEB BLOB) ---
     if (isPending && localPaths.isNotEmpty) {
       if (isVideo) {
         if (kIsWeb) {
-          // 🔥 THE FIX: Extract first frame natively for Web uploads
           mediaWidget = _VideoFramePreview(url: url);
         } else {
           if (_chatVideoThumbCache.containsKey(url)) {
@@ -4068,21 +4151,34 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 width: double.infinity,
                 height: height ?? 200);
           } else {
-            mediaWidget = FutureBuilder<Uint8List?>(
-              future: VideoThumbnail.thumbnailData(
+            // 🔥 FIX: reuse the same in-flight future across rebuilds instead
+            // of firing a brand new native decode every time this widget
+            // rebuilds (typing, poll votes, message stream ticks, the
+            // post-resume refresh all rebuild this). Before this, every one
+            // of those rebuilds spawned another concurrent
+            // VideoThumbnail.thumbnailData() for the same clip, piling up
+            // native decoder work until the phone choked.
+            final future = _pendingThumbFutures.putIfAbsent(
+              url,
+              () => VideoThumbnail.thumbnailData(
                       video: url,
                       imageFormat: ImageFormat.JPEG,
                       maxWidth: 400,
                       quality: 50)
                   .catchError((_) => null),
+            );
+            mediaWidget = FutureBuilder<Uint8List?>(
+              future: future,
               builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.done &&
-                    snapshot.data != null) {
-                  _chatVideoThumbCache[url] = snapshot.data!;
-                  return Image.memory(snapshot.data!,
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: height ?? 200);
+                if (snapshot.connectionState == ConnectionState.done) {
+                  _pendingThumbFutures.remove(url);
+                  if (snapshot.data != null) {
+                    _chatVideoThumbCache[url] = snapshot.data!;
+                    return Image.memory(snapshot.data!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: height ?? 200);
+                  }
                 }
                 return Container(
                     width: double.infinity,
@@ -4096,7 +4192,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
           }
         }
       } else {
-        // IMAGE PREVIEW
         if (kIsWeb) {
           mediaWidget = Image.network(url,
               fit: BoxFit.cover,
@@ -4111,9 +4206,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
               errorBuilder: (_, __, ___) => _buildErrorPlaceholder(false));
         }
       }
-    }
-    // --- 2. NETWORK MEDIA (ALREADY UPLOADED TO SUPABASE) ---
-    else {
+    } else {
       if (isVideo) {
         if (thumbUrl != null && thumbUrl.isNotEmpty) {
           mediaWidget = CachedNetworkImage(
@@ -4121,7 +4214,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
               fit: BoxFit.cover,
               width: double.infinity,
               height: height ?? 200,
-              memCacheWidth: 800, // CAP memory usage
+              memCacheWidth: 800,
               memCacheHeight: 800,
               maxWidthDiskCache: 1200,
               maxHeightDiskCache: 1200,
@@ -4129,15 +4222,12 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                     color: Colors.grey[900],
                     child: const Center(
                       child: CircularProgressIndicator(
-                        color: Color(0xFF4CAF50),
-                        strokeWidth: 2,
-                      ),
+                          color: Color(0xFF4CAF50), strokeWidth: 2),
                     ),
                   ),
               errorWidget: (c, u, e) => _buildErrorPlaceholder(false));
         } else {
           if (kIsWeb) {
-            // 🔥 THE FIX: Extract first frame natively for Web Network videos
             mediaWidget = _VideoFramePreview(url: url);
           } else {
             if (_chatVideoThumbCache.containsKey(url)) {
@@ -4146,34 +4236,42 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                   width: double.infinity,
                   height: height ?? 200);
             } else {
+              // 🔥 SAME FIX as above.
+              final future = _pendingThumbFutures.putIfAbsent(
+                url,
+                () => VideoThumbnail.thumbnailData(
+                        video: url,
+                        imageFormat: ImageFormat.JPEG,
+                        maxWidth: 400,
+                        quality: 50)
+                    .catchError((_) => null),
+              );
               mediaWidget = FutureBuilder<Uint8List?>(
-                  future: VideoThumbnail.thumbnailData(
-                          video: url,
-                          imageFormat: ImageFormat.JPEG,
-                          maxWidth: 400,
-                          quality: 50)
-                      .catchError((_) => null),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.done &&
-                        snapshot.data != null) {
+                future: future,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.done) {
+                    _pendingThumbFutures.remove(url);
+                    if (snapshot.data != null) {
                       _chatVideoThumbCache[url] = snapshot.data!;
                       return Image.memory(snapshot.data!,
                           fit: BoxFit.cover,
                           width: double.infinity,
                           height: height ?? 200);
                     }
-                    return Container(
-                        color: Colors.black45,
-                        width: double.infinity,
-                        height: height ?? 200,
-                        child: Center(
-                            child: snapshot.connectionState ==
-                                    ConnectionState.waiting
-                                ? const CircularProgressIndicator(
-                                    color: Color(0xFF4CAF50))
-                                : const Icon(Icons.videocam,
-                                    color: Colors.white54, size: 40)));
-                  });
+                  }
+                  return Container(
+                      color: Colors.black45,
+                      width: double.infinity,
+                      height: height ?? 200,
+                      child: Center(
+                          child: snapshot.connectionState ==
+                                  ConnectionState.waiting
+                              ? const CircularProgressIndicator(
+                                  color: Color(0xFF4CAF50))
+                              : const Icon(Icons.videocam,
+                                  color: Colors.white54, size: 40)));
+                },
+              );
             }
           }
         }
@@ -4230,7 +4328,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                 progressMap[localId] ?? 0.01;
                             final int percent =
                                 (progress * 100).toInt().clamp(0, 100);
-
                             return Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -4425,14 +4522,28 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       final myPending =
           pendingList.where((m) => m['chat_id'] == widget.chatId).toList();
 
-      // Build signature for caching
-      int hash = myPending.length.hashCode ^ _messages.length.hashCode;
+      // 🔥 Merge the pinned poll/event stream in so they're always part of
+      // the rendered list, even after falling out of the capped 50-most-
+      // recent `_messages` window. Dedupe by id — a recent poll/event will
+      // legitimately show up in both lists.
+      final Map<String, Map<String, dynamic>> byId = {};
+      for (final m in _messages) {
+        final key = (m['id'] ?? m['local_id'] ?? '').toString();
+        if (key.isNotEmpty) byId[key] = m;
+      }
+      for (final m in _pinnedMessages) {
+        final key = (m['id'] ?? m['local_id'] ?? '').toString();
+        if (key.isNotEmpty && !byId.containsKey(key)) byId[key] = m;
+      }
+      final mergedMessages = byId.values.toList();
+
+      int hash = myPending.length.hashCode ^ mergedMessages.length.hashCode;
       for (final p in myPending) {
         hash ^= (p['local_id'] ?? '').hashCode;
         hash ^= (p['is_failed'] == true ? 1 : 0).hashCode;
         hash ^= (p['is_pending'] == true ? 2 : 0).hashCode;
       }
-      for (final m in _messages) {
+      for (final m in mergedMessages) {
         hash ^= (m['id'] ?? '').hashCode;
         hash ^= (m['is_edited'] == true ? 1 : 0).hashCode;
       }
@@ -4443,7 +4554,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         return _cachedCombinedMessages!;
       }
 
-      final confirmedLocalIds = _messages
+      final confirmedLocalIds = mergedMessages
           .map((m) => m['local_id']?.toString())
           .where((id) => id != null && id.isNotEmpty)
           .toSet();
@@ -4453,9 +4564,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         return !confirmedLocalIds.contains(p['local_id']?.toString());
       }).toList();
 
-      final combined = [...visiblePending, ..._messages];
+      final combined = [...visiblePending, ...mergedMessages];
 
-      // 🔥 FIX: Safe sort — if created_at is missing/invalid, shove it to the bottom
       combined.sort((a, b) {
         try {
           final aStr = a['created_at']?.toString();
@@ -4468,7 +4578,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
               : DateTime.fromMillisecondsSinceEpoch(0);
           return dateB.compareTo(dateA);
         } catch (e) {
-          return 0; // Keep original order if parsing fails
+          return 0;
         }
       });
 
@@ -4477,7 +4587,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       return combined;
     } catch (e, stack) {
       debugPrint('💀 _computeCombinedMessages crash: $e\n$stack');
-      // Return cached list if available, otherwise empty (prevents UI freeze)
       return _cachedCombinedMessages ?? [];
     }
   }
@@ -4713,6 +4822,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     _remoteTypingTimer = null;
     _recordTimer?.cancel();
     _recordTimer = null;
+    _pinnedSub?.cancel();
 
     // 🔥 FIX: Remove scroll listener BEFORE disposing controller
     _scrollController.removeListener(_scrollListener);
@@ -4731,6 +4841,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     _focusNode.dispose();
     _audioRecorder.dispose();
     _resumeDebounceTimer?.cancel();
+    _memberProfilesNotifier.dispose();
+    _participantsNotifier.dispose();
 
     // 🔥 FIX: Clear the typing status in DB but DON'T await it
     final myId = supabase.auth.currentUser?.id;
@@ -4808,7 +4920,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                         cacheExtent: 400,
                         // 🔥 FIX: Native swipe-down to close keyboard (clears gesture lag natively)
                         keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
+                            ScrollViewKeyboardDismissBehavior.manual,
                         padding: const EdgeInsets.all(12),
                         itemCount: combinedMessages.length,
                         itemBuilder: (context, index) {
@@ -5030,8 +5142,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                         minLines: 1,
                         keyboardType: TextInputType.multiline,
                         scrollPadding: EdgeInsets.zero,
-                        // 🔥 RESTORED: enableSuggestions and autocorrect default to true!
-                        // This allows Gboard to enable swipe-to-text, GIFs, and stickers again.
+                        // 🔥 FIX: removed enableSuggestions:false/autocorrect:false —
+                        // that's what was killing glide typing here.
                         enableInteractiveSelection: true,
                         textInputAction: TextInputAction.newline,
                         onChanged: _handleTyping,
@@ -6128,6 +6240,233 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
     _markDayAsSeen(selectedDay);
   }
 
+  Future<List<Map<String, dynamic>>> _fetchGroupMembers() async {
+    try {
+      // 1. Fetch user IDs first (avoids the auth.users foreign key crash)
+      final resp = await _supabase
+          .from('chat_participants')
+          .select('user_id')
+          .eq('chat_id', widget.chatId);
+
+      final List<String> userIds =
+          (resp as List).map((e) => e['user_id'].toString()).toList();
+
+      if (userIds.isEmpty) return [];
+
+      // 2. Fetch the actual profile data using those IDs
+      final profResp = await _supabase
+          .from('profiles')
+          .select('id, username, avatar_url')
+          .inFilter('id', userIds);
+
+      return List<Map<String, dynamic>>.from(profResp);
+    } catch (e) {
+      debugPrint('Error fetching group members: $e');
+      return [];
+    }
+  }
+
+  Future<void> _addMaterialFlow(
+      BuildContext parentModalContext,
+      String materialsFolderId,
+      void Function(Map<String, String>) onAdded) async {
+    String selectedType = 'link';
+    final titleCtrl = TextEditingController();
+    final linkCtrl = TextEditingController();
+    bool isUploading = false;
+
+    await showModalBottomSheet(
+      context: parentModalContext,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1A1A1A),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+              left: 20,
+              right: 20,
+              top: 20,
+              bottom: MediaQuery.viewInsetsOf(context).bottom + 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Add Material',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  {'type': 'video', 'label': 'Video', 'icon': Icons.videocam},
+                  {'type': 'image', 'label': 'Image', 'icon': Icons.image},
+                  {'type': 'pdf', 'label': 'PDF', 'icon': Icons.picture_as_pdf},
+                  {
+                    'type': 'doc',
+                    'label': 'Document',
+                    'icon': Icons.description
+                  },
+                  {'type': 'link', 'label': 'Link', 'icon': Icons.link},
+                ].map((opt) {
+                  final isSel = selectedType == opt['type'];
+                  final style = _materialTypeStyle(opt['type'] as String);
+                  final color = style['color'] as Color;
+                  return GestureDetector(
+                    onTap: () => setSheetState(
+                        () => selectedType = opt['type'] as String),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: isSel ? color.withOpacity(0.25) : Colors.white10,
+                        borderRadius: BorderRadius.circular(20),
+                        border:
+                            Border.all(color: isSel ? color : Colors.white24),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(opt['icon'] as IconData,
+                            size: 16, color: isSel ? color : Colors.white54),
+                        const SizedBox(width: 6),
+                        Text(opt['label'] as String,
+                            style: TextStyle(
+                                color: isSel ? color : Colors.white70,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600)),
+                      ]),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: titleCtrl,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: 'Material title (e.g. "How To Make Dry Fish")',
+                  hintStyle: const TextStyle(color: Colors.white38),
+                  filled: true,
+                  fillColor: const Color(0xFF121212),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none),
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (selectedType == 'link')
+                TextField(
+                  controller: linkCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: 'https://...',
+                    hintStyle: const TextStyle(color: Colors.white38),
+                    filled: true,
+                    fillColor: const Color(0xFF121212),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none),
+                  ),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: isUploading
+                      ? null
+                      : () async {
+                          setSheetState(() => isUploading = true);
+                          try {
+                            String? uploadedUrl;
+                            if (selectedType == 'video' ||
+                                selectedType == 'image') {
+                              final picked = await ImagePicker().pickMedia();
+                              if (picked != null) {
+                                final bytes = await picked.readAsBytes();
+                                final ext = picked.name.split('.').last;
+                                final path =
+                                    'event_materials/$materialsFolderId/${const Uuid().v4()}.$ext';
+                                await _supabase.storage
+                                    .from('chat_media')
+                                    .uploadBinary(path, bytes);
+                                uploadedUrl = _supabase.storage
+                                    .from('chat_media')
+                                    .getPublicUrl(path);
+                              }
+                            } else {
+                              final result = await FilePicker.platform
+                                  .pickFiles(withData: true);
+                              if (result != null && result.files.isNotEmpty) {
+                                final f = result.files.first;
+                                final ext = f.extension ?? selectedType;
+                                final path =
+                                    'event_materials/$materialsFolderId/${const Uuid().v4()}.$ext';
+                                await _supabase.storage
+                                    .from('chat_media')
+                                    .uploadBinary(path, f.bytes!);
+                                uploadedUrl = _supabase.storage
+                                    .from('chat_media')
+                                    .getPublicUrl(path);
+                                if (titleCtrl.text.trim().isEmpty)
+                                  titleCtrl.text = f.name;
+                              }
+                            }
+                            if (uploadedUrl != null)
+                              linkCtrl.text = uploadedUrl;
+                          } catch (e) {
+                            debugPrint('Material upload error: $e');
+                          }
+                          setSheetState(() => isUploading = false);
+                        },
+                  icon: isUploading
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Color(0xFF4CAF50)))
+                      : const Icon(Icons.upload_file, color: Color(0xFF4CAF50)),
+                  label: Text(
+                      linkCtrl.text.isNotEmpty
+                          ? 'File attached ✓'
+                          : 'Choose file',
+                      style: const TextStyle(color: Color(0xFF4CAF50))),
+                ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF4CAF50),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12))),
+                  onPressed: () {
+                    if (titleCtrl.text.trim().isEmpty ||
+                        linkCtrl.text.trim().isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                          content:
+                              Text('Add a title and a link or file first')));
+                      return;
+                    }
+                    onAdded({
+                      'title': titleCtrl.text.trim(),
+                      'type': selectedType,
+                      'url': linkCtrl.text.trim()
+                    });
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Add Material',
+                      style: TextStyle(
+                          color: Colors.black, fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final selectedEvents =
@@ -6270,6 +6609,15 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
                                     60;
                             final bool canDelete = isCreator || widget.isAdmin;
 
+                            // 🔥 Extract Materials for the Horizontal list
+                            final materials = List<Map<String, dynamic>>.from(
+                                (event['materials'] as List? ?? []).map((m) =>
+                                    Map<String, dynamic>.from(m as Map)));
+                            final locked = event['materials_locked'] == true;
+                            final hasStarted = DateTime.now().toUtc().isAfter(
+                                DateTime.parse(event['start_time']).toUtc());
+                            final effectivelyLocked = locked && !hasStarted;
+
                             return Card(
                               clipBehavior: Clip.antiAlias,
                               color: const Color(0xFF1E1E1E),
@@ -6352,6 +6700,100 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
                                       ],
                                     ),
                                   ),
+
+                                  // 🔥 Horizontal RAM-Optimized Materials List
+                                  if (materials.isNotEmpty) ...[
+                                    const SizedBox(height: 4),
+                                    SizedBox(
+                                      height: 36,
+                                      child: ListView.builder(
+                                        scrollDirection: Axis.horizontal,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 16),
+                                        itemCount: materials.length,
+                                        itemBuilder: (context, mIndex) {
+                                          final m = materials[mIndex];
+                                          final type =
+                                              m['type']?.toString() ?? 'file';
+                                          final style =
+                                              _materialTypeStyle(type);
+                                          final color = style['color'] as Color;
+                                          final displayTitle = effectivelyLocked
+                                              ? '${style['label']} ${mIndex + 1}'
+                                              : (m['title'] ?? 'Untitled');
+
+                                          return GestureDetector(
+                                            onTap: effectivelyLocked
+                                                ? () {
+                                                    ScaffoldMessenger.of(
+                                                            context)
+                                                        .showSnackBar(
+                                                            const SnackBar(
+                                                                content: Text(
+                                                                    'Locked until event starts!')));
+                                                  }
+                                                : () =>
+                                                    _openMaterial(context, m),
+                                            child: Container(
+                                              margin: const EdgeInsets.only(
+                                                  right: 8),
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 10,
+                                                      vertical: 6),
+                                              decoration: BoxDecoration(
+                                                color: color.withOpacity(
+                                                    effectivelyLocked
+                                                        ? 0.12
+                                                        : 0.18),
+                                                borderRadius:
+                                                    BorderRadius.circular(20),
+                                                border: Border.all(
+                                                    color: color.withOpacity(
+                                                        effectivelyLocked
+                                                            ? 0.35
+                                                            : 0.55),
+                                                    width: 1.2),
+                                              ),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(
+                                                      style['icon'] as IconData,
+                                                      size: 14,
+                                                      color: color),
+                                                  const SizedBox(width: 6),
+                                                  ConstrainedBox(
+                                                    constraints:
+                                                        const BoxConstraints(
+                                                            maxWidth: 120),
+                                                    child: Text(displayTitle,
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style: TextStyle(
+                                                            color: color,
+                                                            fontSize: 12,
+                                                            fontWeight:
+                                                                FontWeight
+                                                                    .w700)),
+                                                  ),
+                                                  if (effectivelyLocked) ...[
+                                                    const SizedBox(width: 5),
+                                                    Icon(Icons.lock_outline,
+                                                        size: 11,
+                                                        color: color
+                                                            .withOpacity(0.8)),
+                                                  ],
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                  ]
                                 ],
                               ),
                             );
@@ -6411,6 +6853,24 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
         ? DateTime.parse(event['end_time']).toLocal()
         : (_selectedDay ?? DateTime.now()).add(const Duration(hours: 1)));
     String repeatValue = isEditing ? event['repeat_type'] : 'none';
+
+    final List<Map<String, String>> materials = isEditing
+        ? List<Map<String, String>>.from((event['materials'] as List? ?? [])
+            .map((m) => Map<String, String>.from(m as Map)))
+        : [];
+    bool materialsLocked =
+        isEditing ? (event['materials_locked'] == true) : false;
+
+    final List<Map<String, dynamic>> groupMembers = await _fetchGroupMembers();
+    final Set<String> selectedManagerIds = isEditing
+        ? Set<String>.from(
+            (event['manager_ids'] as List? ?? []).map((e) => e.toString()))
+        : <String>{};
+
+    final String materialsFolderId =
+        isEditing ? event['id'].toString() : const Uuid().v4();
+
+    if (!mounted) return;
 
     await showModalBottomSheet(
       context: context,
@@ -6512,6 +6972,175 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
                     onChanged: (val) =>
                         setModalState(() => repeatValue = val ?? 'none'),
                   ),
+                  const SizedBox(height: 28),
+                  const Divider(color: Colors.white10),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Materials',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold)),
+                      TextButton.icon(
+                        onPressed: () => _addMaterialFlow(
+                            modalContext, materialsFolderId, (m) {
+                          setModalState(() => materials.add(m));
+                        }),
+                        icon: const Icon(Icons.add,
+                            color: Color(0xFF4CAF50), size: 18),
+                        label: const Text('Add Material',
+                            style: TextStyle(color: Color(0xFF4CAF50))),
+                      ),
+                    ],
+                  ),
+                  if (materials.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: Text('No materials yet — optional.',
+                          style:
+                              TextStyle(color: Colors.white38, fontSize: 13)),
+                    )
+                  else
+                    Wrap(
+                      children: materials.asMap().entries.map((entry) {
+                        final i = entry.key;
+                        final m = entry.value;
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 8, bottom: 8),
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              _buildMaterialChip(
+                                  material: m,
+                                  isLocked: false,
+                                  fallbackIndex: i,
+                                  onTap: () {}),
+                              Positioned(
+                                right: -6,
+                                top: -6,
+                                child: GestureDetector(
+                                  onTap: () => setModalState(
+                                      () => materials.removeAt(i)),
+                                  child: Container(
+                                    padding: const EdgeInsets.all(2),
+                                    decoration: const BoxDecoration(
+                                        color: Colors.redAccent,
+                                        shape: BoxShape.circle),
+                                    child: const Icon(Icons.close,
+                                        size: 12, color: Colors.white),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  if (materials.isNotEmpty)
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: materialsLocked,
+                      activeColor: const Color(0xFF4CAF50),
+                      title: const Text('Lock materials until event starts',
+                          style: TextStyle(color: Colors.white, fontSize: 14)),
+                      subtitle: const Text(
+                          'Titles stay hidden as "Video 1", "Image 1", etc. until start time',
+                          style:
+                              TextStyle(color: Colors.white38, fontSize: 12)),
+                      onChanged: (v) =>
+                          setModalState(() => materialsLocked = v),
+                    ),
+                  const SizedBox(height: 12),
+                  const Divider(color: Colors.white10),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      const Text('Event Managers',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold)),
+                      const SizedBox(width: 6),
+                      const Text('*',
+                          style: TextStyle(
+                              color: Colors.redAccent,
+                              fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                      'Must be members of this group. At least one required.',
+                      style: TextStyle(color: Colors.white38, fontSize: 12)),
+                  const SizedBox(height: 10),
+                  if (groupMembers.isEmpty)
+                    const Text('No other members in this group yet.',
+                        style: TextStyle(color: Colors.white38, fontSize: 13))
+                  else
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: groupMembers.map((member) {
+                        final id = member['id'].toString();
+                        final isSelected = selectedManagerIds.contains(id);
+                        final username =
+                            member['username']?.toString() ?? 'user';
+                        final avatarUrl = member['avatar_url']?.toString();
+                        return GestureDetector(
+                          onTap: () => setModalState(() {
+                            isSelected
+                                ? selectedManagerIds.remove(id)
+                                : selectedManagerIds.add(id);
+                          }),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: isSelected
+                                  ? const Color(0xFF4CAF50).withOpacity(0.2)
+                                  : Colors.white10,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                  color: isSelected
+                                      ? const Color(0xFF4CAF50)
+                                      : Colors.white24),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircleAvatar(
+                                  radius: 10,
+                                  backgroundColor: Colors.grey[800],
+                                  backgroundImage: (avatarUrl != null &&
+                                          avatarUrl.isNotEmpty)
+                                      ? NetworkImage(avatarUrl)
+                                      : null,
+                                  child:
+                                      (avatarUrl == null || avatarUrl.isEmpty)
+                                          ? const Icon(Icons.person,
+                                              size: 11, color: Colors.white54)
+                                          : null,
+                                ),
+                                const SizedBox(width: 6),
+                                Text('@$username',
+                                    style: TextStyle(
+                                        color: isSelected
+                                            ? const Color(0xFF4CAF50)
+                                            : Colors.white70,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600)),
+                                if (isSelected) ...[
+                                  const SizedBox(width: 4),
+                                  const Icon(Icons.check_circle,
+                                      size: 14, color: Color(0xFF4CAF50)),
+                                ],
+                              ],
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
                   const SizedBox(height: 32),
                   ElevatedButton(
                     style: ElevatedButton.styleFrom(
@@ -6520,58 +7149,96 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
                         shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(12))),
                     onPressed: () async {
-                      if (formKey.currentState!.validate()) {
-                        final day = isEditing
-                            ? DateTime.parse(event['start_time']).toLocal()
-                            : (_selectedDay ?? DateTime.now());
-                        final startDateTime = DateTime(day.year, day.month,
-                            day.day, startTime.hour, startTime.minute);
-                        var endDateTime = DateTime(day.year, day.month, day.day,
-                            endTime.hour, endTime.minute);
-                        if (endDateTime.isBefore(startDateTime))
-                          endDateTime =
-                              endDateTime.add(const Duration(days: 1));
+                      if (!formKey.currentState!.validate()) return;
+                      if (selectedManagerIds.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content:
+                                    Text('Pick at least one Event Manager')));
+                        return;
+                      }
 
-                        String? finalImageUrl = existingImageUrl;
-                        if (pickedImage != null) {
-                          final bytes = await pickedImage!.readAsBytes();
-                          final path = 'event_images/${const Uuid().v4()}.jpg';
-                          await _supabase.storage
-                              .from('chat_media')
-                              .uploadBinary(path, bytes);
-                          finalImageUrl = _supabase.storage
-                              .from('chat_media')
-                              .getPublicUrl(path);
-                        }
+                      final day = isEditing
+                          ? DateTime.parse(event['start_time']).toLocal()
+                          : (_selectedDay ?? DateTime.now());
+                      final startDateTime = DateTime(day.year, day.month,
+                          day.day, startTime.hour, startTime.minute);
+                      var endDateTime = DateTime(day.year, day.month, day.day,
+                          endTime.hour, endTime.minute);
+                      if (endDateTime.isBefore(startDateTime)) {
+                        endDateTime = endDateTime.add(const Duration(days: 1));
+                      }
 
-                        if (isEditing) {
-                          await _supabase.from('chat_events').update({
-                            'title': titleController.text,
-                            'description': descriptionController.text,
-                            'start_time':
-                                startDateTime.toUtc().toIso8601String(),
-                            'end_time': endDateTime.toUtc().toIso8601String(),
-                            'repeat_type': repeatValue,
-                            'image_url': finalImageUrl,
-                          }).eq('id', event['id']);
-                        } else {
-                          await _supabase.from('chat_events').insert({
+                      String? finalImageUrl = existingImageUrl;
+                      if (pickedImage != null) {
+                        final bytes = await pickedImage!.readAsBytes();
+                        final path = 'event_images/${const Uuid().v4()}.jpg';
+                        await _supabase.storage
+                            .from('chat_media')
+                            .uploadBinary(path, bytes);
+                        finalImageUrl = _supabase.storage
+                            .from('chat_media')
+                            .getPublicUrl(path);
+                      }
+
+                      final payload = {
+                        'title': titleController.text,
+                        'description': descriptionController.text,
+                        'start_time': startDateTime.toUtc().toIso8601String(),
+                        'end_time': endDateTime.toUtc().toIso8601String(),
+                        'repeat_type': repeatValue,
+                        'image_url': finalImageUrl,
+                        'materials': materials,
+                        'materials_locked': materialsLocked,
+                        'manager_ids': selectedManagerIds.toList(),
+                      };
+
+                      if (isEditing) {
+                        await _supabase
+                            .from('chat_events')
+                            .update(payload)
+                            .eq('id', event['id']);
+                      } else {
+                        // 1. Create the event in the database
+                        final inserted = await _supabase
+                            .from('chat_events')
+                            .insert({
+                              'chat_id': widget.chatId,
+                              'creator_id': _supabase.auth.currentUser!.id,
+                              ...payload
+                            })
+                            .select('id')
+                            .single();
+
+                        final eventId = inserted['id'];
+
+                        // 🔥 2. INSTANTLY DROP A SYSTEM MESSAGE (NOT THE FULL BANNER)
+                        // The background cron job will drop the full banner and send the push notification when the event actually starts!
+                        try {
+                          final myProfile = await _supabase
+                              .from('profiles')
+                              .select('username')
+                              .eq('id', _supabase.auth.currentUser!.id)
+                              .single();
+                          final myUsername = myProfile['username'] ?? 'Someone';
+
+                          await _supabase.from('messages').insert({
                             'chat_id': widget.chatId,
-                            'creator_id': _supabase.auth.currentUser!.id,
-                            'title': titleController.text,
-                            'description': descriptionController.text,
-                            'start_time':
-                                startDateTime.toUtc().toIso8601String(),
-                            'end_time': endDateTime.toUtc().toIso8601String(),
-                            'repeat_type': repeatValue,
-                            'image_url': finalImageUrl,
+                            'sender_id': _supabase.auth.currentUser!.id,
+                            'content':
+                                '@$myUsername created a new event: "${titleController.text}"',
+                            'media_type':
+                                'system', // Triggers the small gray pill bubble
+                            'is_read': false,
                           });
+                        } catch (e) {
+                          debugPrint('Error inserting system message: $e');
                         }
+                      }
 
-                        if (mounted) {
-                          Navigator.pop(ctx);
-                          _fetchEvents();
-                        }
+                      if (mounted) {
+                        Navigator.pop(ctx);
+                        _fetchEvents();
                       }
                     },
                     child: Text(isEditing ? 'Save Changes' : 'Create Event',
@@ -6611,6 +7278,501 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
       fillColor: const Color(0xFF1E1E1E),
       border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+    );
+  }
+}
+
+// =========================================================================
+// THE ULTIMATE EVENT BANNER WIDGET (STATEFUL + FLICKER FIX)
+// =========================================================================
+class EventBannerWidget extends StatefulWidget {
+  final int eventId;
+  final bool isMe;
+  final UserPreferences prefs;
+  final Map<String, dynamic> originalMessage;
+
+  const EventBannerWidget({
+    super.key,
+    required this.eventId,
+    required this.isMe,
+    required this.prefs,
+    required this.originalMessage,
+  });
+
+  @override
+  State<EventBannerWidget> createState() => _EventBannerWidgetState();
+}
+
+class _EventBannerWidgetState extends State<EventBannerWidget> {
+  late final Stream<List<Map<String, dynamic>>> _eventStream;
+
+  @override
+  void initState() {
+    super.initState();
+    // 🔥 FIX 2: Initialize stream ONCE here so it never flickers when parent rebuilds!
+    _eventStream = Supabase.instance.client
+        .from('chat_events')
+        .stream(primaryKey: ['id']).eq('id', widget.eventId);
+  }
+
+  Widget _buildInfoCard(IconData icon, String title, String subtitle) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+          color: const Color(0xFF161A22),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withOpacity(0.05))),
+      child: Row(
+        children: [
+          Icon(icon, color: const Color(0xFF4CAF50), size: 24),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title,
+                    // 🔥 Web Font Fix
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.5),
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 2),
+                Text(subtitle,
+                    // 🔥 Web Font Fix
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+              ],
+            ),
+          )
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: _eventStream, // <-- Uses the cached stream
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || snapshot.data!.isEmpty) {
+          return const SizedBox.shrink();
+        }
+
+        final ev = snapshot.data!.first;
+        final title = ev['title']?.toString() ?? 'Event';
+        final description = ev['description']?.toString() ?? '';
+        final imageUrl = ev['image_url']?.toString();
+
+        final startTime = DateTime.parse(ev['start_time']).toLocal();
+        final hasStarted = DateTime.now()
+            .toUtc()
+            .isAfter(DateTime.parse(ev['start_time']).toUtc());
+
+        final materials = List<Map<String, dynamic>>.from(
+            (ev['materials'] as List? ?? [])
+                .map((m) => Map<String, dynamic>.from(m as Map)));
+        final managerIds = List<String>.from(
+            (ev['manager_ids'] as List? ?? []).map((e) => e.toString()));
+        final locked = ev['materials_locked'] == true;
+        final effectivelyLocked = locked && !hasStarted;
+
+        return Container(
+          width: double.infinity,
+          margin: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0F141A),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.white.withOpacity(0.08), width: 1),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withOpacity(0.4),
+                  blurRadius: 15,
+                  offset: const Offset(0, 8)),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // HEADER ROW
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 56,
+                    height: 56,
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF6A5ACD), Color(0xFF3F51B5)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                            color: const Color(0xFF6A5ACD).withOpacity(0.4),
+                            blurRadius: 8,
+                            offset: const Offset(0, 4))
+                      ],
+                    ),
+                    child: const Icon(Icons.event_note,
+                        color: Colors.white, size: 32),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color:
+                                    const Color(0xFF4CAF50).withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                    color: const Color(0xFF4CAF50)
+                                        .withOpacity(0.3)),
+                              ),
+                              child: const Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.groups,
+                                      color: Color(0xFF4CAF50), size: 12),
+                                  SizedBox(width: 4),
+                                  Text('Group Event',
+                                      // 🔥 Web Font Fix
+                                      style: TextStyle(
+                                          color: Color(0xFF4CAF50),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            ),
+                            const Icon(Icons.more_horiz,
+                                color: Colors.white54, size: 20),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(title.toUpperCase(),
+                            // 🔥 Web Font Fix: bold instead of w900
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                height: 1.1,
+                                letterSpacing: -0.5)),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // IMAGE
+              if (imageUrl != null && imageUrl.isNotEmpty) ...[
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: CachedNetworkImage(
+                    imageUrl: imageUrl,
+                    width: double.infinity,
+                    height: 140,
+                    fit: BoxFit.cover,
+                    placeholder: (context, url) =>
+                        Container(color: Colors.white10, height: 140),
+                    errorWidget: (context, url, error) =>
+                        const SizedBox.shrink(),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+
+              // DESCRIPTION
+              if (description.isNotEmpty) ...[
+                Text(description,
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.75),
+                        fontSize: 14,
+                        height: 1.5)),
+                const SizedBox(height: 20),
+              ],
+
+              // DATE & TIME CARDS
+              Row(
+                children: [
+                  Expanded(
+                      child: _buildInfoCard(Icons.calendar_today, 'Today',
+                          DateFormat('d MMM yyyy').format(startTime))),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: _buildInfoCard(Icons.access_time, 'Time',
+                          DateFormat('h:mm a').format(startTime))),
+                ],
+              ),
+
+              // MATERIALS SECTION
+              if (materials.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                      color: const Color(0xFF161A22),
+                      borderRadius: BorderRadius.circular(20),
+                      border:
+                          Border.all(color: Colors.white.withOpacity(0.05))),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Row(children: [
+                            Icon(Icons.assignment,
+                                color: Colors.white70, size: 18),
+                            SizedBox(width: 8),
+                            Text('Materials',
+                                // 🔥 Web Font Fix
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold))
+                          ]),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                                color: (effectivelyLocked
+                                        ? Colors.redAccent
+                                        : const Color(0xFF4CAF50))
+                                    .withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(12)),
+                            child: Row(children: [
+                              Icon(
+                                  effectivelyLocked
+                                      ? Icons.lock
+                                      : Icons.lock_open,
+                                  color: effectivelyLocked
+                                      ? Colors.redAccent
+                                      : const Color(0xFF4CAF50),
+                                  size: 12),
+                              const SizedBox(width: 4),
+                              Text(effectivelyLocked ? 'Locked' : 'Unlocked',
+                                  // 🔥 Web Font Fix
+                                  style: TextStyle(
+                                      color: effectivelyLocked
+                                          ? Colors.redAccent
+                                          : const Color(0xFF4CAF50),
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold)),
+                            ]),
+                          )
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      ...materials.asMap().entries.map((entry) {
+                        final type = entry.value['type']?.toString() ?? 'file';
+                        final style =
+                            _materialTypeStyle(type); // Using the global helper
+                        final color = style['color'] as Color;
+                        final displayTitle = effectivelyLocked
+                            ? '${style['label']} ${entry.key + 1}'
+                            : (entry.value['title'] ?? 'Untitled');
+
+                        return InkWell(
+                          onTap: effectivelyLocked
+                              ? () => ScaffoldMessenger.of(context)
+                                  .showSnackBar(const SnackBar(
+                                      content:
+                                          Text('Locked until event starts!')))
+                              : () => _openMaterial(context, entry.value),
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: Row(
+                              children: [
+                                Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                        color: color.withOpacity(0.15),
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                    child: Icon(style['icon'] as IconData,
+                                        color: color, size: 20)),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2),
+                                              decoration: BoxDecoration(
+                                                  color: color,
+                                                  borderRadius:
+                                                      BorderRadius.circular(4)),
+                                              child: Text(
+                                                  style['label'] as String,
+                                                  // 🔥 Web Font Fix
+                                                  style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 9,
+                                                      fontWeight:
+                                                          FontWeight.bold))),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                              child: Text(displayTitle,
+                                                  // 🔥 Web Font Fix
+                                                  style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 14,
+                                                      fontWeight:
+                                                          FontWeight.bold),
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis)),
+                                        ],
+                                      ),
+                                      if (!effectivelyLocked) ...[
+                                        const SizedBox(height: 4),
+                                        Text('Material • Tap to view',
+                                            style: TextStyle(
+                                                color: Colors.white
+                                                    .withOpacity(0.4),
+                                                fontSize: 11)),
+                                      ]
+                                    ],
+                                  ),
+                                ),
+                                Icon(Icons.chevron_right,
+                                    color: Colors.white.withOpacity(0.2),
+                                    size: 20),
+                              ],
+                            ),
+                          ),
+                        );
+                      }),
+                      const Divider(color: Colors.white10, height: 24),
+                      const Center(
+                          child: Text('View all materials',
+                              // 🔥 Web Font Fix
+                              style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold))),
+                    ],
+                  ),
+                ),
+              ],
+
+              // 6. EVENT MANAGERS
+              if (managerIds.isNotEmpty) ...[
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Row(children: [
+                      Icon(Icons.people, color: Colors.white70, size: 18),
+                      SizedBox(width: 8),
+                      Text('Event Managers',
+                          // 🔥 Web Font Fix
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold))
+                    ]),
+                    Text('${managerIds.length} Managers',
+                        // 🔥 Web Font Fix
+                        style: const TextStyle(
+                            color: Color(0xFF4CAF50),
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                FutureBuilder<List<Map<String, dynamic>>>(
+                  future: Supabase.instance.client
+                      .from('profiles')
+                      .select('id, username, avatar_url')
+                      .inFilter('id', managerIds),
+                  builder: (context, snap) {
+                    final managers = snap.data ?? [];
+                    if (managers.isEmpty) return const SizedBox.shrink();
+                    return Wrap(
+                      spacing: 16,
+                      runSpacing: 16,
+                      children: managers.map((m) {
+                        final username = m['username']?.toString() ?? 'user';
+                        final avatarUrl = m['avatar_url']?.toString();
+                        return GestureDetector(
+                          onTap: () => UniversalProfileCard.show(
+                              context, m['id'].toString(), widget.prefs),
+                          child: Column(
+                            children: [
+                              Stack(
+                                alignment: Alignment.bottomRight,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(2),
+                                    decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                            color: const Color(0xFF4CAF50),
+                                            width: 2)),
+                                    child: CircleAvatar(
+                                      radius: 26,
+                                      backgroundColor: Colors.grey[800],
+                                      backgroundImage: (avatarUrl != null &&
+                                              avatarUrl.isNotEmpty)
+                                          ? NetworkImage(avatarUrl)
+                                          : null,
+                                      child: (avatarUrl == null ||
+                                              avatarUrl.isEmpty)
+                                          ? const Icon(Icons.person,
+                                              color: Colors.white54)
+                                          : null,
+                                    ),
+                                  ),
+                                  Container(
+                                      padding: const EdgeInsets.all(2),
+                                      decoration: const BoxDecoration(
+                                          color: Colors.black,
+                                          shape: BoxShape.circle),
+                                      child: const Icon(Icons.verified,
+                                          color: Color(0xFF4CAF50), size: 14))
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Text(username,
+                                  // 🔥 Web Font Fix
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold)),
+                              Text('@$username',
+                                  style: const TextStyle(
+                                      color: Colors.white38, fontSize: 10)),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    );
+                  },
+                ),
+              ],
+            ],
+          ),
+        );
+      },
     );
   }
 }

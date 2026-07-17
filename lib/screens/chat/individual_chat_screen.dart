@@ -67,6 +67,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   // For file/media logic
   final Map<String, Color> _userColors = {};
   final AudioRecorder _audioRecorder = AudioRecorder();
+  final Map<String, Future<Uint8List?>> _pendingThumbFutures = {};
   bool _isRecording = false;
   String _recordDuration = "00:00";
   Timer? _recordTimer;
@@ -81,6 +82,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   // Add next to _unreadCalculated:
   List<Map<String, dynamic>>? _cachedCombinedMessages;
   String _lastComputeSignature = '';
+  List<Map<String, dynamic>> _pinnedMessages = [];
+  StreamSubscription? _pinnedSub;
+  String _lastPinnedSignature = '';
 
   // 🔥 FIX: Added the missing Video Cache and removed the duplicate colors map
   final Map<String, Uint8List> _chatVideoThumbCache = {};
@@ -96,7 +100,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     super.initState();
     activeChatId = widget.chatId;
 
-    // 🔥 FIX: Add the scroll listener that was MISSING
     _scrollController.addListener(_scrollListener);
 
     final po = widget.recipientProfile['pending_order'];
@@ -121,9 +124,56 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     });
 
     _setupMessageStream();
+    _setupPinnedMessagesStream(); // 🔥 NEW
     _setupTypingListener();
     _checkFollowStatus();
     _markMessagesAsRead();
+  }
+
+  Future<void> _setupPinnedMessagesStream() async {
+    final cached =
+        await ChatLocalDB.instance.getPinnedMessagesForChat(widget.chatId);
+    if (cached.isNotEmpty && mounted && !_isDisposed) {
+      setState(() => _pinnedMessages = cached);
+    }
+
+    try {
+      final resp = await supabase
+          .from('messages')
+          .select()
+          .eq('chat_id', widget.chatId)
+          .eq('media_type', 'event')
+          .order('created_at', ascending: false);
+      if (mounted && !_isDisposed) {
+        final rows = List<Map<String, dynamic>>.from(resp);
+        setState(() => _pinnedMessages = rows);
+        await ChatLocalDB.instance.cacheMessages(widget.chatId, rows);
+      }
+    } catch (e) {
+      debugPrint("Pinned messages fetch error: $e");
+    }
+
+    _pinnedSub?.cancel();
+    _pinnedSub = supabase
+        .from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('chat_id', widget.chatId)
+        .order('created_at', ascending: false)
+        .limit(300)
+        .listen((data) async {
+          if (!mounted || _isDisposed) return;
+          final pinned = data
+              .where((m) => m['media_type']?.toString() == 'event')
+              .toList();
+
+          final signature = pinned.map((m) => m['id'].toString()).join(',');
+          if (signature == _lastPinnedSignature) return;
+          _lastPinnedSignature = signature;
+
+          setState(
+              () => _pinnedMessages = List<Map<String, dynamic>>.from(pinned));
+          await ChatLocalDB.instance.cacheMessages(widget.chatId, pinned);
+        });
   }
 
   @override
@@ -131,7 +181,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     final previousState = _lastLifecycleState;
     _lastLifecycleState = state;
 
-    // 🔥 FIX: Only run the heavy DB cascade if the app actually went to the background.
     final wasActuallyBackgrounded = previousState == AppLifecycleState.paused ||
         previousState == AppLifecycleState.detached;
 
@@ -143,6 +192,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
       _resumeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
         if (!mounted || _isDisposed) return;
         _setupMessageStream();
+        _setupPinnedMessagesStream(); // 🔥 NEW
         _setupTypingListener();
         _markMessagesAsRead();
       });
@@ -657,6 +707,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     _recordTimer = null;
     _resumeDebounceTimer?.cancel();
     _resumeDebounceTimer = null;
+    _pinnedSub?.cancel();
+    _pinnedSub = null;
 
     // 🔥 FIX: Remove scroll listener BEFORE disposing controller
     _scrollController.removeListener(_scrollListener);
@@ -808,6 +860,17 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     final myPending =
         pendingList.where((m) => m['chat_id'] == widget.chatId).toList();
 
+    final Map<String, Map<String, dynamic>> byId = {};
+    for (final m in _messages) {
+      final key = (m['id'] ?? m['local_id'] ?? '').toString();
+      if (key.isNotEmpty) byId[key] = m;
+    }
+    for (final m in _pinnedMessages) {
+      final key = (m['id'] ?? m['local_id'] ?? '').toString();
+      if (key.isNotEmpty && !byId.containsKey(key)) byId[key] = m;
+    }
+    final mergedMessages = byId.values.toList();
+
     final sig = StringBuffer()
       ..write(myPending.length)
       ..write('|');
@@ -822,9 +885,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     }
     sig
       ..write('#')
-      ..write(_messages.length)
+      ..write(mergedMessages.length)
       ..write('|');
-    for (final m in _messages) {
+    for (final m in mergedMessages) {
       sig
         ..write(m['id'])
         ..write(':')
@@ -845,7 +908,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
       return _cachedCombinedMessages!;
     }
 
-    final confirmedLocalIds = _messages
+    final confirmedLocalIds = mergedMessages
         .map((m) => m['local_id']?.toString())
         .where((id) => id != null && id.isNotEmpty)
         .toSet();
@@ -855,11 +918,21 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
       return !confirmedLocalIds.contains(p['local_id']?.toString());
     }).toList();
 
-    final combined = [...visiblePending, ..._messages];
+    final combined = [...visiblePending, ...mergedMessages];
     combined.sort((a, b) {
-      final dateA = DateTime.parse(a['created_at']).toLocal();
-      final dateB = DateTime.parse(b['created_at']).toLocal();
-      return dateB.compareTo(dateA);
+      try {
+        final aStr = a['created_at']?.toString();
+        final bStr = b['created_at']?.toString();
+        final dateA = (aStr != null && aStr.isNotEmpty)
+            ? DateTime.parse(aStr).toLocal()
+            : DateTime.fromMillisecondsSinceEpoch(0);
+        final dateB = (bStr != null && bStr.isNotEmpty)
+            ? DateTime.parse(bStr).toLocal()
+            : DateTime.fromMillisecondsSinceEpoch(0);
+        return dateB.compareTo(dateA);
+      } catch (e) {
+        return 0;
+      }
     });
 
     _cachedCombinedMessages = combined;
@@ -868,22 +941,17 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   }
 
   // --- UPDATED: WEB KEYBOARD FIX & UNREAD MESSAGES SEPARATOR ---
-  // --- UPDATED: MOBILE KEYBOARD PERFORMANCE FIX ---
   @override
   Widget build(BuildContext context) {
     final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
     final myId = supabase.auth.currentUser?.id;
-
-    // 🔥 Get real-time keyboard height locally
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return Scaffold(
       backgroundColor: Colors.black,
-      // 🔥 THE REAL FIX: Disable native window resizing
       resizeToAvoidBottomInset: false,
       appBar: _buildAppBar(),
       body: Padding(
-        // 🔥 Let Flutter's ultra-fast engine handle the upward shift
         padding: EdgeInsets.only(bottom: bottomInset),
         child: Column(
           children: [
@@ -921,11 +989,9 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                       return ListView.builder(
                         controller: _scrollController,
                         reverse: true,
-                        // 🔥 FIX: Increased cache stops bubbles from destroying/rebuilding
                         cacheExtent: 400,
-                        // 🔥 FIX: Native swipe-down to close keyboard
                         keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
+                            ScrollViewKeyboardDismissBehavior.manual,
                         padding: const EdgeInsets.all(12),
                         itemCount: combinedMessages.length,
                         itemBuilder: (context, index) {
@@ -1030,8 +1096,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
             ),
             SafeArea(
               top: false,
-              // 🔥 Only apply bottom safe area if keyboard is closed to avoid double-padding
-              bottom: bottomInset == 0,
               child: RepaintBoundary(child: _buildInputBar()),
             ),
           ],
@@ -1099,8 +1163,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                         minLines: 1,
                         keyboardType: TextInputType.multiline,
                         scrollPadding: EdgeInsets.zero,
-                        // 🔥 RESTORED: enableSuggestions and autocorrect false flags removed!
-                        // This allows Gboard to enable swipe-to-text, GIFs, and stickers again.
                         enableInteractiveSelection: true,
                         textInputAction: TextInputAction.newline,
                         onChanged: _handleTyping,
@@ -1170,7 +1232,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                   valueListenable: _messageController,
                   builder: (context, value, child) {
                     final hasText = value.text.trim().isNotEmpty;
-                    if (hasText || _pendingOrder != null) {
+                    if (hasText) {
                       return GestureDetector(
                         onTap: () => _sendMessage(),
                         child: Container(
@@ -3068,21 +3130,27 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                 width: double.infinity,
                 height: height ?? 200);
           } else {
-            mediaWidget = FutureBuilder<Uint8List?>(
-              future: VideoThumbnail.thumbnailData(
+            final future = _pendingThumbFutures.putIfAbsent(
+              effectiveUrl,
+              () => VideoThumbnail.thumbnailData(
                       video: effectiveUrl,
                       imageFormat: ImageFormat.JPEG,
                       maxWidth: 400,
                       quality: 50)
                   .catchError((_) => null),
+            );
+            mediaWidget = FutureBuilder<Uint8List?>(
+              future: future,
               builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.done &&
-                    snapshot.data != null) {
-                  _chatVideoThumbCache[effectiveUrl] = snapshot.data!;
-                  return Image.memory(snapshot.data!,
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: height ?? 200);
+                if (snapshot.connectionState == ConnectionState.done) {
+                  _pendingThumbFutures.remove(effectiveUrl);
+                  if (snapshot.data != null) {
+                    _chatVideoThumbCache[effectiveUrl] = snapshot.data!;
+                    return Image.memory(snapshot.data!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: height ?? 200);
+                  }
                 }
                 return Container(
                     width: double.infinity,
@@ -3129,34 +3197,41 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                   width: double.infinity,
                   height: height ?? 200);
             } else {
+              final future = _pendingThumbFutures.putIfAbsent(
+                effectiveUrl,
+                () => VideoThumbnail.thumbnailData(
+                        video: effectiveUrl,
+                        imageFormat: ImageFormat.JPEG,
+                        maxWidth: 400,
+                        quality: 50)
+                    .catchError((_) => null),
+              );
               mediaWidget = FutureBuilder<Uint8List?>(
-                  future: VideoThumbnail.thumbnailData(
-                          video: effectiveUrl,
-                          imageFormat: ImageFormat.JPEG,
-                          maxWidth: 400,
-                          quality: 50)
-                      .catchError((_) => null),
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.done &&
-                        snapshot.data != null) {
+                future: future,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState == ConnectionState.done) {
+                    _pendingThumbFutures.remove(effectiveUrl);
+                    if (snapshot.data != null) {
                       _chatVideoThumbCache[effectiveUrl] = snapshot.data!;
                       return Image.memory(snapshot.data!,
                           fit: BoxFit.cover,
                           width: double.infinity,
                           height: height ?? 200);
                     }
-                    return Container(
-                        color: Colors.black45,
-                        width: double.infinity,
-                        height: height ?? 200,
-                        child: Center(
-                            child: snapshot.connectionState ==
-                                    ConnectionState.waiting
-                                ? const CircularProgressIndicator(
-                                    color: Color(0xFF4CAF50))
-                                : const Icon(Icons.videocam,
-                                    color: Colors.white54, size: 40)));
-                  });
+                  }
+                  return Container(
+                      color: Colors.black45,
+                      width: double.infinity,
+                      height: height ?? 200,
+                      child: Center(
+                          child: snapshot.connectionState ==
+                                  ConnectionState.waiting
+                              ? const CircularProgressIndicator(
+                                  color: Color(0xFF4CAF50))
+                              : const Icon(Icons.videocam,
+                                  color: Colors.white54, size: 40)));
+                },
+              );
             }
           }
         }
@@ -3166,7 +3241,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
             fit: BoxFit.cover,
             width: double.infinity,
             height: height ?? 200,
-            memCacheWidth: 800, // 🔥 CAP memory usage
+            memCacheWidth: 800,
             memCacheHeight: 800,
             maxWidthDiskCache: 1200,
             maxHeightDiskCache: 1200,

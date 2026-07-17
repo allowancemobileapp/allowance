@@ -220,18 +220,19 @@ class _HomeScreenState extends State<HomeScreen> {
             child: GestureDetector(
               onTap: () {
                 entry.remove();
-                Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) =>
-                            ChatListScreen(userPreferences: _prefs)));
+                // 🔥 FIX: was Navigator.push(... ChatListScreen ...) — that
+                // created a second, independent ChatListScreen route on top
+                // of the one already living at tab index 2, with its own
+                // Scaffold (no bottom nav) and an auto-added back arrow —
+                // the "sub-screen" you were seeing. Switching tabs reuses
+                // the one HomeScreen already owns.
+                if (mounted) setState(() => _selectedIndex = 2);
               },
               child: Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: const Color(0xFF1E1E1E),
-                  borderRadius:
-                      BorderRadius.circular(20), // Cool rounded corners!
+                  borderRadius: BorderRadius.circular(20),
                   boxShadow: const [
                     BoxShadow(
                         color: Colors.black45, blurRadius: 10, spreadRadius: 2)
@@ -278,7 +279,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     overlay.insert(entry);
-    // Slides back up after 4 seconds
     Future.delayed(const Duration(seconds: 4), () {
       if (entry.mounted) entry.remove();
     });
@@ -2974,8 +2974,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // NEW: method to fetch notifications for current user
-  // --- REPLACED: Fetch Notifications (Much cleaner now!) ---
   Future<List<Map<String, dynamic>>> _fetchNotifications() async {
     try {
       final user = supabase.auth.currentUser;
@@ -2985,6 +2983,10 @@ class _HomeScreenState extends State<HomeScreen> {
           .from('notifications')
           .select()
           .eq('user_id', user.id)
+          // 🔥 FIX: only what hasn't been viewed. Paired with marking these
+          // read right after fetching (see _showNotifications), anything
+          // you've already opened the bell for won't come back.
+          .eq('read', false)
           .order('sent_at', ascending: false)
           .limit(50);
 
@@ -2994,7 +2996,6 @@ class _HomeScreenState extends State<HomeScreen> {
         final type = data['type']?.toString() ?? '';
         final gistId = data['gist_id'];
 
-        // Automatically falls back through all image possibilities
         String? avatarUrl = data['avatar_url']?.toString() ??
             data['sender_avatar']?.toString() ??
             data['photo_url']?.toString();
@@ -3002,7 +3003,6 @@ class _HomeScreenState extends State<HomeScreen> {
             data['username']?.toString() ?? data['sender_username']?.toString();
         bool isNewTicket = false;
 
-        // Fetch Gist author if missing
         if (gistId != null && avatarUrl == null) {
           try {
             final gist = await supabase
@@ -3035,13 +3035,15 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // --- REPLACED: Show Notifications Bottom Sheet (Added routing logic!) ---
-  // --- UPDATED: CLEARS ALL NOTIFICATIONS INSTANTLY WHEN OPENED ---
   void _showNotifications() async {
     final myId = supabase.auth.currentUser?.id;
     if (myId == null) return;
 
-    // 🔥 INSTANTLY MARK ALL AS READ SO THE BELL NUMBER DISAPPEARS IMMEDIATELY
+    // 🔥 FIX: fetch the still-unread batch first so THIS opening shows
+    // everything new, then mark it read — so next time you open the bell,
+    // this batch is gone instead of piling up forever.
+    final notifications = await _fetchNotifications();
+
     supabase
         .from('notifications')
         .update({'read': true})
@@ -3049,7 +3051,6 @@ class _HomeScreenState extends State<HomeScreen> {
         .eq('read', false)
         .then((_) {});
 
-    final notifications = await _fetchNotifications();
     if (!mounted) return;
 
     showModalBottomSheet(
@@ -3083,7 +3084,7 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(
                 child: notifications.isEmpty
                     ? Center(
-                        child: Text('No notifications yet.',
+                        child: Text('No new notifications.',
                             style: TextStyle(
                                 color:
                                     _isDarkMode ? Colors.white : Colors.black)))
@@ -3096,12 +3097,10 @@ class _HomeScreenState extends State<HomeScreen> {
                           final body = notif['body'] ?? '';
                           final data = notif['data'] ?? {};
                           final type = data['type']?.toString();
-
                           final gistId = data['gist_id']?.toString();
                           final ticketId = data['ticket_id']?.toString();
                           final followerId = data['follower_id']?.toString();
                           final senderId = data['sender_id']?.toString();
-
                           final String? displayImage =
                               notif['avatar_url'] as String?;
                           final String? username = notif['username'] as String?;

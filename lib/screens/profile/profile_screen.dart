@@ -1314,6 +1314,14 @@ class _MomentGridItemState extends State<MomentGridItem> {
   VideoPlayerController? _videoController;
   bool _isVideo = false;
   late Map<String, dynamic> moment;
+  bool _countedActive = false;
+
+  // 🔥 FIX: shared across every grid item, same pattern as the Home feed's
+  // _GistItemCardState. Before this, each video Moment started its own
+  // decoder with only a staggered START time — nothing stopped several from
+  // being "in progress" at once.
+  static int _activeMomentVideoInits = 0;
+  static const int _maxConcurrentMomentVideos = 2;
 
   @override
   void initState() {
@@ -1325,23 +1333,44 @@ class _MomentGridItemState extends State<MomentGridItem> {
       final url = moment['media_url'] ?? '';
       if (url.isNotEmpty) {
         _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
-
-        // 🔥 THE FIX: Stagger the video loading so the app doesn't freeze!
-        // Instead of loading all videos at the exact same millisecond,
-        // we delay each one slightly based on its index.
-        Future.delayed(Duration(milliseconds: widget.index * 150), () {
-          if (mounted) {
-            _videoController!.initialize().then((_) {
-              if (mounted) setState(() {});
-            });
-          }
-        });
+        _tryInitVideo();
       }
     }
   }
 
+  void _tryInitVideo() {
+    if (!mounted || _videoController == null) return;
+
+    if (_activeMomentVideoInits >= _maxConcurrentMomentVideos) {
+      Future.delayed(const Duration(milliseconds: 300), () {
+        if (mounted) _tryInitVideo();
+      });
+      return;
+    }
+
+    _countedActive = true;
+    _activeMomentVideoInits++;
+
+    _videoController!
+        .initialize()
+        .then((_) {
+          if (mounted) setState(() {});
+        })
+        .catchError((_) {})
+        .whenComplete(() {
+          if (_countedActive) {
+            _countedActive = false;
+            _activeMomentVideoInits--;
+          }
+        });
+  }
+
   @override
   void dispose() {
+    if (_countedActive) {
+      _countedActive = false;
+      _activeMomentVideoInits--;
+    }
     _videoController?.dispose();
     super.dispose();
   }
