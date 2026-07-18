@@ -11,6 +11,7 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'shared/services/realtime_guardian.dart';
 
 // Deep Linking
 import 'package:app_links/app_links.dart';
@@ -121,6 +122,7 @@ class AllowanceApp extends StatefulWidget {
 class _AllowanceAppState extends State<AllowanceApp> {
   final UserPreferences _userPreferences = UserPreferences();
   bool _isInitialized = false;
+  bool _fcmListenersRegistered = false;
 
   StreamSubscription<AuthState>? _authSub;
 
@@ -249,6 +251,8 @@ class _AllowanceAppState extends State<AllowanceApp> {
     try {
       await _userPreferences.loadPreferences();
 
+      RealtimeGuardian.instance.init(); // 🔥 NEW
+
       final user = Supabase.instance.client.auth.currentUser;
       if (user != null) {
         await _setupFcmAndListeners();
@@ -274,7 +278,7 @@ class _AllowanceAppState extends State<AllowanceApp> {
             await _setupFcmAndListeners();
             if (event == AuthChangeEvent.signedIn ||
                 event == AuthChangeEvent.initialSession) {
-              _checkPendingGroupJoin(); // 🔥 NEW
+              _checkPendingGroupJoin();
             }
           } else {
             await _userPreferences.clearLocal();
@@ -300,10 +304,21 @@ class _AllowanceAppState extends State<AllowanceApp> {
       developer.log('FCM setup error: $e', name: 'main');
     }
 
+    // 🔥 FIX: this used to run from two call sites that both fire on cold
+    // start (the direct pre-check, then the auth stream replaying
+    // `initialSession`), registering FirebaseMessaging.onMessage.listen(...)
+    // twice — so every foreground push showed its banner (or fired its
+    // haptic) twice. Guard so the listener attaches exactly once per
+    // process no matter how many auth events fire.
+    if (_fcmListenersRegistered) return;
+    _fcmListenersRegistered = true;
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final context = navigatorKey.currentContext;
       if (context != null) {
         registerFcmListeners(context);
+      } else {
+        _fcmListenersRegistered = false;
       }
     });
   }
@@ -312,6 +327,7 @@ class _AllowanceAppState extends State<AllowanceApp> {
   void dispose() {
     _authSub?.cancel();
     _linkSubscription?.cancel();
+    RealtimeGuardian.instance.dispose();
     super.dispose();
   }
 

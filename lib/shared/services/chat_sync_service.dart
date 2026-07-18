@@ -20,6 +20,7 @@ class ChatSyncService {
   final Map<String, Timer> _simulatedTimers = {}; // <--- The Timer Engine
   final Set<String> _processingIds = {}; // ← Prevents duplicate processing
   final Set<String> _sentLocalIds = {}; // ← Tracks successfully sent messages
+  final Map<String, Timer> _confirmationSweepTimers = {};
 
   Future<void> _loadPending() async {
     final prefs = await SharedPreferences.getInstance();
@@ -131,6 +132,8 @@ class ChatSyncService {
   void _removeFromPending(String localId) {
     _simulatedTimers[localId]?.cancel();
     _simulatedTimers.remove(localId);
+    _confirmationSweepTimers[localId]?.cancel(); // 🔥 NEW
+    _confirmationSweepTimers.remove(localId); // 🔥 NEW
     uploadProgress.value = Map.from(uploadProgress.value)..remove(localId);
 
     pendingMessages.value =
@@ -250,11 +253,35 @@ class ChatSyncService {
 
       await supabase.from('messages').insert(payload);
 
-      // ✅ SUCCESS: Mark as sent, remove from pending
+      // 🔥 THE FLICKER FIX: previously this called _removeFromPending(localId)
+      // right here — the instant the REST insert acknowledged. But the
+      // matching row landing in _messages happens via a SEPARATE, slightly
+      // later realtime broadcast. For that gap the message existed in
+      // neither list — just-removed from pending, not-yet-arrived as
+      // confirmed — so it visibly vanished, then popped back once the
+      // event landed. Worse gap on bad networks = longer vanish, exactly
+      // what you saw.
+      //
+      // Fix: mark it sent, leave it in pendingMessages. Each chat screen's
+      // _computeCombinedMessages already drops any pending entry whose
+      // local_id has a confirmed twin in _messages — so the instant the
+      // real row arrives, the duplicate disappears with nothing ever
+      // having been absent. The sweep timer below is just later cleanup
+      // for local storage, not what drives visibility.
       _sentLocalIds.add(localId);
-      _removeFromPending(localId);
 
-      // Update chat last_message from the REAL successful insert
+      final msgs = List<Map<String, dynamic>>.from(pendingMessages.value);
+      final idx = msgs.indexWhere((m) => m['local_id'] == localId);
+      if (idx != -1) {
+        msgs[idx] = {...msgs[idx], 'is_pending': false, 'is_failed': false};
+        pendingMessages.value = msgs;
+        _savePending();
+      }
+
+      _confirmationSweepTimers[localId]?.cancel();
+      _confirmationSweepTimers[localId] =
+          Timer(const Duration(seconds: 8), () => _removeFromPending(localId));
+
       final preview = (msg['content'] ?? '').toString().trim();
       await supabase.from('chats').update({
         'updated_at': DateTime.now().toUtc().toIso8601String(),

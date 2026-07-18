@@ -302,6 +302,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
   bool _isRecording = false;
   String _recordDuration = "00:00";
   Timer? _recordTimer;
+  Timer? _realtimeSelfHealTimer;
   AppLifecycleState? _lastLifecycleState;
   Timer? _resumeDebounceTimer;
   int _recordSeconds = 0;
@@ -354,6 +355,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     _messageController.addListener(_onMessageTextChanged);
 
     _setupMessageStream();
+    _startRealtimeSelfHeal(); // 🔥 NEW
     _setupPinnedMessagesStream(); // 🔥 NEW
     _loadChatMeta();
     _setupTypingListener();
@@ -407,6 +409,21 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         });
   }
 
+  // 🔥 NEW: belt-and-suspenders. RealtimeGuardian keeps the socket's auth
+  // fresh, but this periodically tears down and rejoins the channel
+  // outright regardless of *why* it might've gone quiet (dead radio, OS
+  // killed the background socket, etc.) — self-heals within ~25s instead
+  // of needing you to leave and reopen the chat. Cheap in the common case:
+  // _computeCombinedMessages already memoizes on a content signature, so
+  // if nothing actually changed this mostly no-ops.
+  void _startRealtimeSelfHeal() {
+    _realtimeSelfHealTimer?.cancel();
+    _realtimeSelfHealTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      if (!mounted || _isDisposed) return;
+      _setupMessageStream();
+    });
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final previousState = _lastLifecycleState;
@@ -422,11 +439,25 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       _resumeDebounceTimer?.cancel();
       _resumeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
         if (!mounted || _isDisposed) return;
+        // 🔥 FIX: these used to all fire in the same tick — each kicks off
+        // its own SQLite read + REST query + realtime channel join, so
+        // resuming meant 3 channel joins and several DB hits landing on
+        // the UI thread at once. Staggering them costs nothing perceptible
+        // but breaks up the pileup that was very likely behind the
+        // occasional keyboard hang.
         _setupMessageStream();
-        _setupPinnedMessagesStream(); // 🔥 NEW
-        _loadChatMeta();
-        _setupTypingListener();
-        _markMessagesAsRead();
+        Future.delayed(const Duration(milliseconds: 150), () {
+          if (mounted && !_isDisposed) _setupPinnedMessagesStream();
+        });
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted && !_isDisposed) _loadChatMeta();
+        });
+        Future.delayed(const Duration(milliseconds: 450), () {
+          if (mounted && !_isDisposed) _setupTypingListener();
+        });
+        Future.delayed(const Duration(milliseconds: 600), () {
+          if (mounted && !_isDisposed) _markMessagesAsRead();
+        });
       });
     }
   }
@@ -4823,6 +4854,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     _recordTimer?.cancel();
     _recordTimer = null;
     _pinnedSub?.cancel();
+    _realtimeSelfHealTimer?.cancel();
 
     // 🔥 FIX: Remove scroll listener BEFORE disposing controller
     _scrollController.removeListener(_scrollListener);

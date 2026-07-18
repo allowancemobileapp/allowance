@@ -44,6 +44,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   String? _myId;
   late PageController _pageController; // <--- ADD THIS
   bool _isDisposed = false;
+  Timer? _realtimeSelfHealTimer;
 
   @override
   bool get wantKeepAlive => true;
@@ -64,6 +65,10 @@ class _ChatListScreenState extends State<ChatListScreen>
 
       _loadCachedData();
       _setupStreams();
+
+      _realtimeSelfHealTimer = Timer.periodic(const Duration(seconds: 20), (_) {
+        if (mounted && !_isDisposed) _fetchLatestData();
+      }); // 🔥 NEW — reuses your existing REST fetch as the self-heal safety net
 
       Future.delayed(const Duration(milliseconds: 1500), () {
         if (mounted && !_isDisposed && _isLoading) {
@@ -264,6 +269,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     _allParticipantsSub = null;
     _unreadSub?.cancel();
     _unreadSub = null;
+    _realtimeSelfHealTimer?.cancel();
 
     _pageController.dispose();
     _searchController.dispose();
