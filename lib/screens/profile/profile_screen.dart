@@ -294,9 +294,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   // --- NEW: SAVE CURRENT SESSION FOR SWITCHING ---
+  // --- FIXED: SAVE CURRENT SESSION FOR SWITCHING ---
   Future<void> _saveCurrentSessionLocal(
-      Map<String, dynamic> profileData) async {
-    final supabase = Supabase.instance.client; // <-- FIX ADDED HERE
+      [Map<String, dynamic>? profileData]) async {
+    final supabase = Supabase.instance.client;
     final session = supabase.auth.currentSession;
     final user = supabase.auth.currentUser;
     if (session == null || user == null || session.refreshToken == null) return;
@@ -305,12 +306,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final savedStr = prefs.getString('saved_accounts') ?? '[]';
     List<dynamic> savedAccounts = jsonDecode(savedStr);
 
+    String currentUsername = 'User';
+    String currentAvatar = '';
+
+    if (profileData != null) {
+      currentUsername = profileData['username'] ?? 'User';
+      currentAvatar = profileData['avatar_url'] ?? '';
+    } else {
+      // Find existing to preserve avatar/username if profileData not passed
+      final existing = savedAccounts.firstWhere((a) => a['id'] == user.id,
+          orElse: () => null);
+      if (existing != null) {
+        currentUsername = existing['username'] ?? 'User';
+        currentAvatar = existing['avatar_url'] ?? '';
+      }
+    }
+
     final newAccount = {
       'id': user.id,
       'email': user.email,
-      'username': profileData['username'] ?? 'User',
-      'avatar_url': profileData['avatar_url'] ?? '',
-      'refresh_token': session.refreshToken,
+      'username': currentUsername,
+      'avatar_url': currentAvatar,
+      'refresh_token': session.refreshToken, // ALWAYS THE FRESHEST TOKEN
     };
 
     // Remove if it exists to update it with the freshest token
@@ -320,9 +337,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
     await prefs.setString('saved_accounts', jsonEncode(savedAccounts));
   }
 
-  // --- NEW: SWITCH ACCOUNT SHEET ---
+  // --- FIXED: SWITCH ACCOUNT SHEET ---
   Future<void> _showSwitchAccountSheet() async {
-    final supabase = Supabase.instance.client; // <-- FIX ADDED HERE
+    // 🔥 PULL THE FRESHEST TOKEN RIGHT BEFORE OPENING THE SHEET!
+    await _saveCurrentSessionLocal(_cachedProfileData);
+
+    final supabase = Supabase.instance.client;
     final prefs = await SharedPreferences.getInstance();
     final savedStr = prefs.getString('saved_accounts') ?? '[]';
     List<dynamic> savedAccounts = jsonDecode(savedStr);
@@ -331,74 +351,87 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
     showModalBottomSheet(
         context: context,
-        backgroundColor: Color(0xFF1E1E1E),
+        backgroundColor: const Color(0xFF1E1E1E),
+        isScrollControlled: true, // 🔥 FIX: Prevents bottom overflow!
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
         builder: (ctx) {
-          return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 24.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('Switch Account',
-                    style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold)),
-                const SizedBox(height: 16),
-                ...savedAccounts.map((acc) {
-                  final isCurrent = acc['id'] == supabase.auth.currentUser?.id;
-                  return ListTile(
-                    leading: CircleAvatar(
-                      backgroundImage: acc['avatar_url'].toString().isNotEmpty
-                          ? NetworkImage(acc['avatar_url'])
+          return DraggableScrollableSheet(
+            initialChildSize: 0.5,
+            maxChildSize: 0.9,
+            minChildSize: 0.4,
+            expand: false,
+            builder: (_, scrollController) => SingleChildScrollView(
+              controller: scrollController,
+              padding: EdgeInsets.only(
+                  bottom: MediaQuery.paddingOf(context).bottom + 24.0,
+                  top: 24.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Switch Account',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 16),
+                  ...savedAccounts.map((acc) {
+                    final isCurrent =
+                        acc['id'] == supabase.auth.currentUser?.id;
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundImage: acc['avatar_url'].toString().isNotEmpty
+                            ? NetworkImage(acc['avatar_url'])
+                            : null,
+                        backgroundColor: const Color(0xFF1E1E1E),
+                        child: acc['avatar_url'].toString().isEmpty
+                            ? const Icon(Icons.person, color: Colors.white)
+                            : null,
+                      ),
+                      title: Text(acc['username'],
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
+                      subtitle: Text(acc['email'],
+                          style: const TextStyle(
+                              color: Colors.white54, fontSize: 12)),
+                      trailing: isCurrent
+                          ? const Icon(Icons.check_circle,
+                              color: Color(0xFF4CAF50))
                           : null,
-                      backgroundColor: Color(0xFF1E1E1E),
-                      child: acc['avatar_url'].toString().isEmpty
-                          ? const Icon(Icons.person, color: Colors.white)
-                          : null,
-                    ),
-                    title: Text(acc['username'],
-                        style: const TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold)),
-                    subtitle: Text(acc['email'],
-                        style: const TextStyle(
-                            color: Colors.white54, fontSize: 12)),
-                    trailing: isCurrent
-                        ? const Icon(Icons.check_circle,
-                            color: Color(0xFF4CAF50))
-                        : null,
-                    onTap: isCurrent
-                        ? null
-                        : () async {
-                            Navigator.pop(ctx);
-                            await _switchToAccount(acc['refresh_token']);
-                          },
-                  );
-                }),
-                const Divider(color: Colors.white24),
-                ListTile(
-                  leading: const CircleAvatar(
-                      backgroundColor: Colors.transparent,
-                      child: Icon(Icons.add, color: Colors.white)),
-                  title: const Text('Add Account',
-                      style: TextStyle(color: Colors.white)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    // Passing true keeps saved accounts so they show up on the login screen
-                    _signOut(keepSavedAccounts: true);
-                  },
-                )
-              ],
+                      onTap: isCurrent
+                          ? null
+                          : () async {
+                              Navigator.pop(ctx);
+                              await _switchToAccount(
+                                  acc['id'], acc['refresh_token']);
+                            },
+                    );
+                  }),
+                  const Divider(color: Colors.white24),
+                  ListTile(
+                    leading: const CircleAvatar(
+                        backgroundColor: Colors.transparent,
+                        child: Icon(Icons.add, color: Colors.white)),
+                    title: const Text('Add Account',
+                        style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _signOut(keepSavedAccounts: true);
+                    },
+                  )
+                ],
+              ),
             ),
           );
         });
   }
 
-  // --- NEW: SWITCH TO ACCOUNT (PASSWORDLESS) ---
-  Future<void> _switchToAccount(String refreshToken) async {
-    final supabase = Supabase.instance.client; // <-- FIX ADDED HERE
+  // --- FIXED: SWITCH TO ACCOUNT (PASSWORDLESS) ---
+  Future<void> _switchToAccount(
+      String targetUserId, String refreshToken) async {
+    final supabase = Supabase.instance.client;
     showDialog(
         context: context,
         barrierDismissible: false,
@@ -407,6 +440,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
     try {
       final response = await supabase.auth.setSession(refreshToken);
       if (response.user != null) {
+        // 🔥 UPDATE NEWLY LOGGED IN ACCOUNT WITH ITS FRESH TOKEN IMMEDIATELY!
+        await _saveCurrentSessionLocal();
+
         await widget.userPreferences.clearLocal();
         await widget.userPreferences.loadPreferences();
 
@@ -422,10 +458,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
       }
     } catch (e) {
       if (mounted) {
-        Navigator.pop(context);
+        Navigator.pop(context); // close dialog
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Session expired. Please log in again.')));
-        _signOut(keepSavedAccounts: true);
+            content:
+                Text('Session expired for this account. Please log in again.'),
+            backgroundColor: Colors.orange));
+
+        // Gracefully handle failure: Remove dead account but keep others alive
+        final prefs = await SharedPreferences.getInstance();
+        final savedStr = prefs.getString('saved_accounts') ?? '[]';
+        List<dynamic> savedAccounts = jsonDecode(savedStr);
+        savedAccounts.removeWhere((acc) => acc['id'] == targetUserId);
+        await prefs.setString('saved_accounts', jsonEncode(savedAccounts));
+
+        // If it logged us completely out, go to intro screen
+        if (supabase.auth.currentUser == null) {
+          _signOut(keepSavedAccounts: true);
+        }
       }
     }
   }

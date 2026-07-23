@@ -70,7 +70,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     final emailVal = _emailCtl.text.trim();
     final prefs = await SharedPreferences.getInstance();
 
-    // 🔥 FIX: Now automatically pulls from memory if they clicked a link!
     final referralCode = _referralCtl.text.trim().isNotEmpty
         ? _referralCtl.text.trim().toLowerCase()
         : prefs.getString('pending_referral_code')?.toLowerCase() ?? '';
@@ -79,11 +78,12 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
 
     try {
       if (_isSignUp) {
-        // 1) CHECK USERNAME
+        // 1) CHECK USERNAME (case-insensitive so "MrJames" blocks "mrjames")
         final existing = await supabase
             .from('profiles')
             .select('username')
-            .eq('username', usernameVal)
+            .ilike('username',
+                usernameVal) // <-- FIX #2 (optional but recommended)
             .maybeSingle();
         if (existing != null) {
           _showError('This username is already taken. Please choose another.');
@@ -91,12 +91,12 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           return;
         }
 
-        // 2) CHECK REFERRAL CODE (If provided via UI or Deep Link)
+        // 2) CHECK REFERRAL CODE
         if (referralCode.isNotEmpty) {
           final referrer = await supabase
               .from('profiles')
               .select('id')
-              .eq('username', referralCode)
+              .ilike('username', referralCode) // <-- FIX
               .maybeSingle();
           if (referrer == null) {
             _showError('Invalid referral code. Please check the username.');
@@ -116,15 +116,14 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           'id': signUpRes.user!.id,
           'email': emailVal,
           'username': usernameVal,
-          'referred_by': referrerId, // <-- SAVES THE REFERRAL!
+          'referred_by': referrerId,
           'created_at': DateTime.now().toUtc().toIso8601String(),
           'updated_at': DateTime.now().toUtc().toIso8601String(),
         });
 
-        // Clear memory code since it's now safely in the DB
         await prefs.remove('pending_referral_code');
-
         await widget.userPreferences.loadPreferences();
+
         if (mounted) {
           await Navigator.of(context).pushReplacement(MaterialPageRoute(
               builder: (_) =>
@@ -170,7 +169,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
   Future<void> _signInWithGoogle() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // 🔥 FIX: Pull from memory as fallback
     final referralCode = _referralCtl.text.trim().isNotEmpty
         ? _referralCtl.text.trim().toLowerCase()
         : prefs.getString('pending_referral_code')?.toLowerCase() ?? '';
@@ -181,12 +179,11 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
     setState(() => _loading = true);
 
     try {
-      // 1) PRE-CHECK REFERRAL BEFORE OAUTH (If signing up)
       if (_isSignUp && referralCode.isNotEmpty) {
         final referrer = await supabase
             .from('profiles')
             .select('id')
-            .eq('username', referralCode)
+            .ilike('username', referralCode) // <-- FIX
             .maybeSingle();
         if (referrer == null) {
           _showError('Invalid referral code. Please check the username.');
@@ -195,7 +192,6 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
         }
         referrerId = referrer['id'];
 
-        // Save the ID securely so Edit Profile screen can attach it later
         if (referrerId != null) {
           await prefs.setString('pending_referrer_uuid', referrerId);
         }
@@ -232,14 +228,12 @@ class _IntroductionScreenState extends State<IntroductionScreen> {
           idToken: idToken,
           accessToken: accessToken);
 
-      // 2) UPDATE REFERRAL IF NEW ACCOUNT
       if (_isSignUp && referrerId != null && authRes.user != null) {
         await supabase
             .from('profiles')
             .update({'referred_by': referrerId}).eq('id', authRes.user!.id);
       }
 
-      // Clear memory code since it's now safely in the DB
       await prefs.remove('pending_referral_code');
       await prefs.remove('pending_referrer_uuid');
 

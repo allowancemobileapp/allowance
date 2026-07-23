@@ -164,12 +164,11 @@ class ChatSyncService {
         _simulateProgress(localId);
 
         for (String path in localPaths) {
-          // ... (upload logic stays the same) ...
-          Uint8List fileBytes;
           String fileName;
-          final String mType = msg['media_type']?.toString() ?? 'image';
+          String storagePath;
 
           if (kIsWeb) {
+            Uint8List fileBytes;
             if (path.startsWith('blob:')) {
               final xfile = XFile(path);
               fileBytes = await xfile.readAsBytes();
@@ -177,25 +176,39 @@ class ChatSyncService {
               final response = await http.get(Uri.parse(path));
               fileBytes = response.bodyBytes;
             }
+            final String mType = msg['media_type']?.toString() ?? 'image';
             final ext = (mType == 'video' || mType == 'view_once_video')
                 ? 'mp4'
                 : (mType == 'sticker' ? 'png' : 'jpg');
             fileName =
                 '${DateTime.now().millisecondsSinceEpoch}_${path.hashCode}.$ext';
+            storagePath = 'chat_media/${msg['chat_id']}/$fileName';
+            await supabase.storage
+                .from('chat_media')
+                .uploadBinary(storagePath, fileBytes);
           } else {
+            // 🔥 THE CRASH FIX: was readAsBytes() + uploadBinary() — buffers
+            // the whole file in memory first. Now streams the File
+            // straight to .upload(), same as your own working code paths
+            // already do two methods away from this one.
             final file = File(path);
             if (!file.existsSync()) continue;
-            fileBytes = await file.readAsBytes();
+
+            final int sizeBytes = await file.length();
+            const int maxUploadBytes = 300 * 1024 * 1024;
+            if (sizeBytes > maxUploadBytes) {
+              throw Exception(
+                  'File too large to send (${(sizeBytes / (1024 * 1024)).toStringAsFixed(0)}MB) — trim it first.');
+            }
+
             final ext =
                 path.split('.').last.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '');
             fileName =
                 '${DateTime.now().millisecondsSinceEpoch}_${file.hashCode}.$ext';
+            storagePath = 'chat_media/${msg['chat_id']}/$fileName';
+            await supabase.storage.from('chat_media').upload(storagePath, file);
           }
 
-          final storagePath = 'chat_media/${msg['chat_id']}/$fileName';
-          await supabase.storage
-              .from('chat_media')
-              .uploadBinary(storagePath, fileBytes);
           uploadedUrls.add(
               supabase.storage.from('chat_media').getPublicUrl(storagePath));
         }

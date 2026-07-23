@@ -4,6 +4,9 @@ import 'dart:developer' as developer;
 import 'package:allowance/screens/chat/group_invite_screen.dart';
 import 'package:allowance/screens/home/moment_viewer_screen.dart';
 import 'package:allowance/screens/introduction/reset_password_screen.dart';
+import 'package:allowance/shared/services/global_message_prefetch_service.dart';
+import 'package:allowance/widgets/docked_sheet.dart';
+import 'shared/services/web_back_button.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
@@ -12,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'shared/services/realtime_guardian.dart';
+import 'package:url_strategy/url_strategy.dart';
 
 // Deep Linking
 import 'package:app_links/app_links.dart';
@@ -46,6 +50,7 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  setPathUrlStrategy();
 
   // 🔥 FIX: Draw behind Android navigation bar so input bar sits ABOVE it
   SystemChrome.setSystemUIOverlayStyle(
@@ -119,14 +124,14 @@ class AllowanceApp extends StatefulWidget {
   State<AllowanceApp> createState() => _AllowanceAppState();
 }
 
-class _AllowanceAppState extends State<AllowanceApp> {
+class _AllowanceAppState extends State<AllowanceApp>
+    with WidgetsBindingObserver {
   final UserPreferences _userPreferences = UserPreferences();
   bool _isInitialized = false;
   bool _fcmListenersRegistered = false;
 
   StreamSubscription<AuthState>? _authSub;
 
-  // Deep Link Variables
   late AppLinks _appLinks;
   StreamSubscription<Uri>? _linkSubscription;
 
@@ -136,8 +141,34 @@ class _AllowanceAppState extends State<AllowanceApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this); // 🔥 NEW
     _initializeApp();
-    _initDeepLinks(); // <-- Start listening for YouTube-style links!
+    _initDeepLinks();
+    initWebBackButton(navigatorKey);
+  }
+
+  // 🔥 NEW: system back button/gesture, intercepted before Flutter's own
+  // Navigator sees it. A DockedSheet is a raw Overlay entry, not a route,
+  // so the Navigator has no idea it's open and would just pop whatever
+  // screen is underneath. This closes the sheet first and swallows that
+  // one back press — exactly like a real bottom sheet would.
+  @override
+  Future<bool> didPopRoute() async {
+    if (DockedSheet.isShowing) {
+      DockedSheet.dismiss();
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this); // 🔥 NEW
+    _authSub?.cancel();
+    _linkSubscription?.cancel();
+    RealtimeGuardian.instance.dispose();
+    GlobalMessagePrefetchService.instance.dispose();
+    super.dispose();
   }
 
   // --- NEW: YOUTUBE STYLE DEEP LINK LISTENER ---
@@ -252,6 +283,7 @@ class _AllowanceAppState extends State<AllowanceApp> {
       await _userPreferences.loadPreferences();
 
       RealtimeGuardian.instance.init(); // 🔥 NEW
+      GlobalMessagePrefetchService.instance.init();
 
       final user = Supabase.instance.client.auth.currentUser;
       if (user != null) {
@@ -324,67 +356,73 @@ class _AllowanceAppState extends State<AllowanceApp> {
   }
 
   @override
-  void dispose() {
-    _authSub?.cancel();
-    _linkSubscription?.cancel();
-    RealtimeGuardian.instance.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: _AllowanceAppState.navigatorKey,
-      title: 'Allowance',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(primarySwatch: Colors.indigo),
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      supportedLocales: const [
-        Locale('en', ''),
-      ],
-      onGenerateRoute: (settings) {
-        // 1. Handle standard internal pushes
-        if (settings.name == '/gist') {
-          final args = settings.arguments as Map<String, dynamic>?;
-          final gistId = args?['id'] ?? '';
-          return MaterialPageRoute(
-            builder: (_) => SingleGistScreen(gistId: gistId.toString()),
-          );
-        }
-
-        // 2. 🔥 THE FIX: Handle Web and Cold-Start Deep Links
-        // This catches URLs like: allowanceapp.org/share?type=gist&id=123
-        if (settings.name != null && settings.name!.startsWith('/share')) {
-          final uri = Uri.parse(settings.name!);
-          final type = uri.queryParameters['type'];
-          final id = uri.queryParameters['id'];
-
-          if (type == 'gist' && id != null) {
-            return MaterialPageRoute(
-              builder: (_) => SingleGistScreen(gistId: id),
-            );
-          } else if (type == 'moment' && id != null) {
-            return MaterialPageRoute(
-              builder: (_) => MomentViewerScreen(
-                moments: [],
-                initialIndex: 0,
-                userPreferences: _userPreferences,
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: const SystemUiOverlayStyle(
+        systemNavigationBarColor: Colors.transparent,
+      ),
+      child: MaterialApp(
+        navigatorKey: _AllowanceAppState.navigatorKey,
+        title: 'Allowance',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(primarySwatch: Colors.indigo),
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        supportedLocales: const [
+          Locale('en', ''),
+        ],
+        // ↓↓↓ WEB FIXES ↓↓↓
+        builder: (context, child) {
+          if (kIsWeb) {
+            return MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                viewPadding: EdgeInsets.zero,
               ),
+              child: child ?? const SizedBox.shrink(),
             );
-          } else if (type == 'group' && id != null) {
-            return MaterialPageRoute(
-                builder: (_) => GroupInviteScreen(
-                    chatId: id, userPreferences: _userPreferences));
           }
-        }
+          return child ?? const SizedBox.shrink();
+        },
+        onGenerateRoute: (settings) {
+          if (settings.name == '/gist') {
+            final args = settings.arguments as Map<String, dynamic>?;
+            final gistId = args?['id'] ?? '';
+            return MaterialPageRoute(
+              builder: (_) => SingleGistScreen(gistId: gistId.toString()),
+            );
+          }
 
-        return null;
-      },
-      home: _isInitialized ? _buildHome() : const CustomLoadingScreen(),
+          if (settings.name != null && settings.name!.startsWith('/share')) {
+            final uri = Uri.parse(settings.name!);
+            final type = uri.queryParameters['type'];
+            final id = uri.queryParameters['id'];
+
+            if (type == 'gist' && id != null) {
+              return MaterialPageRoute(
+                builder: (_) => SingleGistScreen(gistId: id),
+              );
+            } else if (type == 'moment' && id != null) {
+              return MaterialPageRoute(
+                builder: (_) => MomentViewerScreen(
+                  moments: [],
+                  initialIndex: 0,
+                  userPreferences: _userPreferences,
+                ),
+              );
+            } else if (type == 'group' && id != null) {
+              return MaterialPageRoute(
+                  builder: (_) => GroupInviteScreen(
+                      chatId: id, userPreferences: _userPreferences));
+            }
+          }
+
+          return null;
+        },
+        home: _isInitialized ? _buildHome() : const CustomLoadingScreen(),
+      ),
     );
   }
 

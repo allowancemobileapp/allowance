@@ -78,10 +78,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
       // DISCOVER FEED
       // ==========================================
       if (_searchQuery.trim().isNotEmpty) {
-        // --- 1. SEARCH MODE: Specific User Focus ---
         final query = _searchQuery.trim();
-
-        // Fetch matching profiles
         var userQuery = supabase
             .from('profiles')
             .select('id, username, avatar_url, school_name, subscription_tier')
@@ -90,12 +87,10 @@ class _ExploreScreenState extends State<ExploreScreen> {
           userQuery = userQuery.neq('id', currentUserId);
         }
         final userRes = await userQuery.limit(50);
-
         List<Map<String, dynamic>> profiles =
             List<Map<String, dynamic>>.from(userRes);
         final userIds = profiles.map((u) => u['id'].toString()).toList();
 
-        // Active story check
         final activeStoriesRes = await supabase
             .from('stories')
             .select('user_id')
@@ -114,7 +109,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
 
         mixedResults.addAll(profiles);
 
-        // Fetch Moments & Gists tied strictly to these found users!
         if (userIds.isNotEmpty) {
           final momentsRes = await supabase
               .from('moments')
@@ -134,7 +128,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
           mixedResults.addAll((gistsRes as List).map((e) =>
               {...Map<String, dynamic>.from(e), 'explore_type': 'gist'}));
         } else {
-          // Fallback: If no user found by name, search captions and titles instead
           final momentsRes = await supabase
               .from('moments')
               .select('*, profiles:user_id(username, avatar_url, school_name)')
@@ -154,8 +147,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
               {...Map<String, dynamic>.from(e), 'explore_type': 'gist'}));
         }
       } else {
-        // --- 2. DEFAULT DISCOVER MODE (Random & Fresh) ---
-        // Fetch up to 1000 users, shuffle them all locally, and take 40!
         var userQuery = supabase
             .from('profiles')
             .select('id, username, avatar_url, school_name, subscription_tier');
@@ -163,9 +154,8 @@ class _ExploreScreenState extends State<ExploreScreen> {
           userQuery = userQuery.neq('id', currentUserId);
         }
         final res = await userQuery.limit(1000);
-
         var allProfiles = List<Map<String, dynamic>>.from(res);
-        allProfiles.shuffle(Random()); // <-- TRUE RANDOMIZATION HERE
+        allProfiles.shuffle(Random());
         var profiles = allProfiles.take(40).toList();
 
         final activeStoriesRes = await supabase
@@ -184,7 +174,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
                 })
             .toList();
 
-        // Enforce Plus members staying towards the top
         profiles.sort((a, b) {
           final aTier = a['subscription_tier'] ?? 'Free';
           final bTier = b['subscription_tier'] ?? 'Free';
@@ -193,7 +182,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
           return 0;
         });
 
-        // Mix in Orders
         List<Map<String, dynamic>> orders = [];
         var orderQuery = supabase
             .from('options')
@@ -206,16 +194,13 @@ class _ExploreScreenState extends State<ExploreScreen> {
             .map((e) =>
                 {...Map<String, dynamic>.from(e), 'explore_type': 'order'})
             .toList();
-
-        int maxAllowedOrders = profiles.length ~/ 5;
-        if (orders.length > maxAllowedOrders) {
-          orders = orders.sublist(0, maxAllowedOrders);
+        if (orders.length > profiles.length ~/ 5) {
+          orders = orders.sublist(0, profiles.length ~/ 5);
         }
 
         mixedResults.addAll(profiles);
         mixedResults.addAll(orders);
 
-        // Mix in Gists, Moments, Tickets
         final gistRes = await supabase
             .from('gists')
             .select('*, profiles:user_id(username, avatar_url)')
@@ -247,33 +232,75 @@ class _ExploreScreenState extends State<ExploreScreen> {
       if (mounted) {
         setState(() {
           _exploreItems = mixedResults;
-          _generateMasonryBlueprints(); // Only generated for the Discover feed!
+          _generateMasonryBlueprints();
           _isLoading = false;
         });
       }
     } else {
       // ==========================================
-      // GROUPS FEED
+      // GROUPS FEED (UPGRADED)
       // ==========================================
-      var groupQuery = supabase.from('chats').select().eq('is_group', true);
+      var groupQuery = supabase
+          .from('chats')
+          .select(
+              'id, group_name, group_avatar, group_description, is_public, is_premium, price_free, price_plus, duration, themes, rules, admin_id, created_at, chat_participants(user_id)')
+          .eq('is_group', true)
+          .or('is_public.eq.true,is_public.is.null'); // 🔥 THIS FIXES IT! BRINGS YOUR GROUPS BACK!
+
       if (_searchQuery.trim().isNotEmpty) {
         groupQuery = groupQuery.ilike('group_name', '%${_searchQuery.trim()}%');
       }
 
       try {
         final res = await groupQuery;
-        var groupList = (res as List)
-            .map((g) =>
-                {...Map<String, dynamic>.from(g), 'explore_type': 'group'})
-            .toList();
-        groupList = groupList
-            .where((g) => g['is_public'] == true || g['is_public'] == null)
-            .toList();
+
+        final activeGroupStories = await supabase
+            .from('stories')
+            .select('chat_id')
+            .gt('expires_at', now)
+            .not('chat_id', 'is', null);
+        final Set<String> groupsWithStories =
+            activeGroupStories.map((s) => s['chat_id'].toString()).toSet();
+
+        Set<String> myFollowings = {};
+        if (currentUserId != null) {
+          final fRes = await supabase
+              .from('followers')
+              .select('following_id')
+              .eq('follower_id', currentUserId);
+          myFollowings = fRes.map((f) => f['following_id'].toString()).toSet();
+        }
+
+        var groupList = (res as List).map((g) {
+          final parts =
+              List<Map<String, dynamic>>.from(g['chat_participants'] ?? []);
+          int mutuals = 0;
+          for (var p in parts) {
+            if (myFollowings.contains(p['user_id'].toString())) mutuals++;
+          }
+
+          return {
+            ...Map<String, dynamic>.from(g),
+            'explore_type': 'group',
+            'has_active_story': groupsWithStories.contains(g['id'].toString()),
+            'mutual_friends': mutuals,
+          };
+        }).toList();
+
+        // 🔥 EXTRA DART FILTER JUST TO BE SAFE
+        groupList = groupList.where((g) => g['is_public'] != false).toList();
+
+        // Sort by active story, then by mutual friends
+        groupList.sort((a, b) {
+          if (a['has_active_story'] && !b['has_active_story']) return -1;
+          if (!a['has_active_story'] && b['has_active_story']) return 1;
+          return (b['mutual_friends'] as int)
+              .compareTo(a['mutual_friends'] as int);
+        });
 
         if (mounted) {
           setState(() {
             _exploreItems = groupList;
-            // No masonry blueprint needed here!
             _isLoading = false;
           });
         }
@@ -1075,7 +1102,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
                         color: const Color(0xFF4CAF50),
                         child: _selectedSegment == 0
                             ? _buildCustomMasonryGrid()
-                            : _buildStandardGrid(),
+                            : _buildGroupListView(),
                       ),
           ),
         ],
@@ -1334,21 +1361,20 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   // --- UPDATED: Automatically clears old cache to stop memory leaks ---
+  // --- ADD OR REPLACE THIS METHOD INSIDE _ExploreScreenState ---
   Widget _buildMediaThumb(String url, String text, IconData fallbackIcon,
       {bool isVideo = false}) {
     Widget imageWidget;
 
-    // 🔥 FIX: Stop the app from crashing by limiting thumbnail cache size to 40
+    // Flush cache if it gets too large to prevent RAM crashes
     if (_videoThumbCache.length > 40) {
       _videoThumbCache.clear();
     }
 
     if (isVideo && url.isNotEmpty) {
       if (kIsWeb) {
-        imageWidget = Container(
-            color: Colors.grey[850],
-            child: const Center(
-                child: Icon(Icons.videocam, color: Colors.white24, size: 50)));
+        // 🔥 THE WEB FIX: Use the native video frame previewer instead of video_thumbnail
+        imageWidget = _VideoFramePreview(url: url);
       } else if (_videoThumbCache.containsKey(url)) {
         imageWidget = Image.memory(_videoThumbCache[url]!, fit: BoxFit.cover);
       } else {
@@ -1356,8 +1382,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
           future: VideoThumbnail.thumbnailData(
             video: url,
             imageFormat: ImageFormat.JPEG,
-            maxWidth:
-                250, // 🔥 Reduced resolution to save massive amounts of RAM
+            maxWidth: 250, // Save RAM
             quality: 35,
           ),
           builder: (context, snapshot) {
@@ -1376,8 +1401,7 @@ class _ExploreScreenState extends State<ExploreScreen> {
       imageWidget = CachedNetworkImage(
         imageUrl: url,
         fit: BoxFit.cover,
-        memCacheWidth:
-            250, // 🔥 Forces flutter to discard huge raw images from RAM
+        memCacheWidth: 250, // Compression
         placeholder: (ctx, url) => Container(color: Colors.grey[850]),
         errorWidget: (ctx, url, err) =>
             Icon(fallbackIcon, color: Colors.white24, size: 40),
@@ -1401,8 +1425,9 @@ class _ExploreScreenState extends State<ExploreScreen> {
         ),
         if (isVideo)
           const Center(
-              child: Icon(Icons.play_circle_filled,
-                  color: Colors.white70, size: 36)),
+            child:
+                Icon(Icons.play_circle_filled, color: Colors.white70, size: 36),
+          ),
         Positioned(
           bottom: 12,
           left: 12,
@@ -1419,17 +1444,568 @@ class _ExploreScreenState extends State<ExploreScreen> {
     );
   }
 
-  Widget _buildStandardGrid() {
-    return GridView.builder(
-      padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-        childAspectRatio: 0.75,
-      ),
+  // --- ADD THIS NEW METHOD ---
+  Future<void> _openGroupStory(String chatId) async {
+    try {
+      final response = await supabase
+          .from('stories')
+          .select('''
+            id, user_id, chat_id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
+            profiles:user_id(username, avatar_url, school_name, subscription_tier),
+            chats:chat_id(group_name, group_avatar, is_public),
+            story_views(user_id)
+          ''')
+          .eq('chat_id', chatId)
+          .gt('expires_at', DateTime.now().toUtc().toIso8601String())
+          .order('created_at', ascending: true);
+
+      if (response.isNotEmpty && mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => StoryViewerScreen(
+              stories: List<Map<String, dynamic>>.from(response),
+              initialIndex: 0,
+              userPreferences: widget.userPreferences,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("Error opening group story: $e");
+    }
+  }
+
+  // --- REPLACE _buildStandardGrid WITH THIS ---
+  Widget _buildGroupListView() {
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       itemCount: _exploreItems.length,
-      itemBuilder: (context, index) => _buildGroupCard(_exploreItems[index]),
+      // Infinite scroll physics
+      physics: const BouncingScrollPhysics(),
+      itemBuilder: (context, index) =>
+          _buildEnhancedGroupCard(_exploreItems[index]),
+    );
+  }
+
+  // --- REPLACE _buildGroupCard WITH THIS ---
+  Widget _buildEnhancedGroupCard(Map<String, dynamic> group) {
+    final String groupId = group['id'].toString();
+
+    final String rawName =
+        group.containsKey('group_name') && group['group_name'] != null
+            ? group['group_name'].toString()
+            : (group.containsKey('name') && group['name'] != null
+                ? group['name'].toString()
+                : '');
+    final String name =
+        rawName.trim().isNotEmpty ? rawName.trim() : 'Unnamed Group';
+
+    final String? avatar =
+        group.containsKey('group_avatar') && group['group_avatar'] != null
+            ? group['group_avatar'].toString()
+            : (group.containsKey('avatar_url') && group['avatar_url'] != null
+                ? group['avatar_url'].toString()
+                : null);
+
+    final String rawDesc = group.containsKey('group_description') &&
+            group['group_description'] != null
+        ? group['group_description'].toString()
+        : (group.containsKey('description') && group['description'] != null
+            ? group['description'].toString()
+            : '');
+    final String desc = rawDesc.trim();
+
+    final bool isPremium = group['is_premium'] == true;
+    final bool hasStory = group['has_active_story'] == true;
+    final List themes =
+        List.from((group['themes'] as List?)?.map((e) => e.toString()) ?? []);
+    final int mutualFriends = group['mutual_friends'] ?? 0;
+    final String priceFree = group['price_free']?.toString() ?? '0';
+    final String pricePlus = group['price_plus']?.toString() ?? '0';
+    final String duration = group['duration']?.toString() ?? 'weekly';
+
+    return Container(
+      key: ValueKey('group_card_$groupId'),
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+          color: const Color(0xFF1E1E1E),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white.withOpacity(0.05)),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.4),
+                blurRadius: 12,
+                offset: const Offset(0, 4)),
+          ]),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                GestureDetector(
+                  onTap: hasStory ? () => _openGroupStory(groupId) : null,
+                  child: Stack(
+                    alignment: Alignment.bottomRight,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: hasStory
+                                  ? const Color(0xFF4CAF50)
+                                  : Colors.transparent,
+                              width: 2.5),
+                        ),
+                        child: SizedBox(
+                          width: 64,
+                          height: 64,
+                          child: CircleAvatar(
+                            radius: 32,
+                            backgroundColor: Colors.grey[800],
+                            backgroundImage: avatar != null
+                                ? CachedNetworkImageProvider(avatar)
+                                : null,
+                            child: avatar == null
+                                ? const Icon(Icons.groups,
+                                    size: 34, color: Colors.white54)
+                                : null,
+                          ),
+                        ),
+                      ),
+                      if (isPremium)
+                        Container(
+                          padding: const EdgeInsets.all(2),
+                          decoration: const BoxDecoration(
+                              color: Color(0xFF1E1E1E), shape: BoxShape.circle),
+                          child: const Icon(Icons.verified,
+                              color: Colors.amber, size: 16),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(name,
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 6),
+                      if (mutualFriends > 0)
+                        Row(
+                          children: [
+                            const Icon(Icons.people,
+                                size: 14, color: Colors.white54),
+                            const SizedBox(width: 6),
+                            Text('$mutualFriends mutual friends',
+                                style: const TextStyle(
+                                    color: Colors.white54, fontSize: 13)),
+                          ],
+                        )
+                      else
+                        const Text('Tap to view details',
+                            style:
+                                TextStyle(color: Colors.white38, fontSize: 13)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            if (desc.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Text(desc,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: Colors.white70, fontSize: 14, height: 1.3)),
+            ],
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () => _showGroupPreview(group),
+              child: const Text('Read rules & preview details...',
+                  style: TextStyle(
+                      color: Colors.blueAccent,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold)),
+            ),
+            // 🔥 FIX: COLORFUL TAGS
+            if (themes.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: themes.map((t) {
+                  final colors = [
+                    Colors.redAccent,
+                    Colors.blueAccent,
+                    const Color(0xFF4CAF50),
+                    Colors.orange,
+                    Colors.purpleAccent,
+                    Colors.tealAccent,
+                    Colors.pinkAccent,
+                    Colors.amber
+                  ];
+                  final c = colors[t.hashCode.abs() % colors.length];
+                  return Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                        color: c.withOpacity(0.12),
+                        border: Border.all(color: c.withOpacity(0.3)),
+                        borderRadius: BorderRadius.circular(8)),
+                    child: Text(t,
+                        style: TextStyle(
+                            color: c,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold)),
+                  );
+                }).toList(),
+              )
+            ],
+            if (isPremium) ...[
+              const SizedBox(height: 18),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                decoration: BoxDecoration(
+                    color: Colors.black38,
+                    borderRadius: BorderRadius.circular(12)),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Free Pass',
+                            style:
+                                TextStyle(color: Colors.white54, fontSize: 11)),
+                        const SizedBox(height: 2),
+                        Text('₦$priceFree/$duration',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13)),
+                      ],
+                    ),
+                    Container(width: 1, height: 28, color: Colors.white10),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        const Row(children: [
+                          Icon(Icons.star, color: Colors.amber, size: 12),
+                          SizedBox(width: 4),
+                          Text('Plus Pass',
+                              style: TextStyle(
+                                  color: Colors.amber,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold))
+                        ]),
+                        const SizedBox(height: 2),
+                        Text('₦$pricePlus/$duration',
+                            style: const TextStyle(
+                                color: Colors.amber,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13)),
+                      ],
+                    ),
+                  ],
+                ),
+              )
+            ],
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                    backgroundColor:
+                        isPremium ? Colors.amber : const Color(0xFF4CAF50),
+                    foregroundColor: Colors.black,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14)),
+                    padding: const EdgeInsets.symmetric(vertical: 14)),
+                onPressed: () => _showGroupPreview(group),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (isPremium)
+                      const Icon(Icons.workspace_premium, size: 18),
+                    if (isPremium) const SizedBox(width: 6),
+                    Text(isPremium ? 'Gain Premium Access' : 'Join Group',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 15)),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future _showGroupPreview(Map<String, dynamic> group) async {
+    final groupName = group['group_name'] ?? 'Unknown Group';
+    final desc = group['group_description'] ?? 'No description provided.';
+    final isPublic = group['is_public'] == true;
+    final isPremium = group['is_premium'] == true;
+    final String priceFree = group['price_free']?.toString() ?? '0';
+    final String pricePlus = group['price_plus']?.toString() ?? '0';
+    final String duration = group['duration']?.toString() ?? 'weekly';
+    final int mutualFriends = group['mutual_friends'] ?? 0;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        minChildSize: 0.4,
+        maxChildSize: 0.9,
+        expand: false,
+        builder: (_, scrollController) => SingleChildScrollView(
+          controller: scrollController,
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2))),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CircleAvatar(
+                    radius: 30,
+                    backgroundColor: Colors.grey[800],
+                    backgroundImage: group['group_avatar'] != null
+                        ? CachedNetworkImageProvider(group['group_avatar'])
+                        : null,
+                    child: group['group_avatar'] == null
+                        ? const Icon(Icons.groups, color: Colors.white54)
+                        : null,
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(groupName,
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 22,
+                                fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Icon(isPublic ? Icons.public : Icons.lock,
+                                size: 14,
+                                color: isPublic
+                                    ? Colors.greenAccent
+                                    : Colors.orangeAccent),
+                            const SizedBox(width: 4),
+                            Text(isPublic ? 'Public Group' : 'Private Group',
+                                style: TextStyle(
+                                    color: isPublic
+                                        ? Colors.greenAccent
+                                        : Colors.orangeAccent,
+                                    fontSize: 13)),
+                          ],
+                        ),
+                        if (mutualFriends > 0) ...[
+                          const SizedBox(height: 4),
+                          Text('$mutualFriends mutual friends inside',
+                              style: const TextStyle(
+                                  color: Colors.white54, fontSize: 13)),
+                        ]
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              const Text('About this group',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              if (desc.isNotEmpty) ...[
+                Text(desc,
+                    style: const TextStyle(
+                        color: Colors.white70, fontSize: 15, height: 1.5)),
+              ],
+              Builder(builder: (ctx) {
+                final rulesList = List<String>.from(
+                    (group['custom_rules'] as List?)
+                            ?.map((e) => e.toString()) ??
+                        []);
+                if (rulesList.isEmpty) return const SizedBox.shrink();
+
+                return Padding(
+                  padding: const EdgeInsets.only(top: 16.0),
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.white10,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                    icon: const Icon(Icons.rule, size: 18),
+                    label: const Text('View Group Rules'),
+                    onPressed: () {
+                      showDialog(
+                          context: ctx,
+                          builder: (dialogCtx) => AlertDialog(
+                                  backgroundColor: const Color(0xFF1E1E1E),
+                                  title: const Text('Group Guidelines',
+                                      style: TextStyle(color: Colors.white)),
+                                  content: SingleChildScrollView(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: rulesList
+                                          .map((rule) => Padding(
+                                                padding: const EdgeInsets.only(
+                                                    bottom: 8.0),
+                                                child: Row(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    const Text('• ',
+                                                        style: TextStyle(
+                                                            color: Color(
+                                                                0xFF4CAF50),
+                                                            fontSize: 18,
+                                                            fontWeight:
+                                                                FontWeight
+                                                                    .bold)),
+                                                    Expanded(
+                                                        child: Text(rule,
+                                                            style:
+                                                                const TextStyle(
+                                                                    color: Colors
+                                                                        .white70,
+                                                                    fontSize:
+                                                                        14,
+                                                                    height:
+                                                                        1.4))),
+                                                  ],
+                                                ),
+                                              ))
+                                          .toList(),
+                                    ),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                        onPressed: () =>
+                                            Navigator.pop(dialogCtx),
+                                        child: const Text('Got it',
+                                            style: TextStyle(
+                                                color: Color(0xFF4CAF50))))
+                                  ]));
+                    },
+                  ),
+                );
+              }),
+              if (isPremium) ...[
+                const SizedBox(height: 32),
+                const Text('Access Pass',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                      color: Colors.black45,
+                      borderRadius: BorderRadius.circular(16)),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('Free Users',
+                              style:
+                                  TextStyle(color: Colors.white, fontSize: 15)),
+                          Text('₦$priceFree / $duration',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16)),
+                        ],
+                      ),
+                      const Divider(color: Colors.white10, height: 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Row(children: [
+                            Icon(Icons.star, color: Colors.amber, size: 16),
+                            SizedBox(width: 8),
+                            Text('Plus Users',
+                                style: TextStyle(
+                                    color: Colors.amber,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold)),
+                          ]),
+                          Text('₦$pricePlus / $duration',
+                              style: const TextStyle(
+                                  color: Colors.amber,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16)),
+                        ],
+                      ),
+                    ],
+                  ),
+                )
+              ],
+              const SizedBox(height: 40),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _joinAndOpenGroup(group);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF4CAF50),
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16)),
+                  ),
+                  child: Text(isPremium ? 'Gain Access' : 'Join Group',
+                      style: const TextStyle(
+                          color: Colors.black,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16)),
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1653,10 +2229,23 @@ class _ExploreScreenState extends State<ExploreScreen> {
           .eq('chat_id', group['id'])
           .eq('user_id', currentUserId)
           .maybeSingle();
-      if (existingMember == null)
+
+      if (existingMember == null) {
         await supabase
             .from('chat_participants')
             .insert({'chat_id': group['id'], 'user_id': currentUserId});
+
+        // 🔥 FIX: Drop the system message when they join from Explore!
+        final myUsername = widget.userPreferences.username ?? 'Someone';
+        await supabase.from('messages').insert({
+          'chat_id': group['id'],
+          'sender_id': currentUserId,
+          'content': '@$myUsername joined the group',
+          'media_type': 'system',
+          'is_read': true,
+        });
+      }
+
       if (!mounted) return;
       Navigator.pop(context);
       Navigator.push(
@@ -1671,93 +2260,6 @@ class _ExploreScreenState extends State<ExploreScreen> {
     } catch (e) {
       debugPrint("Join/Open group error: $e");
     }
-  }
-
-  Future<void> _showGroupPreview(Map<String, dynamic> group) async {
-    // Basic dialog to match original functionality
-    final groupName = group['group_name'] ?? 'Unknown Group';
-    final isPublic = group['is_public'] == true;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(groupName,
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            Text(isPublic ? 'Public Group' : 'Private Group',
-                style: TextStyle(
-                    color:
-                        isPublic ? Colors.greenAccent : Colors.orangeAccent)),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: () => _joinAndOpenGroup(group),
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF4CAF50),
-                    padding: const EdgeInsets.symmetric(vertical: 16)),
-                child: const Text('Join Group',
-                    style: TextStyle(
-                        color: Colors.black, fontWeight: FontWeight.bold)),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildGroupCard(Map<String, dynamic> group) {
-    return GestureDetector(
-      onTap: () => _showGroupPreview(group),
-      child: Container(
-        decoration: BoxDecoration(
-          color: Colors.blueGrey[900]!.withOpacity(0.5),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.blue.withOpacity(0.2), width: 1),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  color: Colors.blueGrey[800]),
-              clipBehavior: Clip.hardEdge,
-              child: group['group_avatar'] != null
-                  ? CachedNetworkImage(
-                      imageUrl: group['group_avatar'], fit: BoxFit.cover)
-                  : const Icon(Icons.groups, color: Colors.white, size: 26),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8.0),
-              child: Text(group['group_name'] ?? 'Unknown Group',
-                  style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12),
-                  maxLines: 1,
-                  textAlign: TextAlign.center,
-                  overflow: TextOverflow.ellipsis),
-            ),
-            const Text('Group',
-                style: TextStyle(color: Colors.blueAccent, fontSize: 10)),
-          ],
-        ),
-      ),
-    );
   }
 }
 
@@ -2124,6 +2626,68 @@ class _ExploreMomentViewerItemState extends State<ExploreMomentViewerItem> {
           ),
         ),
       ],
+    );
+  }
+}
+
+// =========================================================================
+// WEB NATIVE VIDEO THUMBNAIL EXTRACTOR
+// =========================================================================
+class _VideoFramePreview extends StatefulWidget {
+  final String url;
+  const _VideoFramePreview({required this.url});
+
+  @override
+  State<_VideoFramePreview> createState() => _VideoFramePreviewState();
+}
+
+class _VideoFramePreviewState extends State<_VideoFramePreview> {
+  VideoPlayerController? _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.url))
+      ..initialize().then((_) {
+        if (mounted) setState(() {});
+      }).catchError((_) {
+        // Handle dead links silently
+      });
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_controller != null && _controller!.value.isInitialized) {
+      return SizedBox(
+        width: double.infinity,
+        height: double.infinity,
+        child: ClipRect(
+          child: FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: _controller!.value.size.width,
+              height: _controller!.value.size.height,
+              child: IgnorePointer(child: VideoPlayer(_controller!)),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Loading State
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: Colors.grey[850],
+      child: const Center(
+        child: CircularProgressIndicator(color: Color(0xFF4CAF50)),
+      ),
     );
   }
 }

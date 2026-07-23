@@ -40,27 +40,35 @@ class StoriesBarState extends State<StoriesBar> {
 
   Future<List<dynamic>> _loadStories() async {
     final supabase = Supabase.instance.client;
-
     try {
       final response = await supabase
           .from('stories')
           .select('''
-            id, user_id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
+            id, user_id, chat_id, media_url, media_type, caption, url, expires_at, created_at, likes_count,
             profiles:user_id(username, avatar_url, school_name, subscription_tier),
+            chats:chat_id(group_name, group_avatar, is_public),
             story_views(user_id) 
-          ''') // 🔥 FIX: Added 'subscription_tier' so the Plus Star works in the viewer!
+          ''')
           .gt('expires_at', DateTime.now().toUtc().toIso8601String())
           .order('created_at', ascending: false);
 
       if (mounted && response != null) {
         for (var story in response) {
-          final avatarUrl = story['profiles']?['avatar_url'] as String?;
+          final isGroup = story['chat_id'] != null;
+
+          // 🔥 FIX: Cast to Map before extracting variables to avoid the syntax error
+          final chatInfo = story['chats'] as Map<String, dynamic>? ?? {};
+          final profileInfo = story['profiles'] as Map<String, dynamic>? ?? {};
+
+          final avatarUrl = isGroup
+              ? chatInfo['group_avatar'] as String?
+              : profileInfo['avatar_url'] as String?;
+
           if (avatarUrl != null && avatarUrl.isNotEmpty) {
             precacheImage(NetworkImage(avatarUrl), context);
           }
         }
       }
-
       return response as List<dynamic>;
     } catch (e) {
       debugPrint("Error fetching stories: $e");
@@ -141,10 +149,14 @@ class StoriesBarState extends State<StoriesBar> {
 
         final allStories = snapshot.data!;
         final Map<String, List<dynamic>> grouped = {};
+
         for (var story in allStories) {
-          final profile = story['profiles'] as Map<String, dynamic>? ?? {};
-          final username = profile['username'] ?? 'unknown';
-          grouped.putIfAbsent(username, () => []).add(story);
+          // 🔥 GROUP LOGIC: Separate by chat_id if group, else by user_id
+          final isGroup = story['chat_id'] != null;
+          final key = isGroup
+              ? 'group_${story['chat_id']}'
+              : 'user_${story['user_id']}';
+          grouped.putIfAbsent(key, () => []).add(story);
         }
 
         final uniqueUsers = grouped.entries.toList();
@@ -275,17 +287,28 @@ class StoriesBarState extends State<StoriesBar> {
 
                         // --- NORMAL STORY RING ---
                         final actualIndex = pendingUpload != null ? i - 1 : i;
-                        final username = uniqueUsers[actualIndex].key;
                         final userStories = uniqueUsers[actualIndex].value;
+                        final isGroup = userStories.first['chat_id'] != null;
+
+                        String displayName = 'unknown';
+                        String? displayAvatarUrl;
+
+                        if (isGroup) {
+                          final chatInfo = userStories.first['chats']
+                                  as Map<String, dynamic>? ??
+                              {};
+                          displayName = chatInfo['group_name'] ?? 'Group';
+                          displayAvatarUrl = chatInfo['group_avatar'];
+                        } else {
+                          final profile = userStories.first['profiles']
+                                  as Map<String, dynamic>? ??
+                              {};
+                          displayName = profile['username'] ?? 'unknown';
+                          displayAvatarUrl = profile['avatar_url'];
+                        }
 
                         final isFullyViewed =
                             userStories.every((s) => _hasViewedStory(s));
-
-                        final firstStory = userStories.first;
-                        final profile =
-                            firstStory['profiles'] as Map<String, dynamic>? ??
-                                {};
-                        final userAvatarUrl = profile['avatar_url'] as String?;
 
                         int startIndex = 0;
                         for (int j = 0; j < actualIndex; j++) {
@@ -296,14 +319,12 @@ class StoriesBarState extends State<StoriesBar> {
                           onTap: () async {
                             final sortedUserStories =
                                 List<dynamic>.from(userStories);
-
                             sortedUserStories.sort((a, b) =>
                                 DateTime.parse(a['created_at']).compareTo(
                                     DateTime.parse(b['created_at'])));
 
                             int localTargetIndex = 0;
                             for (int k = 0; k < sortedUserStories.length; k++) {
-                              // If we haven't seen it, we stop here and open this one!
                               if (!_hasViewedStory(sortedUserStories[k])) {
                                 localTargetIndex = k;
                                 break;
@@ -330,35 +351,55 @@ class StoriesBarState extends State<StoriesBar> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Container(
-                                  padding: const EdgeInsets.all(2),
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                        color: isFullyViewed
-                                            ? Colors.grey[700]!
-                                            : const Color(0xFF4CAF50),
-                                        width: 2),
-                                  ),
-                                  child: CircleAvatar(
-                                    radius: 28,
-                                    backgroundColor: const Color(0xFF1E1E1E),
-                                    backgroundImage: userAvatarUrl != null &&
-                                            userAvatarUrl.isNotEmpty
-                                        ? NetworkImage(userAvatarUrl)
-                                        : null,
-                                    child: (userAvatarUrl == null ||
-                                            userAvatarUrl.isEmpty)
-                                        ? const Icon(Icons.person,
-                                            color: Colors.white, size: 28)
-                                        : null,
-                                  ),
+                                Stack(
+                                  alignment: Alignment.bottomRight,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.all(2),
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                            color: isFullyViewed
+                                                ? Colors.grey[700]!
+                                                : const Color(0xFF4CAF50),
+                                            width: 2),
+                                      ),
+                                      child: CircleAvatar(
+                                        radius: 28,
+                                        backgroundColor:
+                                            const Color(0xFF1E1E1E),
+                                        backgroundImage:
+                                            displayAvatarUrl != null &&
+                                                    displayAvatarUrl.isNotEmpty
+                                                ? NetworkImage(displayAvatarUrl)
+                                                : null,
+                                        child: (displayAvatarUrl == null ||
+                                                displayAvatarUrl.isEmpty)
+                                            ? Icon(
+                                                isGroup
+                                                    ? Icons.groups
+                                                    : Icons.person,
+                                                color: Colors.white,
+                                                size: 28)
+                                            : null,
+                                      ),
+                                    ),
+                                    if (isGroup)
+                                      Container(
+                                        padding: const EdgeInsets.all(2),
+                                        decoration: const BoxDecoration(
+                                            color: Colors.black,
+                                            shape: BoxShape.circle),
+                                        child: const Icon(Icons.groups,
+                                            color: Color(0xFF4CAF50), size: 12),
+                                      )
+                                  ],
                                 ),
                                 const SizedBox(height: 4),
                                 SizedBox(
                                   width: 68,
                                   child: Text(
-                                    '@$username',
+                                    isGroup ? displayName : '@$displayName',
                                     style: TextStyle(
                                         fontSize: 10,
                                         color: isFullyViewed

@@ -30,6 +30,7 @@ import 'package:record/record.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:uuid/uuid.dart';
+import '../../widgets/docked_sheet.dart';
 
 class IndividualChatScreen extends StatefulWidget {
   final String chatId;
@@ -68,6 +69,8 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   final Map<String, Color> _userColors = {};
   final AudioRecorder _audioRecorder = AudioRecorder();
   final Map<String, Future<Uint8List?>> _pendingThumbFutures = {};
+  int _activeThumbGenerations = 0;
+  static const int _maxConcurrentThumbGenerations = 2;
   bool _isRecording = false;
   String _recordDuration = "00:00";
   Timer? _recordTimer;
@@ -130,6 +133,30 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     _setupTypingListener();
     _checkFollowStatus();
     _markMessagesAsRead();
+  }
+
+  Future<Uint8List?> _getVideoThumbnail(String videoUrl) {
+    return _pendingThumbFutures.putIfAbsent(videoUrl, () async {
+      while (_activeThumbGenerations >= _maxConcurrentThumbGenerations) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        if (_isDisposed) return null;
+      }
+      _activeThumbGenerations++;
+      try {
+        // 🔥 Same fix as the audio player's .timeout() — a stalled network
+        // read here was likely what's holding decoder/socket resources open.
+        return await VideoThumbnail.thumbnailData(
+          video: videoUrl,
+          imageFormat: ImageFormat.JPEG,
+          maxWidth: 400,
+          quality: 50,
+        ).timeout(const Duration(seconds: 10), onTimeout: () => null);
+      } catch (_) {
+        return null;
+      } finally {
+        _activeThumbGenerations--;
+      }
+    });
   }
 
   Future<void> _setupPinnedMessagesStream() async {
@@ -707,21 +734,21 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     }
   }
 
-  // --- REPLACE YOUR DISPOSE METHOD WITH THIS (Fixed errors) ---
   @override
   void dispose() {
-    // 🔥 FIX: Set disposed flag FIRST so no async work sneaks in
     _isDisposed = true;
+
+    // 🔥 UPDATED: was the local _dismissDockedSheet() — now every docked
+    // sheet in the app is tracked by the one shared DockedSheet class.
+    DockedSheet.dismiss();
 
     WidgetsBinding.instance.removeObserver(this);
 
-    // 🔥 FIX: Cancel ALL subscriptions BEFORE anything else
     _msgSub?.cancel();
     _msgSub = null;
     _typingStatusSub?.cancel();
     _typingStatusSub = null;
 
-    // 🔥 FIX: Cancel ALL timers
     _typingTimer?.cancel();
     _typingTimer = null;
     _remoteTypingTimer?.cancel();
@@ -734,23 +761,18 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     _pinnedSub = null;
     _realtimeSelfHealTimer?.cancel();
 
-    // 🔥 FIX: Remove scroll listener BEFORE disposing controller
     _scrollController.removeListener(_scrollListener);
 
-    // 🔥 FIX: Stop any active recording before disposing
     if (_isRecording) {
       _audioRecorder.stop().catchError((_) => null);
       _isRecording = false;
     }
 
-    // 🔥 FIX: Dispose controllers in correct order
     _messageController.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
     _audioRecorder.dispose();
 
-    // 🔥 FIX: Clear the typing status in DB but DON'T await it
-    // (awaiting here can hang dispose if network is slow)
     final myId = supabase.auth.currentUser?.id;
     if (myId != null) {
       supabase.from('chat_participants').update({
@@ -969,161 +991,158 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
   Widget build(BuildContext context) {
     final double maxBubbleWidth = MediaQuery.sizeOf(context).width * 0.75;
     final myId = supabase.auth.currentUser?.id;
-    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return Scaffold(
       backgroundColor: Colors.black,
-      resizeToAvoidBottomInset: false,
+      resizeToAvoidBottomInset:
+          true, // 🔥 FIX: Let the OS handle the keyboard inset natively
       appBar: _buildAppBar(),
-      body: Padding(
-        padding: EdgeInsets.only(bottom: bottomInset),
-        child: Column(
-          children: [
-            Expanded(
-              child: Stack(
-                children: [
-                  ValueListenableBuilder<List<Map<String, dynamic>>>(
-                    valueListenable: ChatSyncService.instance.pendingMessages,
-                    builder: (context, pendingList, _) {
-                      final combinedMessages =
-                          _computeCombinedMessages(pendingList, myId);
+      body: Column(
+        children: [
+          Expanded(
+            child: Stack(
+              children: [
+                ValueListenableBuilder<List<Map<String, dynamic>>>(
+                  valueListenable: ChatSyncService.instance.pendingMessages,
+                  builder: (context, pendingList, _) {
+                    final combinedMessages =
+                        _computeCombinedMessages(pendingList, myId);
 
-                      if (combinedMessages.isEmpty) {
-                        return const Center(
-                            child: Text("Send a message to start chatting!",
-                                style: TextStyle(color: Colors.white54)));
+                    if (combinedMessages.isEmpty) {
+                      return const Center(
+                          child: Text("Send a message to start chatting!",
+                              style: TextStyle(color: Colors.white54)));
+                    }
+
+                    if (!_unreadCalculated && combinedMessages.isNotEmpty) {
+                      try {
+                        _firstUnreadIndex =
+                            combinedMessages.lastIndexWhere((m) {
+                          final senderId = m['sender_id']?.toString();
+                          final isRead = m['is_read'] == true;
+                          return !isRead &&
+                              senderId != null &&
+                              senderId != myId;
+                        });
+                      } catch (e) {
+                        _firstUnreadIndex = -1;
                       }
+                      _unreadCalculated = true;
+                    }
 
-                      if (!_unreadCalculated && combinedMessages.isNotEmpty) {
+                    return ListView.builder(
+                      controller: _scrollController,
+                      reverse: true,
+                      cacheExtent: 400,
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.manual,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: combinedMessages.length,
+                      itemBuilder: (context, index) {
                         try {
-                          _firstUnreadIndex =
-                              combinedMessages.lastIndexWhere((m) {
-                            final senderId = m['sender_id']?.toString();
-                            final isRead = m['is_read'] == true;
-                            return !isRead &&
-                                senderId != null &&
-                                senderId != myId;
-                          });
-                        } catch (e) {
-                          _firstUnreadIndex = -1;
-                        }
-                        _unreadCalculated = true;
-                      }
+                          final msg = combinedMessages[index];
+                          final messageId =
+                              (msg['id'] ?? msg['local_id'] ?? 'idx_$index')
+                                  .toString();
 
-                      return ListView.builder(
-                        controller: _scrollController,
-                        reverse: true,
-                        cacheExtent: 400,
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.manual,
-                        padding: const EdgeInsets.all(12),
-                        itemCount: combinedMessages.length,
-                        itemBuilder: (context, index) {
+                          DateTime date;
                           try {
-                            final msg = combinedMessages[index];
-                            final messageId =
-                                (msg['id'] ?? msg['local_id'] ?? 'idx_$index')
-                                    .toString();
-
-                            DateTime date;
-                            try {
-                              final createdAt = msg['created_at']?.toString();
-                              date = (createdAt != null && createdAt.isNotEmpty)
-                                  ? DateTime.parse(createdAt).toLocal()
-                                  : DateTime.now();
-                            } catch (e) {
-                              date = DateTime.now();
-                            }
-
-                            bool showDateHeader = false;
-                            if (index == combinedMessages.length - 1) {
-                              showDateHeader = true;
-                            } else {
-                              try {
-                                final prevMsg = combinedMessages[index + 1];
-                                final prevCreatedAt =
-                                    prevMsg['created_at']?.toString();
-                                if (prevCreatedAt != null &&
-                                    prevCreatedAt.isNotEmpty) {
-                                  final prevDate =
-                                      DateTime.parse(prevCreatedAt).toLocal();
-                                  if (date.day != prevDate.day ||
-                                      date.year != prevDate.year) {
-                                    showDateHeader = true;
-                                  }
-                                }
-                              } catch (e) {
-                                showDateHeader = false;
-                              }
-                            }
-
-                            return RepaintBoundary(
-                              key: ValueKey('msg_row_$messageId'),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (showDateHeader)
-                                    Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                            vertical: 16),
-                                        child: Center(
-                                            child: Text(_getDateLabel(date),
-                                                style: const TextStyle(
-                                                    color: Colors.white54,
-                                                    fontSize: 12)))),
-                                  if (index == _firstUnreadIndex &&
-                                      _firstUnreadIndex != -1)
-                                    Container(
-                                      margin: const EdgeInsets.symmetric(
-                                          vertical: 16),
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 12, vertical: 4),
-                                      decoration: BoxDecoration(
-                                          color: const Color(0xFF1E1E1E),
-                                          borderRadius:
-                                              BorderRadius.circular(12)),
-                                      child: const Text("UNREAD MESSAGES",
-                                          style: TextStyle(
-                                              color: Colors.amber,
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.bold)),
-                                    ),
-                                  _buildBubble(
-                                      combinedMessages, index, maxBubbleWidth),
-                                ],
-                              ),
-                            );
+                            final createdAt = msg['created_at']?.toString();
+                            date = (createdAt != null && createdAt.isNotEmpty)
+                                ? DateTime.parse(createdAt).toLocal()
+                                : DateTime.now();
                           } catch (e) {
-                            debugPrint(
-                                '💀 Message render error at index $index: $e');
-                            return const SizedBox.shrink();
+                            date = DateTime.now();
                           }
-                        },
-                      );
-                    },
-                  ),
-                  if (_showScrollToBottom)
-                    Positioned(
-                      bottom: 16,
-                      right: 16,
-                      child: FloatingActionButton.small(
-                        backgroundColor: const Color(0xFF202C33),
-                        onPressed: () => _scrollController.animateTo(0,
-                            duration: const Duration(milliseconds: 300),
-                            curve: Curves.easeOut),
-                        child: const Icon(Icons.keyboard_double_arrow_down,
-                            color: Colors.white),
-                      ),
+
+                          bool showDateHeader = false;
+                          if (index == combinedMessages.length - 1) {
+                            showDateHeader = true;
+                          } else {
+                            try {
+                              final prevMsg = combinedMessages[index + 1];
+                              final prevCreatedAt =
+                                  prevMsg['created_at']?.toString();
+                              if (prevCreatedAt != null &&
+                                  prevCreatedAt.isNotEmpty) {
+                                final prevDate =
+                                    DateTime.parse(prevCreatedAt).toLocal();
+                                if (date.day != prevDate.day ||
+                                    date.year != prevDate.year) {
+                                  showDateHeader = true;
+                                }
+                              }
+                            } catch (e) {
+                              showDateHeader = false;
+                            }
+                          }
+
+                          return RepaintBoundary(
+                            key: ValueKey('msg_row_$messageId'),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (showDateHeader)
+                                  Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 16),
+                                      child: Center(
+                                          child: Text(_getDateLabel(date),
+                                              style: const TextStyle(
+                                                  color: Colors.white54,
+                                                  fontSize: 12)))),
+                                if (index == _firstUnreadIndex &&
+                                    _firstUnreadIndex != -1)
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 4),
+                                    decoration: BoxDecoration(
+                                        color: const Color(0xFF1E1E1E),
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                    child: const Text("UNREAD MESSAGES",
+                                        style: TextStyle(
+                                            color: Colors.amber,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold)),
+                                  ),
+                                _buildBubble(
+                                    combinedMessages, index, maxBubbleWidth),
+                              ],
+                            ),
+                          );
+                        } catch (e) {
+                          debugPrint(
+                              '💀 Message render error at index $index: $e');
+                          return const SizedBox.shrink();
+                        }
+                      },
+                    );
+                  },
+                ),
+                if (_showScrollToBottom)
+                  Positioned(
+                    bottom: 16,
+                    right: 16,
+                    child: FloatingActionButton.small(
+                      backgroundColor: const Color(0xFF202C33),
+                      onPressed: () => _scrollController.animateTo(0,
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeOut),
+                      child: const Icon(Icons.keyboard_double_arrow_down,
+                          color: Colors.white),
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
-            SafeArea(
-              top: false,
-              child: RepaintBoundary(child: _buildInputBar()),
-            ),
-          ],
-        ),
+          ),
+          SafeArea(
+            top: false,
+            child: RepaintBoundary(child: _buildInputBar()),
+          ),
+        ],
       ),
     );
   }
@@ -1389,80 +1408,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     );
   }
 
-  // --- NEW: EXTENDED EMOJI GRID ---
-  void _showExtendedEmojiGrid(Map<String, dynamic> message) {
-    final extendedEmojis = [
-      '❤️',
-      '😂',
-      '😮',
-      '😢',
-      '🙏',
-      '👏',
-      '🔥',
-      '💯',
-      '😍',
-      '😒',
-      '😎',
-      '😡',
-      '👍',
-      '👎',
-      '🎉',
-      '💩',
-      '💀',
-      '👀',
-      '🥺',
-      '🤯',
-      '🥰',
-      '🤔',
-      '🥶',
-      '🤬',
-      '😈',
-      '👻',
-      '👽',
-      '🥳',
-      '🤮',
-      '🤡',
-      '🤌',
-      '💪',
-      '🤝',
-      '🙌'
-    ];
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: GridView.builder(
-          shrinkWrap: true,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 6, crossAxisSpacing: 10, mainAxisSpacing: 10),
-          itemCount: extendedEmojis.length,
-          itemBuilder: (context, index) {
-            final emoji = extendedEmojis[index];
-            return GestureDetector(
-              onTap: () async {
-                Navigator.pop(ctx);
-                final newReaction =
-                    message['reactions'] == emoji ? null : emoji;
-                try {
-                  await supabase.from('messages').update(
-                      {'reactions': newReaction}).eq('id', message['id']);
-                } catch (e) {
-                  debugPrint('Reaction error: $e');
-                }
-              },
-              child: Center(
-                  child: Text(emoji, style: const TextStyle(fontSize: 32))),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
   Future<bool> _isStickerSaved(String url) async {
     final myId = supabase.auth.currentUser?.id;
     if (myId == null) return false;
@@ -1478,230 +1423,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
       debugPrint('Sticker check error: $e');
       return false;
     }
-  }
-
-  // --- FIXED: EDITING WITH OFFLINE SUPPORT & SERIOUSNESS MENU ---
-  void _showMessageOptions(Map<String, dynamic> message, bool isMe) {
-    final createdAt = DateTime.parse(message['created_at']).toLocal();
-    final canEdit = DateTime.now().difference(createdAt).inMinutes <= 5;
-    final isText = message['media_url'] == null &&
-        (message['media_type'] == 'text' || message['media_type'] == null);
-    final hasContent = message['content'] != null &&
-        message['content'].toString().trim().isNotEmpty;
-    final isSticker = message['media_type'] == 'sticker' ||
-        (message['media_type'] == 'image' &&
-            message['content'] == 'Sticker/GIF');
-    final stickerUrl = isSticker ? message['media_url']?.toString() : null;
-
-    final currentReaction = message['reactions'];
-    final defaultEmojis = ['❤️', '😂', '😮', '😢', '🙏'];
-
-    void updateReaction(String emoji) async {
-      Navigator.pop(context);
-      final newReaction = currentReaction == emoji ? null : emoji;
-      try {
-        await supabase
-            .from('messages')
-            .update({'reactions': newReaction}).eq('id', message['id']);
-      } catch (e) {
-        debugPrint('Reaction error: $e');
-      }
-    }
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
-      builder: (ctx) => SafeArea(
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding:
-                    const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    ...defaultEmojis.map((emoji) => GestureDetector(
-                          onTap: () => updateReaction(emoji),
-                          child: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                                color: currentReaction == emoji
-                                    ? Colors.white24
-                                    : Colors.transparent,
-                                shape: BoxShape.circle),
-                            child: Text(emoji,
-                                style: const TextStyle(fontSize: 28)),
-                          ),
-                        )),
-                    GestureDetector(
-                      onTap: () {
-                        Navigator.pop(ctx);
-                        _showExtendedEmojiGrid(message);
-                      },
-                      child: Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: const BoxDecoration(
-                              color: Colors.white10, shape: BoxShape.circle),
-                          child: const Icon(Icons.add, color: Colors.white)),
-                    )
-                  ],
-                ),
-              ),
-              const Divider(color: Colors.white24),
-
-              ListTile(
-                leading: const Icon(Icons.reply, color: Colors.blueAccent),
-                title: const Text('Reply',
-                    style: TextStyle(color: Colors.blueAccent)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _onSwipeToReply(message);
-                },
-              ),
-
-              ListTile(
-                  leading: const Icon(Icons.forward, color: Colors.blueAccent),
-                  title: const Text('Forward',
-                      style: TextStyle(color: Colors.blueAccent)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showForwardSheet(message);
-                  }),
-
-              // 🔥 MOOD: always available on your own messages
-              if (isMe)
-                ListTile(
-                    leading: const Icon(Icons.speed, color: Colors.orange),
-                    title: const Text('Set Message Mood/Priority',
-                        style: TextStyle(color: Colors.white)),
-                    onTap: () {
-                      Navigator.pop(ctx);
-                      _showSeriousnessSlider(message);
-                    }),
-
-              if (stickerUrl != null)
-                FutureBuilder<bool>(
-                  future: _isStickerSaved(stickerUrl),
-                  builder: (context, snapshot) {
-                    final isSaved = snapshot.data ?? false;
-                    return ListTile(
-                      leading: Icon(
-                        isSaved ? Icons.bookmark_remove : Icons.bookmark_add,
-                        color: isSaved
-                            ? Colors.orangeAccent
-                            : const Color(0xFF4CAF50),
-                      ),
-                      title: Text(
-                        isSaved ? 'Remove Sticker' : 'Save Sticker',
-                        style: TextStyle(
-                            color: isSaved
-                                ? Colors.orangeAccent
-                                : const Color(0xFF4CAF50)),
-                      ),
-                      onTap: () async {
-                        Navigator.pop(ctx);
-                        final myId = supabase.auth.currentUser?.id;
-                        if (myId == null) return;
-                        try {
-                          if (isSaved) {
-                            await supabase
-                                .from('saved_stickers')
-                                .delete()
-                                .eq('user_id', myId)
-                                .eq('url', stickerUrl);
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                      'Sticker removed from your collection'),
-                                  backgroundColor: Colors.black87,
-                                  duration: Duration(seconds: 2),
-                                ),
-                              );
-                            }
-                          } else {
-                            await supabase.from('saved_stickers').insert({
-                              'user_id': myId,
-                              'url': stickerUrl,
-                              'created_at': DateTime.now().toIso8601String(),
-                            });
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Sticker saved!'),
-                                  backgroundColor: Color(0xFF4CAF50),
-                                  duration: Duration(seconds: 2),
-                                ),
-                              );
-                            }
-                          }
-                        } catch (e) {
-                          debugPrint('Sticker save/remove error: $e');
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Failed to update sticker'),
-                                backgroundColor: Colors.redAccent,
-                              ),
-                            );
-                          }
-                        }
-                      },
-                    );
-                  },
-                ),
-
-              if (hasContent && !isSticker)
-                ListTile(
-                  leading: const Icon(Icons.copy, color: Colors.white),
-                  title: const Text('Copy Text',
-                      style: TextStyle(color: Colors.white)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    Clipboard.setData(ClipboardData(text: message['content']));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Copied to clipboard')));
-                  },
-                ),
-              if (isMe && canEdit && isText)
-                ListTile(
-                  leading: const Icon(Icons.edit, color: Colors.white),
-                  title: const Text('Edit Message',
-                      style: TextStyle(color: Colors.white)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showEditDialog(message);
-                  },
-                ),
-              if (isMe)
-                ListTile(
-                  leading: const Icon(Icons.delete, color: Colors.redAccent),
-                  title: const Text('Delete Message',
-                      style: TextStyle(color: Colors.redAccent)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    if (message['is_pending'] == true ||
-                        message['is_failed'] == true) {
-                      if (message['local_id'] != null) {
-                        ChatSyncService.instance
-                            .cancelMessage(message['local_id']);
-                      }
-                    } else {
-                      _deleteMessage(message['id']);
-                    }
-                  },
-                ),
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   void _showEditDialog(Map<String, dynamic> message) {
@@ -1864,291 +1585,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
             const SnackBar(content: Text('Failed to delete message')));
       }
     }
-  }
-
-  // --- NEW STICKER METHODS ---
-  void _showStickerMenu() {
-    if (!mounted) return;
-
-    showModalBottomSheet(
-        context: context,
-        backgroundColor: const Color(0xFF1E1E1E),
-        shape: const RoundedRectangleBorder(
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-        builder: (ctx) => StatefulBuilder(builder: (context, setSheetState) {
-              return SafeArea(
-                  child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(mainAxisSize: MainAxisSize.min, children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text('Stickers',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold)),
-                            // 🔥 Close button so user can dismiss after sending multiple
-                            GestureDetector(
-                              onTap: () => Navigator.pop(ctx),
-                              child: const Icon(Icons.close,
-                                  color: Colors.white54, size: 28),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        ConstrainedBox(
-                          constraints: BoxConstraints(
-                              maxHeight:
-                                  MediaQuery.of(context).size.height * 0.4),
-                          child: FutureBuilder(
-                              future: supabase
-                                  .from('saved_stickers')
-                                  .select('id, url')
-                                  .eq('user_id', supabase.auth.currentUser!.id)
-                                  .order('created_at', ascending: false),
-                              builder:
-                                  (context, AsyncSnapshot<dynamic> snapshot) {
-                                if (snapshot.connectionState ==
-                                    ConnectionState.waiting)
-                                  return const Center(
-                                      child: CircularProgressIndicator(
-                                          color: Color(0xFF4CAF50)));
-
-                                final savedStickers =
-                                    List<Map<String, dynamic>>.from(
-                                        snapshot.data ?? []);
-
-                                return GridView.builder(
-                                    shrinkWrap: true,
-                                    gridDelegate:
-                                        const SliverGridDelegateWithFixedCrossAxisCount(
-                                            crossAxisCount: 4,
-                                            crossAxisSpacing: 10,
-                                            mainAxisSpacing: 10),
-                                    itemCount: savedStickers.length + 1,
-                                    itemBuilder: (context, index) {
-                                      if (index == 0) {
-                                        return GestureDetector(
-                                          onTap: () async {
-                                            Navigator.pop(ctx);
-                                            await _pickAndUploadSticker();
-                                          },
-                                          child: Container(
-                                            decoration: BoxDecoration(
-                                                color: Colors.grey[800],
-                                                borderRadius:
-                                                    BorderRadius.circular(12)),
-                                            child: const Icon(Icons.add,
-                                                color: Colors.white, size: 36),
-                                          ),
-                                        );
-                                      }
-
-                                      final sticker = savedStickers[index - 1];
-                                      final url = sticker['url'].toString();
-                                      final stickerId = sticker['id'];
-
-                                      return GestureDetector(
-                                        onTap: () {
-                                          // 🔥 NO POP — sheet stays open for rapid-fire sticker spam
-                                          _sendExistingSticker(url);
-                                          HapticFeedback.lightImpact();
-                                        },
-                                        onLongPress: () async {
-                                          HapticFeedback.lightImpact();
-                                          // Permanently delete from saved collection
-                                          await supabase
-                                              .from('saved_stickers')
-                                              .delete()
-                                              .eq('id', stickerId);
-                                          setSheetState(() {});
-                                        },
-                                        child: ClipRRect(
-                                          borderRadius:
-                                              BorderRadius.circular(12),
-                                          child: CachedNetworkImage(
-                                            imageUrl: url,
-                                            fit: BoxFit.cover,
-                                            placeholder: (context, url) =>
-                                                const Center(
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                            color: Color(
-                                                                0xFF4CAF50))),
-                                            errorWidget: (context, url,
-                                                    error) =>
-                                                const Icon(Icons.broken_image,
-                                                    color: Colors.white54),
-                                          ),
-                                        ),
-                                      );
-                                    });
-                              }),
-                        )
-                      ])));
-            }));
-  }
-
-  // --- NEW: FORWARD MESSAGE SHEET ---
-  void _showForwardSheet(Map<String, dynamic> message) async {
-    final myId = supabase.auth.currentUser?.id;
-    if (myId == null) return;
-
-    // Fetch friends
-    final res = await supabase
-        .from('followers')
-        .select('following_id')
-        .eq('follower_id', myId);
-    final followingIds = res.map((e) => e['following_id']).toList();
-    List<dynamic> friends = [];
-    if (followingIds.isNotEmpty) {
-      friends = await supabase
-          .from('profiles')
-          .select('id, username, avatar_url')
-          .inFilter('id', followingIds);
-    }
-
-    if (!mounted) return;
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1E1E1E),
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) {
-        Set<String> selectedFriends = {};
-        bool isSending = false;
-
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return DraggableScrollableSheet(
-              initialChildSize: 0.7,
-              minChildSize: 0.5,
-              maxChildSize: 0.9,
-              expand: false,
-              builder: (_, scrollController) => Column(
-                children: [
-                  const Padding(
-                      padding: EdgeInsets.all(16.0),
-                      child: Text('Forward to...',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold))),
-                  const Divider(color: Colors.white10),
-                  Expanded(
-                    child: friends.isEmpty
-                        ? const Center(
-                            child: Text("Follow people to forward messages",
-                                style: TextStyle(color: Colors.white54)))
-                        : ListView.builder(
-                            controller: scrollController,
-                            itemCount: friends.length,
-                            itemBuilder: (context, index) {
-                              final friend = friends[index];
-                              final isSelected =
-                                  selectedFriends.contains(friend['id']);
-                              return ListTile(
-                                leading: CircleAvatar(
-                                    backgroundImage:
-                                        friend['avatar_url'] != null
-                                            ? NetworkImage(friend['avatar_url'])
-                                            : null,
-                                    child: friend['avatar_url'] == null
-                                        ? const Icon(Icons.person,
-                                            color: Colors.white54)
-                                        : null),
-                                title: Text(friend['username'] ?? 'User',
-                                    style:
-                                        const TextStyle(color: Colors.white)),
-                                trailing: Checkbox(
-                                    value: isSelected,
-                                    activeColor: const Color(0xFF4CAF50),
-                                    onChanged: (v) => setModalState(() {
-                                          v == true
-                                              ? selectedFriends
-                                                  .add(friend['id'])
-                                              : selectedFriends
-                                                  .remove(friend['id']);
-                                        })),
-                                onTap: () => setModalState(() {
-                                  isSelected
-                                      ? selectedFriends.remove(friend['id'])
-                                      : selectedFriends.add(friend['id']);
-                                }),
-                              );
-                            },
-                          ),
-                  ),
-                  if (selectedFriends.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF4CAF50),
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12))),
-                          onPressed: isSending
-                              ? null
-                              : () async {
-                                  setModalState(() => isSending = true);
-                                  for (String friendId in selectedFriends) {
-                                    final response = await supabase.rpc(
-                                        'get_or_create_personal_chat',
-                                        params: {
-                                          'user_a': myId,
-                                          'user_b': friendId
-                                        });
-                                    final chatId = response.toString();
-
-                                    // Forward via ChatSyncService
-                                    ChatSyncService.instance.enqueueMessage({
-                                      'chat_id': chatId,
-                                      'sender_id': myId,
-                                      'content': message['content'] ?? '',
-                                      'media_type':
-                                          message['media_type'] ?? 'text',
-                                      'media_url': message['media_url'],
-                                      'thumbnail_url': message['thumbnail_url'],
-                                      'file_size_bytes':
-                                          message['file_size_bytes'],
-                                    });
-                                  }
-                                  if (mounted) {
-                                    Navigator.pop(ctx);
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(
-                                            content: Text(
-                                                'Forwarded to ${selectedFriends.length} chat(s)!'),
-                                            backgroundColor: Colors.green));
-                                  }
-                                },
-                          child: isSending
-                              ? const SizedBox(
-                                  width: 24,
-                                  height: 24,
-                                  child: CircularProgressIndicator(
-                                      color: Colors.black, strokeWidth: 2))
-                              : Text('Send',
-                                  style: const TextStyle(
-                                      color: Colors.black,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16)),
-                        ),
-                      ),
-                    )
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
   }
 
   Future<void> _pickAndUploadSticker() async {
@@ -3012,9 +2448,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     if (replyContent.startsWith('Story_')) {
       final storyId = replyContent.split('_')[1];
 
+      // 🔥 FIX: Added 'chats:chat_id(group_name, group_avatar, is_public)' so group details load correctly!
       final response = await supabase
           .from('stories')
-          .select('*, profiles:user_id(username, avatar_url, school_name)')
+          .select(
+              '*, profiles:user_id(username, avatar_url, school_name, subscription_tier), chats:chat_id(group_name, group_avatar, is_public)')
           .eq('id', storyId)
           .maybeSingle();
 
@@ -3154,15 +2592,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                 width: double.infinity,
                 height: height ?? 200);
           } else {
-            final future = _pendingThumbFutures.putIfAbsent(
-              effectiveUrl,
-              () => VideoThumbnail.thumbnailData(
-                      video: effectiveUrl,
-                      imageFormat: ImageFormat.JPEG,
-                      maxWidth: 400,
-                      quality: 50)
-                  .catchError((_) => null),
-            );
+            final future = _getVideoThumbnail(effectiveUrl);
             mediaWidget = FutureBuilder<Uint8List?>(
               future: future,
               builder: (context, snapshot) {
@@ -3497,70 +2927,690 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     );
   }
 
-  // ... (Keep your existing _showPlusOptions, _plusTile, and _showChatMenu)
-  // --- FIXED: INDIVIDUAL CHAT MEDIA & STICKER MENU ---
-  void _showPlusOptions() async {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+  // --- COMPACT WHATSAPP-STYLE MENU ITEM ---
+  Widget _buildHorizontalOption({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        child: Row(
           children: [
-            ListTile(
-                leading: const Icon(Icons.insert_drive_file,
-                    color: Color(0xFF4CAF50)),
-                title: const Text('Add File',
-                    style: TextStyle(color: Colors.white)),
-                onTap: () async {
-                  Navigator.pop(ctx);
-                  await _pickAndUploadFile();
-                }),
-            ListTile(
-                leading:
-                    const Icon(Icons.photo_library, color: Color(0xFF4CAF50)),
-                title: const Text('Add Photo',
-                    style: TextStyle(color: Colors.white)),
-                onTap: () async {
-                  Navigator.pop(ctx);
-                  await _pickAndUploadMedia(ImageSource.gallery, 'image');
-                }),
-            ListTile(
-                leading: const Icon(Icons.videocam, color: Color(0xFF4CAF50)),
-                title: const Text('Add Video',
-                    style: TextStyle(color: Colors.white)),
-                onTap: () async {
-                  Navigator.pop(ctx);
-                  await _pickAndUploadMedia(ImageSource.gallery, 'video');
-                }),
-            ListTile(
-                leading: const Icon(Icons.camera_alt, color: Color(0xFF4CAF50)),
-                title: const Text('Take Photo/Video',
-                    style: TextStyle(color: Colors.white)),
-                onTap: () async {
-                  Navigator.pop(ctx);
-                  await _pickAndUploadMedia(ImageSource.camera, 'image');
-                }),
-            // 🔥 OPEN STICKERS MENU
-            ListTile(
-                leading:
-                    const Icon(Icons.emoji_emotions, color: Color(0xFF4CAF50)),
-                title: const Text('Stickers',
-                    style: TextStyle(color: Colors.white)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _showStickerMenu();
-                }),
-            const SizedBox(height: 12),
+            Icon(icon, color: color, size: 24),
+            const SizedBox(width: 16),
+            Text(label,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500)),
           ],
         ),
       ),
     );
   }
 
-  // --- NEW: FILE UPLOADER ---
+  void _showPlusOptions() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 12),
+              Center(
+                  child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(10)))),
+              const SizedBox(height: 12),
+              _buildHorizontalOption(
+                  icon: Icons.insert_drive_file,
+                  label: 'Document',
+                  color: Colors.blueAccent,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _pickAndUploadFile();
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.photo,
+                  label: 'Gallery',
+                  color: const Color(0xFF4CAF50),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _pickAndUploadMedia(ImageSource.gallery, 'image');
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.videocam,
+                  label: 'Video',
+                  color: Colors.pinkAccent,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _pickAndUploadMedia(ImageSource.gallery, 'video');
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.camera_alt,
+                  label: 'Camera',
+                  color: Colors.orangeAccent,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _pickAndUploadMedia(ImageSource.camera, 'image');
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.audiotrack,
+                  label: 'Audio',
+                  color: Colors.deepPurpleAccent,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _pickAndUploadAudioFile();
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.emoji_emotions,
+                  label: 'Stickers',
+                  color: Colors.purpleAccent,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showStickerMenu();
+                  }),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showChatMenu() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 12),
+              Center(
+                  child: Container(
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(10)))),
+              const SizedBox(height: 12),
+              _buildHorizontalOption(
+                  icon: Icons.group_add,
+                  label: 'Create Group',
+                  color: const Color(0xFF4CAF50),
+                  onTap: () {
+                    Navigator.pop(ctx); /* Create Group */
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.block,
+                  label: 'Block User',
+                  color: Colors.redAccent,
+                  onTap: () {
+                    Navigator.pop(ctx); /* Block */
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.archive,
+                  label: 'Archive Chat',
+                  color: Colors.blueAccent,
+                  onTap: () {
+                    Navigator.pop(ctx); /* Archive */
+                  }),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showMessageOptions(Map<String, dynamic> message, bool isMe) {
+    final createdAt = DateTime.parse(message['created_at']).toLocal();
+    final canEdit = DateTime.now().difference(createdAt).inMinutes <= 5;
+    final isText = message['media_url'] == null &&
+        (message['media_type'] == 'text' || message['media_type'] == null);
+    final hasContent = message['content'] != null &&
+        message['content'].toString().trim().isNotEmpty;
+    final isSticker = message['media_type'] == 'sticker' ||
+        (message['media_type'] == 'image' &&
+            message['content'] == 'Sticker/GIF');
+    final stickerUrl = isSticker ? message['media_url']?.toString() : null;
+
+    final currentReaction = message['reactions'];
+    final defaultEmojis = ['❤️', '😂', '😮', '😢', '🙏'];
+
+    void updateReaction(String emoji) async {
+      Navigator.pop(context);
+      final newReaction = currentReaction == emoji ? null : emoji;
+      try {
+        await supabase
+            .from('messages')
+            .update({'reactions': newReaction}).eq('id', message['id']);
+      } catch (e) {}
+    }
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    ...defaultEmojis.map((emoji) => GestureDetector(
+                          onTap: () => updateReaction(emoji),
+                          child: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                                color: currentReaction == emoji
+                                    ? Colors.white24
+                                    : Colors.transparent,
+                                shape: BoxShape.circle),
+                            child: Text(emoji,
+                                style: const TextStyle(fontSize: 28)),
+                          ),
+                        )),
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _showExtendedEmojiGrid(message);
+                      },
+                      child: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: const BoxDecoration(
+                              color: Colors.white10, shape: BoxShape.circle),
+                          child: const Icon(Icons.add, color: Colors.white)),
+                    )
+                  ],
+                ),
+              ),
+              const Divider(color: Colors.white24),
+              _buildHorizontalOption(
+                  icon: Icons.reply,
+                  label: 'Reply',
+                  color: Colors.blueAccent,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _onSwipeToReply(message);
+                  }),
+              _buildHorizontalOption(
+                  icon: Icons.forward,
+                  label: 'Forward',
+                  color: Colors.blueAccent,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showForwardSheet(message);
+                  }),
+              if (isMe)
+                _buildHorizontalOption(
+                    icon: Icons.speed,
+                    label: 'Set Message Mood',
+                    color: Colors.orange,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showSeriousnessSlider(message);
+                    }),
+
+              // 🔥 FIX: RESTORED THE STICKER SAVER
+              if (stickerUrl != null)
+                FutureBuilder<bool>(
+                  future: _isStickerSaved(stickerUrl),
+                  builder: (context, snapshot) {
+                    final isSaved = snapshot.data ?? false;
+                    return _buildHorizontalOption(
+                        icon: isSaved
+                            ? Icons.bookmark_remove
+                            : Icons.bookmark_add,
+                        label: isSaved ? 'Remove Sticker' : 'Save Sticker',
+                        color: isSaved
+                            ? Colors.orangeAccent
+                            : const Color(0xFF4CAF50),
+                        onTap: () async {
+                          Navigator.pop(ctx);
+                          final myId = supabase.auth.currentUser?.id;
+                          if (myId == null) return;
+                          try {
+                            if (isSaved) {
+                              await supabase
+                                  .from('saved_stickers')
+                                  .delete()
+                                  .eq('user_id', myId)
+                                  .eq('url', stickerUrl);
+                              if (mounted)
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text('Sticker removed')));
+                            } else {
+                              await supabase.from('saved_stickers').insert({
+                                'user_id': myId,
+                                'url': stickerUrl,
+                                'created_at': DateTime.now().toIso8601String()
+                              });
+                              if (mounted)
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text('Sticker saved!'),
+                                        backgroundColor: Color(0xFF4CAF50)));
+                            }
+                          } catch (e) {}
+                        });
+                  },
+                ),
+
+              if (hasContent && !isSticker)
+                _buildHorizontalOption(
+                    icon: Icons.copy,
+                    label: 'Copy Text',
+                    color: Colors.white,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      Clipboard.setData(
+                          ClipboardData(text: message['content']));
+                    }),
+              if (isMe && canEdit && isText)
+                _buildHorizontalOption(
+                    icon: Icons.edit,
+                    label: 'Edit Message',
+                    color: Colors.white,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _showEditDialog(message);
+                    }),
+              if (isMe)
+                _buildHorizontalOption(
+                    icon: Icons.delete,
+                    label: 'Delete Message',
+                    color: Colors.redAccent,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _deleteMessage(message['id']);
+                    }),
+              const SizedBox(height: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showStickerMenu() {
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('Stickers',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold)),
+                    GestureDetector(
+                        onTap: () => Navigator.pop(ctx),
+                        child: const Icon(Icons.close,
+                            color: Colors.white54, size: 28)),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                      maxHeight: MediaQuery.sizeOf(context).height * 0.4),
+                  child: FutureBuilder(
+                      future: supabase
+                          .from('saved_stickers')
+                          .select('id, url')
+                          .eq('user_id', supabase.auth.currentUser!.id)
+                          .order('created_at', ascending: false),
+                      builder: (context, AsyncSnapshot<dynamic> snapshot) {
+                        if (snapshot.connectionState == ConnectionState.waiting)
+                          return const Center(
+                              child: CircularProgressIndicator(
+                                  color: Color(0xFF4CAF50)));
+                        final savedStickers = List<Map<String, dynamic>>.from(
+                            snapshot.data ?? []);
+                        return GridView.builder(
+                            shrinkWrap: true,
+                            gridDelegate:
+                                const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 4,
+                                    crossAxisSpacing: 10,
+                                    mainAxisSpacing: 10),
+                            itemCount: savedStickers.length + 1,
+                            itemBuilder: (context, index) {
+                              if (index == 0) {
+                                return GestureDetector(
+                                  onTap: () async {
+                                    Navigator.pop(ctx);
+                                    await _pickAndUploadSticker();
+                                  },
+                                  child: Container(
+                                      decoration: BoxDecoration(
+                                          color: Colors.grey[800],
+                                          borderRadius:
+                                              BorderRadius.circular(12)),
+                                      child: const Icon(Icons.add,
+                                          color: Colors.white, size: 36)),
+                                );
+                              }
+                              final url =
+                                  savedStickers[index - 1]['url'].toString();
+                              return GestureDetector(
+                                onTap: () {
+                                  _sendExistingSticker(url);
+                                  HapticFeedback.lightImpact();
+                                },
+                                child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(12),
+                                    child: CachedNetworkImage(
+                                        imageUrl: url, fit: BoxFit.cover)),
+                              );
+                            });
+                      }),
+                )
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showForwardSheet(Map<String, dynamic> message) async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+    final res = await supabase
+        .from('followers')
+        .select('following_id')
+        .eq('follower_id', myId);
+    final followingIds = res.map((e) => e['following_id']).toList();
+    List<dynamic> friends = [];
+    if (followingIds.isNotEmpty)
+      friends = await supabase
+          .from('profiles')
+          .select('id, username, avatar_url')
+          .inFilter('id', followingIds);
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        Set<String> selectedFriends = {};
+        bool isSending = false;
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return DraggableScrollableSheet(
+              initialChildSize: 0.7,
+              minChildSize: 0.5,
+              maxChildSize: 0.9,
+              expand: false,
+              builder: (_, scrollController) => Column(
+                children: [
+                  const Padding(
+                      padding: EdgeInsets.all(16.0),
+                      child: Text('Forward to...',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold))),
+                  const Divider(color: Colors.white10),
+                  Expanded(
+                    child: friends.isEmpty
+                        ? const Center(
+                            child: Text("Follow people to forward messages",
+                                style: TextStyle(color: Colors.white54)))
+                        : ListView.builder(
+                            controller: scrollController,
+                            itemCount: friends.length,
+                            itemBuilder: (context, index) {
+                              final friend = friends[index];
+                              final isSelected =
+                                  selectedFriends.contains(friend['id']);
+                              return ListTile(
+                                leading: CircleAvatar(
+                                    backgroundImage:
+                                        friend['avatar_url'] != null
+                                            ? NetworkImage(friend['avatar_url'])
+                                            : null),
+                                title: Text(friend['username'] ?? 'User',
+                                    style:
+                                        const TextStyle(color: Colors.white)),
+                                trailing: Checkbox(
+                                    value: isSelected,
+                                    activeColor: const Color(0xFF4CAF50),
+                                    onChanged: (v) => setModalState(() {
+                                          v == true
+                                              ? selectedFriends
+                                                  .add(friend['id'])
+                                              : selectedFriends
+                                                  .remove(friend['id']);
+                                        })),
+                                onTap: () => setModalState(() {
+                                  isSelected
+                                      ? selectedFriends.remove(friend['id'])
+                                      : selectedFriends.add(friend['id']);
+                                }),
+                              );
+                            },
+                          ),
+                  ),
+                  if (selectedFriends.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF4CAF50),
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12))),
+                          onPressed: isSending
+                              ? null
+                              : () async {
+                                  setModalState(() => isSending = true);
+                                  for (String friendId in selectedFriends) {
+                                    final response = await supabase.rpc(
+                                        'get_or_create_personal_chat',
+                                        params: {
+                                          'user_a': myId,
+                                          'user_b': friendId
+                                        });
+                                    ChatSyncService.instance.enqueueMessage({
+                                      'chat_id': response.toString(),
+                                      'sender_id': myId,
+                                      'content': message['content'] ?? '',
+                                      'media_type':
+                                          message['media_type'] ?? 'text',
+                                      'media_url': message['media_url'],
+                                    });
+                                  }
+                                  if (mounted) {
+                                    Navigator.pop(ctx);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                            content: Text('Forwarded!'),
+                                            backgroundColor: Colors.green));
+                                  }
+                                },
+                          child: isSending
+                              ? const CircularProgressIndicator(
+                                  color: Colors.black)
+                              : const Text('Send',
+                                  style: TextStyle(
+                                      color: Colors.black,
+                                      fontWeight: FontWeight.bold)),
+                        ),
+                      ),
+                    )
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // --- NEW UI HELPER FOR HORIZONTAL COLORFUL BARS (COMPACT VERSION) ---
+
+  Future<void> _pickAndUploadAudioFile() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.audio,
+        withData: kIsWeb,
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final file = result.files.first;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Sending Audio...')));
+
+      final ext = file.extension ?? 'mp3';
+      final fileName =
+          '${DateTime.now().millisecondsSinceEpoch}_${file.name.hashCode}.$ext';
+      final path = 'chat_media/${widget.chatId}/$fileName';
+
+      if (kIsWeb) {
+        await supabase.storage
+            .from('chat_media')
+            .uploadBinary(path, file.bytes!);
+      } else {
+        await supabase.storage
+            .from('chat_media')
+            .upload(path, File(file.path!));
+      }
+
+      final publicUrl = supabase.storage.from('chat_media').getPublicUrl(path);
+      final myId = supabase.auth.currentUser?.id;
+      if (myId == null) return;
+
+      ChatSyncService.instance.enqueueMessage({
+        'chat_id': widget.chatId,
+        'sender_id': myId,
+        'content': file.name,
+        'media_type': 'audio',
+        'media_url': publicUrl,
+        'file_size_bytes': file.size,
+      });
+    } catch (e) {
+      debugPrint("Audio upload error: $e");
+    }
+  }
+
+  void _showExtendedEmojiGrid(Map<String, dynamic> message) {
+    final extendedEmojis = [
+      '❤️',
+      '😂',
+      '😮',
+      '😢',
+      '🙏',
+      '👏',
+      '🔥',
+      '💯',
+      '😍',
+      '😒',
+      '😎',
+      '😡',
+      '👍',
+      '👎',
+      '🎉',
+      '💩',
+      '💀',
+      '👀',
+      '🥺',
+      '🤯',
+      '🥰',
+      '🤔',
+      '🥶',
+      '🤬',
+      '😈',
+      '👻',
+      '👽',
+      '🥳',
+      '🤮',
+      '🤡',
+      '🤌',
+      '💪',
+      '🤝',
+      '🙌',
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: GridView.builder(
+          shrinkWrap: true,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 6, crossAxisSpacing: 10, mainAxisSpacing: 10),
+          itemCount: extendedEmojis.length,
+          itemBuilder: (context, index) {
+            final emoji = extendedEmojis[index];
+            return GestureDetector(
+              onTap: () async {
+                Navigator.pop(ctx);
+                final newReaction =
+                    message['reactions'] == emoji ? null : emoji;
+                try {
+                  await supabase.from('messages').update(
+                      {'reactions': newReaction}).eq('id', message['id']);
+                } catch (e) {
+                  debugPrint('Reaction error: $e');
+                }
+              },
+              child: Center(
+                  child: Text(emoji, style: const TextStyle(fontSize: 32))),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+// --- NEW: one colorful "add to chat" tile, styled like your activity tag pill, scaled up ---
+
   // --- NEW: FILE UPLOADER (Memory Optimized) ---
   Future<void> _pickAndUploadFile() async {
     try {
@@ -3625,9 +3675,50 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
 
       if (pickedFile == null) return;
 
+      String finalPickedPath = pickedFile.path;
+
+      if (type == 'video' && !kIsWeb) {
+        final pickedSize = await File(finalPickedPath).length();
+        const warnAtBytes = 80 * 1024 * 1024;
+        if (pickedSize > warnAtBytes && mounted) {
+          final sizeMb = (pickedSize / (1024 * 1024)).toStringAsFixed(0);
+          final shouldTrim = await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: Colors.grey[900],
+              title: const Text('Large video',
+                  style: TextStyle(color: Colors.white)),
+              content: Text(
+                  'This video is ${sizeMb}MB. On a lot of phones that\'s enough to crash mid-upload. Trim it down first?',
+                  style: const TextStyle(color: Colors.white70)),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Send anyway',
+                        style: TextStyle(color: Colors.white54))),
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Trim it',
+                        style: TextStyle(
+                            color: Color(0xFF4CAF50),
+                            fontWeight: FontWeight.bold))),
+              ],
+            ),
+          );
+          if (shouldTrim == true) {
+            final trimmedPath = await Navigator.push<String?>(
+                context,
+                MaterialPageRoute(
+                    builder: (context) =>
+                        VideoTrimmerScreen(file: File(finalPickedPath))));
+            if (trimmedPath != null) finalPickedPath = trimmedPath;
+          }
+        }
+      }
+
       final captionController = TextEditingController();
-      XFile currentFile = pickedFile;
-      bool isViewOnce = false; // 🔥 NEW: View Once State
+      XFile currentFile = XFile(finalPickedPath);
+      bool isViewOnce = false;
 
       final shouldSend = await showDialog<bool>(
         context: context,
@@ -3815,52 +3906,6 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
       debugPrint("Media error: $e");
     }
   }
-
-  Widget _plusTile(IconData icon, String title) => ListTile(
-        leading: Icon(icon, color: const Color(0xFF4CAF50)),
-        title: Text(title, style: const TextStyle(color: Colors.white)),
-        onTap: () => Navigator.pop(context),
-      );
-
-  void _showChatMenu() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.grey[900],
-      builder: (ctx) => FutureBuilder<SharedPreferences>(
-          future: SharedPreferences.getInstance(),
-          builder: (context, snapshot) {
-            final prefs = snapshot.data;
-            final readReceipts = prefs?.getBool('read_receipts') ?? true;
-
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _plusTile(Icons.group_add, "Create Group with User"),
-                _plusTile(Icons.block, "Block User"),
-                _plusTile(Icons.archive, "Archive User"),
-                StatefulBuilder(
-                  builder: (context, setModalState) => ListTile(
-                    leading: Icon(
-                        readReceipts ? Icons.visibility : Icons.visibility_off,
-                        color: const Color(0xFF4CAF50)),
-                    title: const Text('Send Read Receipts (Blue Ticks)',
-                        style: TextStyle(color: Colors.white)),
-                    trailing: Switch(
-                      value: readReceipts,
-                      activeColor: const Color(0xFF4CAF50),
-                      onChanged: (val) {
-                        prefs?.setBool('read_receipts', val);
-                        setModalState(() {});
-                      },
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-              ],
-            );
-          }),
-    );
-  }
 }
 
 class CachedLinkify extends StatefulWidget {
@@ -3997,14 +4042,22 @@ class AudioPlayerService {
       _currentUrl = url;
       _urlController.add(url);
       try {
-        await _player.setUrl(url);
+        // 🔥 THE FIX: this had no timeout. A stalled connection could hang
+        // here indefinitely, and nothing after it — including the two
+        // lines that turn the spinner off — ever ran. Matches exactly
+        // what you saw, and exactly why it correlated with bad network.
+        await _player.setUrl(url).timeout(const Duration(seconds: 15));
         _isLoaded = true;
         await _player.play();
       } catch (e) {
         debugPrint("Audio load error: $e");
+        _isLoaded = false;
+      } finally {
+        // finally, not "after the try" — this now runs on timeout too,
+        // so the spinner always resolves one way or the other.
+        _isLoading = false;
+        _loadingController.add(false);
       }
-      _isLoading = false;
-      _loadingController.add(false);
     }
   }
 
@@ -4328,9 +4381,9 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
 
   @override
   Widget build(BuildContext context) {
-    // Show active state only if this is the currently playing URL
     final bool isActive = _service.currentUrl == widget.url;
     final bool showPlaying = isActive ? _isPlaying : false;
+    final bool canShowSlider = isActive && _isLoaded;
 
     return Container(
       constraints: const BoxConstraints(minWidth: 230),
@@ -4353,47 +4406,74 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
                                     ? Colors.black
                                     : widget.themeColor,
                                 strokeWidth: 2)))
-                    : Icon(
-                        !_isDownloaded
-                            ? Icons.download_for_offline
-                            : (showPlaying
-                                ? Icons.pause_circle_filled
-                                : Icons.play_circle_fill),
-                        color: widget.isMe ? Colors.black87 : widget.themeColor,
-                        size: 38),
+                    : Stack(
+                        children: [
+                          if (!_isDownloaded && widget.url.startsWith('http'))
+                            SizedBox(
+                              width: 38,
+                              height: 38,
+                              child: CircularProgressIndicator(
+                                color: widget.isMe
+                                    ? Colors.black38
+                                    : widget.themeColor.withOpacity(0.4),
+                                strokeWidth: 2,
+                              ),
+                            ),
+                          Icon(
+                            !_isDownloaded && widget.url.startsWith('http')
+                                ? Icons.download_for_offline
+                                : (showPlaying
+                                    ? Icons.pause_circle_filled
+                                    : Icons.play_circle_fill),
+                            color: widget.isMe
+                                ? Colors.black87
+                                : widget.themeColor,
+                            size: 38,
+                          ),
+                        ],
+                      ),
               ),
               const SizedBox(width: 8),
               Expanded(
-                child: SliderTheme(
-                  data: SliderThemeData(
-                    trackHeight: 3,
-                    thumbShape:
-                        const RoundSliderThumbShape(enabledThumbRadius: 6),
-                    overlayShape:
-                        const RoundSliderOverlayShape(overlayRadius: 10),
-                    activeTrackColor:
-                        widget.isMe ? Colors.black87 : widget.themeColor,
-                    inactiveTrackColor:
-                        widget.isMe ? Colors.black26 : Colors.white24,
-                    thumbColor: widget.isMe ? Colors.black : widget.themeColor,
-                  ),
-                  child: Slider(
-                    min: 0,
-                    max: _duration.inMilliseconds > 0
-                        ? _duration.inMilliseconds.toDouble()
-                        : 1.0,
-                    value: _position.inMilliseconds.toDouble().clamp(
-                        0.0,
-                        _duration.inMilliseconds > 0
-                            ? _duration.inMilliseconds.toDouble()
-                            : 1.0),
-                    onChanged: (val) {
-                      if (_isLoaded && isActive) {
-                        _service.seek(Duration(milliseconds: val.toInt()));
-                      }
-                    },
-                  ),
-                ),
+                child: canShowSlider
+                    ? SliderTheme(
+                        data: SliderThemeData(
+                          trackHeight: 3,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6),
+                          overlayShape:
+                              const RoundSliderOverlayShape(overlayRadius: 10),
+                          activeTrackColor:
+                              widget.isMe ? Colors.black87 : widget.themeColor,
+                          inactiveTrackColor:
+                              widget.isMe ? Colors.black26 : Colors.white24,
+                          thumbColor:
+                              widget.isMe ? Colors.black : widget.themeColor,
+                        ),
+                        child: Slider(
+                          min: 0,
+                          max: _duration.inMilliseconds.toDouble(),
+                          value: _position.inMilliseconds
+                              .toDouble()
+                              .clamp(0.0, _duration.inMilliseconds.toDouble()),
+                          onChanged: (val) {
+                            _service.seek(Duration(milliseconds: val.toInt()));
+                          },
+                        ),
+                      )
+                    : SizedBox(
+                        height: 20,
+                        child: LinearProgressIndicator(
+                          backgroundColor: widget.isMe
+                              ? Colors.black.withOpacity(0.1)
+                              : Colors.white10,
+                          valueColor: AlwaysStoppedAnimation(
+                            widget.isMe
+                                ? Colors.black38
+                                : widget.themeColor.withOpacity(0.4),
+                          ),
+                        ),
+                      ),
               ),
               CircleAvatar(
                 radius: 16,
@@ -4412,10 +4492,11 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
               Padding(
                 padding: const EdgeInsets.only(left: 48),
                 child: Text(
-                    isActive && _isLoaded
-                        ? _formatDuration(
-                            _position.inSeconds > 0 ? _position : _duration)
-                        : "Voice Note",
+                    canShowSlider
+                        ? _formatDuration(_position)
+                        : (_isLoaded
+                            ? _formatDuration(_duration)
+                            : "Voice Note"),
                     style: TextStyle(
                         color: widget.isMe ? Colors.black54 : Colors.white60,
                         fontSize: 11)),

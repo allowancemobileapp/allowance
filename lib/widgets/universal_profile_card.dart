@@ -1,12 +1,14 @@
 // lib/widgets/universal_profile_card.dart
 import 'package:allowance/models/user_preferences.dart';
 import 'package:allowance/screens/chat/individual_chat_screen.dart';
+import 'package:allowance/screens/home/moment_viewer_screen.dart';
 import 'package:allowance/screens/home/story_viewer_screen.dart';
-import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:allowance/services/subscription_service.dart'; // New Import
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_player/video_player.dart';
 
 class UniversalProfileCard extends StatefulWidget {
   final String targetUserId;
@@ -52,6 +54,8 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
   bool _isSubscribedToAlerts = false; // <-- NEW
   int _totalMomentsCount = 0; // Renamed from _totalMemoriesCount
   List<dynamic> _moments = []; // Renamed from _memories
+  bool _isLoadingMoreMoments = false;
+  bool _hasMoreMoments = true;
 
   @override
   void initState() {
@@ -88,6 +92,38 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
       debugPrint("Profile load error: $e");
       if (mounted) setState(() => _isLoading = false);
     });
+  }
+
+  Future<void> _loadMoreMoments() async {
+    if (_isLoadingMoreMoments || !_hasMoreMoments) return;
+    setState(() => _isLoadingMoreMoments = true);
+
+    try {
+      final res = await supabase
+          .from('moments')
+          .select(
+              'id, user_id, media_url, media_type, category, created_at, likes_count, comments_count, profiles:user_id(username, avatar_url, school_name)')
+          .eq('user_id', widget.targetUserId)
+          .order('created_at', ascending: false)
+          .range(_moments.length, _moments.length + 14);
+
+      if (res.isEmpty) {
+        if (mounted)
+          setState(() {
+            _hasMoreMoments = false;
+            _isLoadingMoreMoments = false;
+          });
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _moments.addAll(res);
+          _isLoadingMoreMoments = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _isLoadingMoreMoments = false);
+    }
   }
 
   // --- NEW: FETCH HEAVY DATA IN THE BACKGROUND ---
@@ -369,13 +405,92 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     }
   }
 
+  Widget _buildActionButtons() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        _buildCircleButton(
+          icon: _isFollowing ? Icons.check : Icons.person_add_alt_1,
+          label: _isFollowing ? 'Following' : 'Follow',
+          bgColor: _isFollowing ? const Color(0xFF1E1E1E) : themeColor,
+          iconColor: Colors.white,
+          onTap: _toggleFollow,
+        ),
+        _buildCircleButton(
+            icon: Icons.ios_share,
+            label: 'Share',
+            bgColor: const Color(0xFF1E1E1E),
+            iconColor: Colors.white,
+            onTap: () => Share.share(
+                'Check out @${_profile!['username']} on Allowance!')),
+        _buildCircleButton(
+            icon: Icons.chat_bubble_outline,
+            label: 'Message',
+            bgColor: Colors.white,
+            iconColor: const Color(0xFF121212),
+            onTap: () async {
+              final currentUserId = supabase.auth.currentUser?.id;
+              if (currentUserId == null) return;
+              try {
+                final response = await supabase
+                    .rpc('get_or_create_personal_chat', params: {
+                  'user_a': currentUserId,
+                  'user_b': widget.targetUserId
+                });
+                if (response != null && mounted) {
+                  Navigator.pop(context);
+                  Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => IndividualChatScreen(
+                              chatId: response.toString(),
+                              recipientProfile: _profile!,
+                              userPreferences: widget.userPreferences)));
+                }
+              } catch (e) {
+                debugPrint("Navigation Error: $e");
+              }
+            }),
+      ],
+    );
+  }
+
+  Widget _buildCircleButton(
+      {required IconData icon,
+      required String label,
+      required Color bgColor,
+      required Color iconColor,
+      required VoidCallback onTap}) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: bgColor, shape: BoxShape.circle),
+              child: Icon(icon, color: iconColor, size: 24),
+            ),
+            const SizedBox(height: 8),
+            Text(label,
+                style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
       return _buildShell(const Center(
           child: CircularProgressIndicator(color: Color(0xFF4CAF50))));
     }
-
     if (_profile == null) {
       return _buildShell(const Center(
           child:
@@ -386,60 +501,131 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     final isMe = supabase.auth.currentUser?.id == widget.targetUserId;
     final canSeeContent = !isPrivate || _isFollowing || isMe;
 
-    return _buildShell(
-      ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 24),
-        children: [
-          Row(
-            children: [
-              _buildAvatar(),
-              const SizedBox(width: 20),
-              Expanded(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _buildStatColumn('Followers', _followerCount.toString(),
-                        () => _showUserList('Followers', true)),
-                    _buildStatColumn('Following', _followingCount.toString(),
-                        () => _showUserList('Following', false)),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          _buildProfileInfo(isPrivate),
-          const SizedBox(height: 20),
-          if (!isMe) _buildActionButtons(),
-          const SizedBox(height: 24),
-          const Divider(color: Colors.white10),
-          const SizedBox(height: 12),
-          // FIX: Updated reference name
-          Text('Moments ($_totalMomentsCount)',
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold)),
-          const SizedBox(height: 16),
+    // Cast the moments safely for the SliverGrid
+    final typedMoments = List<Map<String, dynamic>>.from(_moments);
 
-          if (canSeeContent)
-            // FIX: Updated reference name
-            _buildMemoriesGrid(_moments)
-          else
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 40),
-              child: Column(
-                children: [
-                  Icon(Icons.lock_outline, color: Colors.white24, size: 50),
-                  SizedBox(height: 12),
-                  Text("This account is private",
-                      style: TextStyle(color: Colors.white70)),
-                  Text("Follow to see their moments",
-                      style: TextStyle(color: Colors.white38, fontSize: 12)),
-                ],
+    return _buildShell(
+      NotificationListener<ScrollNotification>(
+        onNotification: (ScrollNotification scrollInfo) {
+          if (scrollInfo.metrics.pixels >=
+              scrollInfo.metrics.maxScrollExtent - 200) {
+            _loadMoreMoments();
+          }
+          return false;
+        },
+        // 🔥 CHANGED TO CUSTOM SCROLL VIEW: This completely fixes the memory crash
+        // by lazily rendering only the grid items visible on the screen!
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              sliver: SliverList(
+                delegate: SliverChildListDelegate([
+                  Row(
+                    children: [
+                      _buildAvatar(),
+                      const SizedBox(width: 20),
+                      Expanded(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            _buildStatColumn(
+                                'Followers',
+                                _followerCount.toString(),
+                                () => _showUserList('Followers', true)),
+                            _buildStatColumn(
+                                'Following',
+                                _followingCount.toString(),
+                                () => _showUserList('Following', false)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  _buildProfileInfo(isPrivate),
+                  const SizedBox(height: 24),
+                  if (!isMe) _buildActionButtons(),
+                  const SizedBox(height: 24),
+                  const Divider(color: Colors.white10),
+                  const SizedBox(height: 12),
+                  Text('Moments ($_totalMomentsCount)',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 16),
+                ]),
               ),
             ),
-        ],
+
+            // --- THE SLIVER GRID ---
+            if (canSeeContent) ...[
+              if (typedMoments.isEmpty)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.only(top: 20, bottom: 40),
+                    child: Center(
+                      child: Text("No moments yet",
+                          style: TextStyle(color: Colors.white38)),
+                    ),
+                  ),
+                )
+              else
+                SliverPadding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  sliver: SliverGrid(
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 2,
+                      mainAxisSpacing: 2,
+                      childAspectRatio: 0.56, // 🔥 TALL RECTANGLES ARE BACK
+                    ),
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                        return UniversalMomentGridItem(
+                          moments: typedMoments,
+                          index: index,
+                          userPreferences: widget.userPreferences,
+                        );
+                      },
+                      childCount: typedMoments.length,
+                    ),
+                  ),
+                ),
+              if (_isLoadingMoreMoments)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.all(20),
+                    child: Center(
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF4CAF50))),
+                  ),
+                ),
+            ] else
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 40),
+                  child: Column(
+                    children: const [
+                      Icon(Icons.lock_outline, color: Colors.white24, size: 50),
+                      SizedBox(height: 12),
+                      Text("This account is private",
+                          style: TextStyle(color: Colors.white70)),
+                      Text("Follow to see their moments",
+                          style:
+                              TextStyle(color: Colors.white38, fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ),
+
+            const SliverToBoxAdapter(
+                child: SizedBox(height: 40)), // Bottom spacing
+          ],
+        ),
       ),
     );
   }
@@ -587,119 +773,6 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
     );
   }
 
-  Widget _buildActionButtons() {
-    return Row(
-      children: [
-        Expanded(
-          child: ElevatedButton.icon(
-            onPressed: _toggleFollow,
-            icon: Icon(
-              _isFollowing ? Icons.check : Icons.person_add_alt_1,
-              size: 18,
-              color: Colors.white,
-            ),
-            label: Text(_isFollowing ? 'Following' : 'Follow'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: _isFollowing ? Color(0xFF1E1E1E) : themeColor,
-              foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-              padding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: ElevatedButton.icon(
-            onPressed: () async {
-              final navigator = Navigator.of(context);
-              final scaffoldMessenger = ScaffoldMessenger.of(context);
-              final currentUserId = supabase.auth.currentUser?.id;
-
-              if (currentUserId == null) return;
-              try {
-                final response = await supabase.rpc(
-                  'get_or_create_personal_chat',
-                  params: {
-                    'user_a': currentUserId,
-                    'user_b': widget.targetUserId,
-                  },
-                );
-                if (response == null) throw "Could not initialize chat.";
-
-                final String chatId = response.toString();
-                if (chatId != "null" && chatId.isNotEmpty) {
-                  navigator.pop();
-                  navigator.push(
-                    MaterialPageRoute(
-                      builder: (_) => IndividualChatScreen(
-                        chatId: chatId,
-                        recipientProfile: _profile!,
-                        userPreferences: widget.userPreferences,
-                      ),
-                    ),
-                  );
-                }
-              } catch (e) {
-                debugPrint("Navigation Error: $e");
-                scaffoldMessenger.showSnackBar(
-                  SnackBar(content: Text("Error: ${e.toString()}")),
-                );
-              }
-            },
-            icon: const Icon(Icons.chat_bubble_outline,
-                size: 18, color: Color(0xFF121212)),
-            label: const Text('Message'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.white,
-              foregroundColor: Color(0xFF121212),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-              padding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // Update your grid builder method
-  // Replace your current _buildMemoriesGrid method with this updated one:
-  Widget _buildMemoriesGrid(List<dynamic> moments) {
-    // Renamed parameter
-    if (moments.isEmpty) {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.only(top: 20),
-          child: Text("No moments yet",
-              style: TextStyle(color: Colors.white38)), // Updated string
-        ),
-      );
-    }
-
-    final List<Map<String, dynamic>> typedMoments =
-        List<Map<String, dynamic>>.from(moments);
-
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 2,
-        mainAxisSpacing: 2,
-        childAspectRatio: 0.56,
-      ),
-      itemCount: typedMoments.length,
-      itemBuilder: (context, index) {
-        return MomentGridItem(
-          // Using the MomentGridItem from step 2
-          moments: typedMoments,
-          index: index,
-        );
-      },
-    );
-  }
-
   Widget _buildStatColumn(String label, String count, VoidCallback onTap) {
     return GestureDetector(
       onTap: onTap,
@@ -714,6 +787,157 @@ class _UniversalProfileCardState extends State<UniversalProfileCard> {
           Text(label,
               style: const TextStyle(color: Colors.white54, fontSize: 14)),
         ],
+      ),
+    );
+  }
+}
+
+// --- LIGHTWEIGHT GRID ITEM WITH STAGGERED VIDEO THUMBNAILS & HARDWARE LEAK PROTECTION ---
+class UniversalMomentGridItem extends StatefulWidget {
+  final List<Map<String, dynamic>> moments;
+  final int index;
+  final UserPreferences userPreferences;
+
+  const UniversalMomentGridItem({
+    super.key,
+    required this.moments,
+    required this.index,
+    required this.userPreferences,
+  });
+
+  @override
+  State<UniversalMomentGridItem> createState() =>
+      _UniversalMomentGridItemState();
+}
+
+class _UniversalMomentGridItemState extends State<UniversalMomentGridItem> {
+  VideoPlayerController? _videoController;
+  bool _isVideo = false;
+  late Map<String, dynamic> moment;
+  bool _countedActive = false;
+  bool _isDisposed = false; // 🔥 Strict lifecycle management flag
+
+  static int _activeMomentVideoInits = 0;
+  static const int _maxConcurrentMomentVideos =
+      2; // Keep it low to protect hardware
+
+  @override
+  void initState() {
+    super.initState();
+    moment = widget.moments[widget.index];
+    _isVideo = moment['media_type'] == 'video';
+
+    if (_isVideo) {
+      final url = moment['media_url'] ?? '';
+      if (url.isNotEmpty) {
+        _videoController = VideoPlayerController.networkUrl(Uri.parse(url));
+        _tryInitVideo();
+      }
+    }
+  }
+
+  void _tryInitVideo() {
+    // 🔥 Stop instantly if scrolled off screen
+    if (_isDisposed || !mounted || _videoController == null) return;
+
+    if (_activeMomentVideoInits >= _maxConcurrentMomentVideos) {
+      Future.delayed(const Duration(milliseconds: 200), () {
+        if (mounted && !_isDisposed) _tryInitVideo();
+      });
+      return;
+    }
+
+    _countedActive = true;
+    _activeMomentVideoInits++;
+
+    _videoController!
+        .initialize()
+        .then((_) {
+          if (mounted && !_isDisposed) setState(() {});
+        })
+        .catchError((_) {})
+        .whenComplete(() {
+          if (_countedActive) {
+            _countedActive = false;
+            _activeMomentVideoInits--;
+          }
+        });
+  }
+
+  @override
+  void dispose() {
+    _isDisposed = true; // 🔥 Instantly lock out any pending delays
+    if (_countedActive) {
+      _countedActive = false;
+      _activeMomentVideoInits--;
+    }
+    // 🔥 Safely destroy the native decoder to free RAM & hardware slots
+    _videoController?.dispose();
+    _videoController = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => MomentViewerScreen(
+              moments: widget.moments,
+              initialIndex: widget.index,
+              userPreferences: widget.userPreferences,
+            ),
+          ),
+        );
+      },
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // 1. VIDEO THUMBNAIL (First frame)
+            if (_isVideo)
+              _videoController != null && _videoController!.value.isInitialized
+                  ? FittedBox(
+                      fit: BoxFit.cover,
+                      child: SizedBox(
+                        width: _videoController!.value.size.width,
+                        height: _videoController!.value.size.height,
+                        child: IgnorePointer(
+                          child: VideoPlayer(_videoController!),
+                        ),
+                      ),
+                    )
+                  : Container(color: const Color(0xFF1E1E1E))
+
+            // 2. IMAGE
+            else
+              CachedNetworkImage(
+                imageUrl: moment['media_url'] ?? '',
+                fit: BoxFit.cover,
+                memCacheWidth: 250, // 🔥 Heavy RAM compression for images
+                placeholder: (context, url) =>
+                    Container(color: const Color(0xFF1E1E1E)),
+                errorWidget: (context, url, error) => Container(
+                  color: const Color(0xFF1E1E1E),
+                  child: const Icon(Icons.broken_image, color: Colors.white10),
+                ),
+              ),
+
+            // 3. VIDEO PLAY ICON
+            if (_isVideo)
+              Container(
+                color: Colors.black.withOpacity(0.15),
+                child: const Center(
+                  child: Icon(Icons.play_circle_fill,
+                      color: Colors.white, size: 36),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

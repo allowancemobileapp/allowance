@@ -39,6 +39,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   Set<String> _followingIds = {};
   List<Map<String, dynamic>> _allParticipants = [];
   List<Map<String, dynamic>> _unreadMessages = [];
+  List<Object> _myChatIds = []; // ← ADD THIS
 
   bool _isLoading = true;
   String? _myId;
@@ -140,7 +141,13 @@ class _ChatListScreenState extends State<ChatListScreen>
         .eq('is_read', false)
         .listen((msgs) {
           if (!mounted || _isDisposed) return;
-          setState(() => _unreadMessages = msgs);
+          setState(() {
+            _unreadMessages = msgs
+                .where((m) =>
+                    m['sender_id']?.toString() != _myId &&
+                    _myChatIds.contains(m['chat_id']))
+                .toList();
+          });
         });
 
     // 3. Real-time Followers Stream
@@ -169,14 +176,16 @@ class _ChatListScreenState extends State<ChatListScreen>
         .listen((records) {
           if (!mounted || _isDisposed) return;
 
-          final myChatIds = records.map((p) => p['chat_id'] as Object).toList();
-          if (myChatIds.isEmpty) return;
+          final newChatIds =
+              records.map((p) => p['chat_id'] as Object).toList();
+          _myChatIds = newChatIds; // ← ADD THIS
+          if (newChatIds.isEmpty) return;
 
           _chatsSub?.cancel();
           _chatsSub = supabase
               .from('chats')
               .stream(primaryKey: ['id'])
-              .inFilter('id', myChatIds)
+              .inFilter('id', newChatIds)
               .listen((chats) {
                 if (!mounted || _isDisposed) return;
                 setState(() => _chats = chats);
@@ -186,7 +195,7 @@ class _ChatListScreenState extends State<ChatListScreen>
           _allParticipantsSub = supabase
               .from('chat_participants')
               .stream(primaryKey: ['chat_id', 'user_id'])
-              .inFilter('chat_id', myChatIds)
+              .inFilter('chat_id', newChatIds)
               .listen((parts) {
                 if (!mounted || _isDisposed) return;
                 setState(() => _allParticipants = parts);
@@ -219,11 +228,13 @@ class _ChatListScreenState extends State<ChatListScreen>
             .from('followers')
             .select('following_id')
             .eq('follower_id', myId),
+        // ↓↓↓ THIS IS THE FIX ↓↓↓
         supabase
             .from('messages')
             .select()
             .eq('is_read', false)
-            .neq('sender_id', myId),
+            .neq('sender_id', myId)
+            .inFilter('chat_id', myChatIds),
       ]);
 
       if (mounted && !_isDisposed) {
@@ -233,11 +244,8 @@ class _ChatListScreenState extends State<ChatListScreen>
           _followingIds = (futures[2] as List)
               .map((f) => f['following_id'].toString())
               .toSet();
-
-          final allUnread = List<Map<String, dynamic>>.from(futures[3]);
-          _unreadMessages =
-              allUnread.where((m) => myChatIds.contains(m['chat_id'])).toList();
-
+          // ↓↓↓ REMOVE the client-side filter now — server already filtered ↓↓↓
+          _unreadMessages = List<Map<String, dynamic>>.from(futures[3]);
           _isLoading = false;
         });
       }

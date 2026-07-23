@@ -33,7 +33,7 @@ class MomentViewerScreen extends StatefulWidget {
 class _MomentViewerScreenState extends State<MomentViewerScreen> {
   late PageController _pageController;
   late int _currentIndex;
-  bool _globalMomentMuted = true; // Starts muted by default
+// Starts muted by default
 
   @override
   void initState() {
@@ -97,7 +97,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
   bool _isLiked = false;
   int _likesCount = 0;
   int _commentsCount = 0;
-  bool _isMuted = false;
   bool _authorIsPlus = false;
   bool _showHeartOverlay = false;
   bool _globalMomentMuted = false;
@@ -620,7 +619,6 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
         _authorIsPlus || profile['subscription_tier'] == 'Membership';
 
     return GestureDetector(
-      // 🔥 FIX: Ensures taps on the video register to the detector!
       behavior: HitTestBehavior.opaque,
       onDoubleTap: () {
         HapticFeedback.lightImpact();
@@ -667,13 +665,23 @@ class _MomentViewerItemState extends State<MomentViewerItem> {
                                 backgroundColor: Colors.transparent)),
                       ])
                     : const CircularProgressIndicator(color: Color(0xFF4CAF50)))
-                : CachedNetworkImage(
-                    imageUrl: widget.moment['media_url'],
-                    fit: BoxFit.contain,
-                    memCacheWidth: _isHighQuality ? null : 600,
-                    placeholder: (context, url) =>
-                        const CircularProgressIndicator(
-                            color: Color(0xFF4CAF50))),
+                : (widget.moment['media_url']?.toString().isNotEmpty == true)
+                    ? CachedNetworkImage(
+                        imageUrl: widget.moment['media_url'],
+                        fit: BoxFit.contain,
+                        memCacheWidth: _isHighQuality ? null : 600,
+                        placeholder: (context, url) =>
+                            const CircularProgressIndicator(
+                                color: Color(0xFF4CAF50)),
+                        errorWidget: (context, url, error) => const Center(
+                          child: Icon(Icons.broken_image,
+                              color: Colors.white24, size: 60),
+                        ),
+                      )
+                    : const Center(
+                        child: Icon(Icons.image_not_supported,
+                            color: Colors.white24, size: 60),
+                      ),
           ),
           Center(
             child: IgnorePointer(

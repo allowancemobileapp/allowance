@@ -1,4 +1,5 @@
 // lib/screens/home/story_viewer_screen.dart
+import 'package:allowance/screens/chat/group_invite_screen.dart';
 import 'package:allowance/widgets/universal_profile_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
@@ -192,31 +193,29 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
   (int, int) _getCurrentUserStoryRange() {
     final currentStory = _sortedStories[_currentIndex];
-    final currentUserId = currentStory['user_id'] as String?;
+    final currentChatId = currentStory['chat_id'];
+    final currentUserId = currentStory['user_id'];
 
-    if (currentUserId == null) {
-      return (0, _sortedStories.length - 1);
+    int start = _currentIndex;
+    while (start > 0) {
+      final prev = _sortedStories[start - 1];
+      if (currentChatId != null) {
+        if (prev['chat_id'] != currentChatId) break;
+      } else {
+        if (prev['chat_id'] != null || prev['user_id'] != currentUserId) break;
+      }
+      start--;
     }
 
-    // Find first story of this user
-    int start = 0;
-    for (int i = 0; i < _sortedStories.length; i++) {
-      final userId = _sortedStories[i]['user_id'] as String?;
-      if (userId == currentUserId) {
-        start = i;
-        break;
+    int end = _currentIndex;
+    while (end < _sortedStories.length - 1) {
+      final next = _sortedStories[end + 1];
+      if (currentChatId != null) {
+        if (next['chat_id'] != currentChatId) break;
+      } else {
+        if (next['chat_id'] != null || next['user_id'] != currentUserId) break;
       }
-    }
-
-    // Find last story of this user
-    int end = start;
-    for (int i = start; i < _sortedStories.length; i++) {
-      final userId = _sortedStories[i]['user_id'] as String?;
-      if (userId != currentUserId) {
-        end = i - 1;
-        break;
-      }
-      end = i;
+      end++;
     }
 
     return (start, end);
@@ -509,19 +508,16 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             children: [
               const Icon(Icons.lock_rounded, size: 64, color: Colors.amber),
               const SizedBox(height: 16),
-              const Text(
-                'Join Allowance Plus',
-                style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white),
-              ),
+              const Text('Join Allowance Plus',
+                  style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white)),
               const SizedBox(height: 12),
               const Text(
-                'JOIN ALLOWANCE PLUS TO POST STORY GIST AND PASS THE FUN!',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16, color: Colors.white70),
-              ),
+                  'JOIN ALLOWANCE PLUS TO POST STORY GIST AND PASS THE FUN!',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 16, color: Colors.white70)),
               const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
@@ -529,20 +525,16 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                   onPressed: () {
                     Navigator.pop(ctx);
                     Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => SubscriptionScreen(
-                          userPreferences: widget.userPreferences,
-                          themeColor: themeColor,
-                        ),
-                      ),
-                    );
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => SubscriptionScreen(
+                                userPreferences: widget.userPreferences,
+                                themeColor: themeColor)));
                   },
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: themeColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                  ),
+                      backgroundColor: themeColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16)),
                   child: const Text('Subscribe to Allowance Plus',
                       style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
@@ -568,45 +560,36 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       context: context,
       backgroundColor: Colors.black,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (context) => Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              'Reshare this story?',
-              style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white),
-            ),
+            const Text('Reshare this story?',
+                style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white)),
             const SizedBox(height: 8),
-            const Text(
-              'It will appear on your profile as a new story.',
-              style: TextStyle(color: Colors.white70),
-              textAlign: TextAlign.center,
-            ),
+            const Text('It will appear on your profile as a new story.',
+                style: TextStyle(color: Colors.white70),
+                textAlign: TextAlign.center),
             const SizedBox(height: 24),
             Row(
               children: [
                 Expanded(
-                  child: TextButton(
-                    onPressed: () => Navigator.pop(context, false),
-                    child: const Text('Cancel',
-                        style: TextStyle(color: Colors.white70)),
-                  ),
-                ),
+                    child: TextButton(
+                        onPressed: () => Navigator.pop(context, false),
+                        child: const Text('Cancel',
+                            style: TextStyle(color: Colors.white70)))),
                 Expanded(
-                  child: ElevatedButton(
-                    style:
-                        ElevatedButton.styleFrom(backgroundColor: Colors.white),
-                    onPressed: () => Navigator.pop(context, true),
-                    child: const Text('Reshare',
-                        style: TextStyle(color: Colors.black)),
-                  ),
-                ),
+                    child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white),
+                        onPressed: () => Navigator.pop(context, true),
+                        child: const Text('Reshare',
+                            style: TextStyle(color: Colors.black)))),
               ],
             ),
           ],
@@ -617,30 +600,43 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     if (shouldReshare != true) return;
 
     try {
+      String reshareUrl = original['url']?.toString() ?? '';
+
+      // If it isn't already a shared link, we create the special 'reshare://' tag!
+      if (!reshareUrl.startsWith('reshare://') &&
+          !reshareUrl.contains('type=')) {
+        final isGroup = original['chat_id'] != null;
+        final origUser = isGroup
+            ? (original['chats']?['group_name'] ?? 'Group')
+            : (original['profiles']?['username'] ?? 'User');
+        final origAvatar = isGroup
+            ? (original['chats']?['group_avatar'] ?? '')
+            : (original['profiles']?['avatar_url'] ?? '');
+        final origSchool =
+            isGroup ? 'Group' : (original['profiles']?['school_name'] ?? '');
+        final origId = isGroup ? original['chat_id'] : original['user_id'];
+
+        reshareUrl =
+            'reshare://$origId|${Uri.encodeComponent(origUser)}|${Uri.encodeComponent(origAvatar)}|${Uri.encodeComponent(origSchool)}|$isGroup';
+      }
+
       await Supabase.instance.client.from('stories').insert({
         'user_id': user.id,
         'media_url': original['media_url'],
         'media_type': original['media_type'],
         'caption': original['caption'],
-        'url': original['url'],
+        'url': reshareUrl,
       });
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Story reshared successfully!'),
-              backgroundColor: Colors.green),
-        );
-      }
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Story reshared successfully!'),
+            backgroundColor: Colors.green));
     } catch (e) {
-      debugPrint('Reshare error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Could not reshare story'),
-              backgroundColor: Colors.red),
-        );
-      }
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Could not reshare story'),
+            backgroundColor: Colors.red));
     }
   }
 
@@ -668,8 +664,34 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     final currentUser = Supabase.instance.client.auth.currentUser;
     if (currentUser == null) return;
 
-    final storyCreatorId = story['user_id'];
-    if (currentUser.id == storyCreatorId) return;
+    final isGroupStory = story['chat_id'] != null;
+    String? targetUserId;
+
+    if (isGroupStory) {
+      // 🔥 FIX: We fetch the admin IDs directly from the database here because
+      // the initial story fetch might not have included them to save bandwidth!
+      try {
+        final chatData = await Supabase.instance.client
+            .from('chats')
+            .select('story_admin_id, admin_id')
+            .eq('id', story['chat_id'])
+            .maybeSingle();
+
+        if (chatData != null) {
+          targetUserId = chatData['story_admin_id'] ?? chatData['admin_id'];
+        }
+      } catch (e) {
+        debugPrint('Error fetching group admins: $e');
+      }
+    } else {
+      targetUserId = story['user_id'];
+    }
+
+    if (targetUserId == null || currentUser.id == targetUserId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Cannot reply to this story.')));
+      return;
+    }
 
     setState(() => _isSendingReply = true);
     final originalText = text;
@@ -678,7 +700,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
 
     try {
       final String chatId =
-          await _getOrCreateDirectChat(currentUser.id, storyCreatorId);
+          await _getOrCreateDirectChat(currentUser.id, targetUserId);
 
       final String? storyImage = story['media_type'] == 'video'
           ? story['thumbnail_url'] ?? story['media_url']
@@ -692,7 +714,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
       await Supabase.instance.client.from('messages').insert({
         'chat_id': chatId,
         'sender_id': currentUser.id,
-        'content': text,
+        'content': originalText,
         'reply_content': replyPayload,
         'thumbnail_url': storyImage,
       });
@@ -701,16 +723,20 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
         _resumeStory();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Sent ✓', style: TextStyle(color: Colors.white)),
-            backgroundColor: Colors.black87,
-            duration: Duration(seconds: 1),
-          ),
+              content: Text('Sent ✓', style: TextStyle(color: Colors.white)),
+              backgroundColor: Colors.black87,
+              duration: Duration(seconds: 1)),
         );
       }
     } catch (e) {
       debugPrint('Story Reply Error: $e');
+      if (mounted) _replyController.text = originalText;
       if (mounted) {
-        _replyController.text = originalText;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Failed to send reply.'),
+              backgroundColor: Colors.red),
+        );
       }
     } finally {
       if (mounted) setState(() => _isSendingReply = false);
@@ -864,13 +890,29 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
     final story = _sortedStories[_currentIndex];
     final currentUser = Supabase.instance.client.auth.currentUser;
     final isOwnStory = currentUser?.id == story['user_id'];
+
+    // 🔥 THE FIX: Now using our new robust contiguous range tracker
     final (userStart, userEnd) = _getCurrentUserStoryRange();
     final userStoryCount = userEnd - userStart + 1;
     final currentUserPosition = _currentIndex - userStart;
 
-    final bool isPlus = story['profiles']?['subscription_tier'] == 'Membership';
+    final profile = story['profiles'] as Map<String, dynamic>? ?? {};
+    final chatInfo = story['chats'] as Map<String, dynamic>? ?? {};
+    final isGroupStory = story['chat_id'] != null;
+
+    final bool isPlus = profile['subscription_tier'] == 'Membership';
     final bool isSharedGist =
         story['url'] != null && story['url'].toString().contains('type=');
+    final bool isStoryReshare = story['url'] != null &&
+        story['url'].toString().startsWith('reshare://');
+
+    final String? displayAvatarUrl = isGroupStory
+        ? chatInfo['group_avatar'] as String?
+        : profile['avatar_url'] as String?;
+    final String displayName = isGroupStory
+        ? (chatInfo['group_name']?.toString() ?? 'Group')
+        : '@${profile['username'] ?? 'user'}';
+    final String? schoolName = profile['school_name']?.toString();
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -1076,7 +1118,8 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           // 5. EXTERNAL LINK BUTTON
           if (story['url'] != null &&
               story['url'].toString().trim().isNotEmpty &&
-              !isSharedGist)
+              !isSharedGist &&
+              !isStoryReshare)
             Positioned(
               bottom: 140,
               right: 24,
@@ -1107,16 +1150,27 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
               children: [
                 GestureDetector(
                   onTap: () {
-                    UniversalProfileCard.show(
-                        context, story['user_id'], widget.userPreferences);
+                    if (isGroupStory) {
+                      _pauseStory();
+                      Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => GroupInviteScreen(
+                                      chatId: story['chat_id'].toString(),
+                                      userPreferences: widget.userPreferences)))
+                          .then((_) => _resumeStory());
+                    } else {
+                      UniversalProfileCard.show(
+                          context, story['user_id'], widget.userPreferences);
+                    }
                   },
                   behavior: HitTestBehavior.opaque,
                   child: Row(
                     children: [
                       CircleAvatar(
-                          backgroundImage: story['profiles']?['avatar_url'] !=
-                                  null
-                              ? NetworkImage(story['profiles']['avatar_url'])
+                          backgroundImage: (displayAvatarUrl != null &&
+                                  displayAvatarUrl.isNotEmpty)
+                              ? NetworkImage(displayAvatarUrl)
                               : null),
                       const SizedBox(width: 8),
                       Column(
@@ -1124,13 +1178,12 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                         children: [
                           Row(
                             children: [
-                              Text(
-                                  '@${story['profiles']?['username'] ?? 'user'}',
+                              Text(displayName,
                                   style: const TextStyle(
                                       color: Colors.white,
                                       fontWeight: FontWeight.bold,
                                       fontSize: 16)),
-                              if (isPlus) ...[
+                              if (isPlus && !isGroupStory) ...[
                                 const SizedBox(width: 4),
                                 const Icon(Icons.star,
                                     color: Colors.amber, size: 14)
@@ -1139,12 +1192,10 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                           ),
                           Row(
                             children: [
-                              if (story['profiles']?['school_name'] != null &&
-                                  story['profiles']!['school_name']
-                                      .toString()
-                                      .trim()
-                                      .isNotEmpty) ...[
-                                Text(story['profiles']!['school_name'],
+                              if (!isGroupStory &&
+                                  schoolName != null &&
+                                  schoolName.isNotEmpty) ...[
+                                Text(schoolName,
                                     style: TextStyle(
                                         color: Colors.white.withOpacity(0.8),
                                         fontSize: 12)),
@@ -1162,6 +1213,35 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                     ],
                   ),
                 ),
+                if (isGroupStory && !isOwnStory) ...[
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        minimumSize: const Size(60, 26),
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(20))),
+                    onPressed: () {
+                      _pauseStory();
+                      Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => GroupInviteScreen(
+                                      chatId: story['chat_id'].toString(),
+                                      userPreferences: widget.userPreferences)))
+                          .then((_) => _resumeStory());
+                    },
+                    child: Text(
+                        chatInfo['is_premium'] == true
+                            ? 'Gain Access'
+                            : 'Join Group',
+                        style: const TextStyle(
+                            color: Colors.black,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold)),
+                  )
+                ],
                 const Spacer(),
                 if (isOwnStory)
                   IconButton(
@@ -1176,14 +1256,140 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
             ),
           ),
 
-          // 🔥 7. SHARED GIST / MOMENT PREVIEW TAG 🔥
-          if (isSharedGist)
+          // 🔥 7A. STORY RESHARE TAG 🔥
+          if (isStoryReshare)
+            Positioned(
+                top: MediaQuery.paddingOf(context).top + 90,
+                left: 16,
+                child: GestureDetector(
+                    onTap: () {
+                      _pauseStory();
+                      final parts = story['url']
+                          .toString()
+                          .replaceFirst('reshare://', '')
+                          .split('|');
+                      final origId = parts.length > 0 ? parts[0] : '';
+                      final origUser = parts.length > 1
+                          ? Uri.decodeComponent(parts[1])
+                          : 'User';
+                      final origAvatar =
+                          parts.length > 2 ? Uri.decodeComponent(parts[2]) : '';
+                      final origSchool =
+                          parts.length > 3 ? Uri.decodeComponent(parts[3]) : '';
+                      final isGroup =
+                          parts.length > 4 ? parts[4] == 'true' : false;
+
+                      showModalBottomSheet(
+                          context: context,
+                          backgroundColor: Colors.grey[900],
+                          shape: const RoundedRectangleBorder(
+                              borderRadius: BorderRadius.vertical(
+                                  top: Radius.circular(20))),
+                          builder: (ctx) => Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 40,
+                                      backgroundImage: origAvatar.isNotEmpty
+                                          ? NetworkImage(origAvatar)
+                                          : null,
+                                      backgroundColor: Colors.grey[800],
+                                      child: origAvatar.isEmpty
+                                          ? Icon(
+                                              isGroup
+                                                  ? Icons.groups
+                                                  : Icons.person,
+                                              size: 40,
+                                              color: Colors.white54)
+                                          : null,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    const Text('Original Post by',
+                                        style: TextStyle(
+                                            color: Colors.white54,
+                                            fontSize: 12)),
+                                    Text(isGroup ? origUser : '@$origUser',
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 20,
+                                            fontWeight: FontWeight.bold)),
+                                    if (origSchool.isNotEmpty)
+                                      Text(origSchool,
+                                          style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 14)),
+                                    const SizedBox(height: 24),
+                                    SizedBox(
+                                        width: double.infinity,
+                                        child: ElevatedButton(
+                                          style: ElevatedButton.styleFrom(
+                                              backgroundColor:
+                                                  const Color(0xFF4CAF50),
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      vertical: 16),
+                                              shape: RoundedRectangleBorder(
+                                                  borderRadius:
+                                                      BorderRadius.circular(
+                                                          12))),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            if (isGroup) {
+                                              Navigator.push(
+                                                  context,
+                                                  MaterialPageRoute(
+                                                      builder: (_) =>
+                                                          GroupInviteScreen(
+                                                              chatId: origId,
+                                                              userPreferences:
+                                                                  widget
+                                                                      .userPreferences))).then(
+                                                  (_) => _resumeStory());
+                                            } else {
+                                              UniversalProfileCard.show(
+                                                  context,
+                                                  origId,
+                                                  widget.userPreferences);
+                                            }
+                                          },
+                                          child: Text(
+                                              isGroup
+                                                  ? 'View Group'
+                                                  : 'View Profile',
+                                              style: const TextStyle(
+                                                  color: Colors.black,
+                                                  fontWeight: FontWeight.bold)),
+                                        ))
+                                  ]))).then((_) => _resumeStory());
+                    },
+                    child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.65),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.white24)),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.repeat,
+                              color: Colors.white, size: 14),
+                          const SizedBox(width: 6),
+                          Text(
+                              'Reshared from ${Uri.decodeComponent(story['url'].toString().replaceFirst('reshare://', '').split('|')[1])}',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold)),
+                        ]))))
+
+          // 🔥 7B. SHARED GIST / MOMENT PREVIEW TAG 🔥
+          else if (isSharedGist)
             Positioned(
               top: MediaQuery.paddingOf(context).top + 90,
               left: 16,
               child: FutureBuilder<Map<String, dynamic>?>(
-                future: _getCachedSharedItemData(
-                    story['url'].toString()), // 🔥 FIX: Using Cached Future!
+                future: _getCachedSharedItemData(story['url'].toString()),
                 builder: (context, snapshot) {
                   final isMoment =
                       story['url'].toString().contains('type=moment');
@@ -1198,22 +1404,22 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: tagColor.withOpacity(0.5))),
                       child: const SizedBox(
-                        width: 120,
-                        height: 38,
-                        child: Center(
-                            child:
-                                LinearProgressIndicator(color: Colors.white24)),
-                      ),
+                          width: 120,
+                          height: 38,
+                          child: Center(
+                              child: LinearProgressIndicator(
+                                  color: Colors.white24))),
                     );
                   }
 
                   final data = snapshot.data;
-                  final profile =
+                  final sharedProfile =
                       data?['profiles'] as Map<String, dynamic>? ?? {};
 
-                  final originalUser = profile['username'] ?? 'Unknown User';
+                  final originalUser =
+                      sharedProfile['username'] ?? 'Unknown User';
                   final originalSchool =
-                      profile['school_name'] ?? 'Unknown Location';
+                      sharedProfile['school_name'] ?? 'Unknown Location';
 
                   return GestureDetector(
                     onTap: () {
@@ -1221,9 +1427,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                           ?.queryParameters['id'];
                       if (parsedIdStr != null) {
                         _pauseStory();
-                        if (isMoment) {
-                          // Note: If you have a deep link for moment, put it here, else it just pauses
-                        } else {
+                        if (!isMoment) {
                           Navigator.pushNamed(context, '/gist',
                                   arguments: {'id': parsedIdStr})
                               .then((_) => _resumeStory());

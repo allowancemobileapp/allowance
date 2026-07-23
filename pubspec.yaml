@@ -2,7 +2,7 @@ name: allowance
 description: "A new Flutter project."
 publish_to: 'none'
 
-version: 3.0.4+22
+version: 3.0.5+23
 
 environment:
   sdk: ">=3.5.3 <4.0.0"
@@ -18,6 +18,7 @@ dependencies:
   cached_network_image: ^3.3.1
   uuid: ^4.5.0
   url_launcher: ^6.3.2
+  url_strategy: ^0.3.0
   shared_preferences: ^2.3.3
   http: ^1.3.0
   flutter_dotenv: ^5.0.2
@@ -31,6 +32,7 @@ dependencies:
   path: ^1.8.3
   record: ^6.2.0
   just_audio: ^0.9.36
+  web: ^1.1.0
 
   # Firebase
   firebase_core: ^3.12.1

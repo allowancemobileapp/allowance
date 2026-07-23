@@ -3,7 +3,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:allowance/models/user_preferences.dart';
-import 'package:allowance/screens/home/video_trimmer_screen.dart'; // Ensure this exists
+import 'package:allowance/screens/home/video_trimmer_screen.dart';
 import 'package:allowance/screens/profile/profile_screen.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -14,13 +14,13 @@ import 'package:image_picker/image_picker.dart';
 import 'package:video_compress/video_compress.dart';
 
 class MediaEditorScreen extends StatefulWidget {
-  final XFile file;
+  final List<XFile> files; // 🔥 NOW ACCEPTS A LIST FOR CAROUSEL!
   final bool isVideo;
   final UserPreferences userPreferences;
 
   const MediaEditorScreen({
     super.key,
-    required this.file,
+    required this.files,
     required this.isVideo,
     required this.userPreferences,
   });
@@ -31,7 +31,8 @@ class MediaEditorScreen extends StatefulWidget {
 
 class _MediaEditorScreenState extends State<MediaEditorScreen> {
   final TextEditingController _captionController = TextEditingController();
-  late XFile _currentFile;
+  late List<XFile> _currentFiles;
+  int _currentIndex = 0;
   late Color themeColor;
   static bool cancelUploadFlag = false;
   VideoPlayerController? _videoController;
@@ -39,7 +40,7 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   @override
   void initState() {
     super.initState();
-    _currentFile = widget.file;
+    _currentFiles = List.from(widget.files);
     themeColor = Color(widget.userPreferences.themeColorValue);
     _prepareMedia();
   }
@@ -52,16 +53,15 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   }
 
   Future<void> _prepareMedia() async {
-    _videoController?.dispose(); // Clean up old controller if trimming
+    _videoController?.dispose();
 
-    if (widget.isVideo) {
+    if (widget.isVideo && _currentFiles.isNotEmpty) {
       if (kIsWeb) {
-        // Web uses networkUrl for blob data
-        _videoController =
-            VideoPlayerController.networkUrl(Uri.parse(_currentFile.path));
+        _videoController = VideoPlayerController.networkUrl(
+            Uri.parse(_currentFiles.first.path));
       } else {
-        // Mobile uses standard file loader
-        _videoController = VideoPlayerController.file(File(_currentFile.path));
+        _videoController =
+            VideoPlayerController.file(File(_currentFiles.first.path));
       }
 
       await _videoController!.initialize();
@@ -74,16 +74,15 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
   }
 
   // =====================================
-  // EDITING METHODS (Mobile Only)
+  // EDITING METHODS
   // =====================================
   Future<void> _cropImage() async {
-    // 🔥 FIX: Enabled for Web! image_cropper_for_web will handle this safely.
     try {
       final croppedFile = await ImageCropper().cropImage(
-        sourcePath: _currentFile.path,
+        sourcePath: _currentFiles[_currentIndex].path,
         uiSettings: [
           AndroidUiSettings(
-            toolbarTitle: 'Crop Image',
+            toolbarTitle: 'Crop Image ${_currentIndex + 1}',
             toolbarColor: const Color(0xFF121212),
             toolbarWidgetColor: themeColor,
             initAspectRatio: CropAspectRatioPreset.original,
@@ -98,7 +97,9 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
       );
 
       if (croppedFile != null) {
-        setState(() => _currentFile = XFile(croppedFile.path));
+        setState(() {
+          _currentFiles[_currentIndex] = XFile(croppedFile.path);
+        });
         _prepareMedia();
       }
     } catch (e) {
@@ -116,30 +117,29 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
     final String? trimmedPath = await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => VideoTrimmerScreen(file: File(_currentFile.path)),
+        builder: (context) =>
+            VideoTrimmerScreen(file: File(_currentFiles.first.path)),
       ),
     );
 
     if (trimmedPath != null) {
-      setState(() => _currentFile = XFile(trimmedPath));
+      setState(() => _currentFiles[0] = XFile(trimmedPath));
       _prepareMedia();
     }
   }
 
   // =====================================
-  // GLOBAL BACKGROUND POSTING (SMART COMPRESSION)
+  // GLOBAL BACKGROUND POSTING
   // =====================================
-  // --- UPDATED: VIDEO COMPRESSION FAIL-SAFE ---
   void _startBackgroundUpload(String selectedTag) async {
     cancelUploadFlag = false;
     final supabase = Supabase.instance.client;
     final userId = supabase.auth.currentUser!.id;
     final caption = _captionController.text.trim();
     final isVideo = widget.isVideo;
-    final currentPath = _currentFile.path;
 
     ProfileScreen.pendingMomentUpload.value = {
-      'local_path': currentPath,
+      'local_path': _currentFiles.first.path,
       'is_video': isVideo,
       'progress': 0.05
     };
@@ -164,89 +164,98 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
     });
 
     try {
-      final extension = isVideo ? '.mp4' : '.jpg';
-      final baseFileName = '${DateTime.now().millisecondsSinceEpoch}';
-      final fileName = '$baseFileName$extension';
-      final hdFileName = '${baseFileName}_hd$extension';
+      List<String> uploadedUrls = [];
+      String mainUrl = '';
 
-      Uint8List fastBytes;
-      bool uploadHd = false;
+      if (isVideo) {
+        final extension = '.mp4';
+        final baseFileName = '${DateTime.now().millisecondsSinceEpoch}';
+        final fileName = '$baseFileName$extension';
+        final hdFileName = '${baseFileName}_hd$extension';
+        final currentPath = _currentFiles.first.path;
 
-      if (isVideo && !kIsWeb) {
-        try {
-          // 🧠 SMART QUALITY ENGINE FOR MOMENTS
-          final mediaInfo = await VideoCompress.getMediaInfo(currentPath);
-          final int width = mediaInfo.width ?? 0;
-          final int height = mediaInfo.height ?? 0;
-          final int maxRes = width > height ? width : height;
-          final double sizeMb = (mediaInfo.filesize ?? 0) / (1024 * 1024);
+        Uint8List fastBytes;
+        bool uploadHd = false;
 
-          // 1. Skip compression if it's already 720p or lower and under 30MB
-          if (maxRes <= 1280 && sizeMb < 30) {
-            fastBytes = await _currentFile.readAsBytes();
-          } else {
-            // 2. Compress high-res or large files
-            VideoQuality targetQuality =
-                VideoQuality.Res1280x720Quality; // Target 720p Default
+        if (!kIsWeb) {
+          try {
+            final mediaInfo = await VideoCompress.getMediaInfo(currentPath);
+            final int width = mediaInfo.width ?? 0;
+            final int height = mediaInfo.height ?? 0;
+            final int maxRes = width > height ? width : height;
 
-            if (sizeMb > 50) {
-              // 3. Very large files go to 540p to prevent video freezing on the viewer's end (NEVER 360P)
-              targetQuality = VideoQuality.Res960x540Quality;
-            }
-
-            final info = await VideoCompress.compressVideo(
-              currentPath,
-              quality: targetQuality,
-              deleteOrigin: false,
-              includeAudio: true,
-            );
-
-            // FINAL DECISION: 50,000 bytes (50KB) minimum size for a valid video
-            if (info != null &&
-                info.file != null &&
-                info.file!.lengthSync() > 50000) {
-              fastBytes = await info.file!.readAsBytes();
-              uploadHd =
-                  true; // Compression succeeded, let's back up the HD original!
+            // 🧠 STRICTLY NEVER BELOW 720p
+            if (maxRes <= 1280) {
+              // If it's already 720p or lower, DO NOT COMPRESS. Just send as is.
+              fastBytes = await _currentFiles.first.readAsBytes();
+              uploadHd = false;
             } else {
-              throw 'Compression resulted in corrupted file';
+              // High res video (1080p, 4K, etc). Compress to exactly 720p.
+              final info = await VideoCompress.compressVideo(
+                currentPath,
+                quality: VideoQuality.Res1280x720Quality, // ALWAYS 720p
+                deleteOrigin: false,
+                includeAudio: true,
+              );
+
+              if (info != null &&
+                  info.file != null &&
+                  info.file!.lengthSync() > 50000) {
+                fastBytes = await info.file!.readAsBytes();
+                uploadHd = true; // Save the original HD copy too!
+              } else {
+                throw 'Compression corrupted';
+              }
             }
+          } catch (e) {
+            fastBytes = await _currentFiles.first.readAsBytes();
           }
-        } catch (e) {
-          debugPrint("Compression failed, using original video: $e");
-          fastBytes = await _currentFile.readAsBytes();
+        } else {
+          fastBytes = await _currentFiles.first.readAsBytes();
         }
+
+        if (cancelUploadFlag) throw 'Cancelled by user';
+        await supabase.storage.from('memories-bucket').uploadBinary(
+            fileName, fastBytes,
+            fileOptions:
+                const FileOptions(cacheControl: '3600', upsert: false));
+
+        if (uploadHd && !kIsWeb) {
+          final hdBytes = await _currentFiles.first.readAsBytes();
+          supabase.storage
+              .from('memories-bucket')
+              .uploadBinary(hdFileName, hdBytes,
+                  fileOptions:
+                      const FileOptions(cacheControl: '3600', upsert: false))
+              .catchError((_) => null);
+        }
+
+        mainUrl =
+            supabase.storage.from('memories-bucket').getPublicUrl(fileName);
       } else {
-        fastBytes = await _currentFile.readAsBytes();
+        // IMAGE CAROUSEL UPLOAD (Up to 10 images)
+        for (int i = 0; i < _currentFiles.length; i++) {
+          if (cancelUploadFlag) throw 'Cancelled by user';
+          final bytes = await _currentFiles[i].readAsBytes();
+          final fileName = '${DateTime.now().millisecondsSinceEpoch}_$i.jpg';
+
+          await supabase.storage.from('memories-bucket').uploadBinary(
+              fileName, bytes,
+              fileOptions:
+                  const FileOptions(cacheControl: '3600', upsert: false));
+          final url =
+              supabase.storage.from('memories-bucket').getPublicUrl(fileName);
+          uploadedUrls.add(url);
+        }
+        mainUrl = uploadedUrls.first;
       }
-
-      if (cancelUploadFlag) throw 'Cancelled by user';
-
-      // Upload Optimized Fast Version
-      await supabase.storage.from('memories-bucket').uploadBinary(
-          fileName, fastBytes,
-          fileOptions: const FileOptions(cacheControl: '3600', upsert: false));
-
-      // Upload HD copy ONLY if we compressed the main one
-      if (isVideo && uploadHd) {
-        final hdBytes = await _currentFile.readAsBytes();
-        supabase.storage
-            .from('memories-bucket')
-            .uploadBinary(hdFileName, hdBytes,
-                fileOptions:
-                    const FileOptions(cacheControl: '3600', upsert: false))
-            .catchError((error) => null); // Silent error catch
-      }
-
-      if (cancelUploadFlag) throw 'Cancelled by user';
-      final publicUrl =
-          supabase.storage.from('memories-bucket').getPublicUrl(fileName);
 
       await supabase.from('moments').insert({
         'user_id': userId,
-        'media_url': publicUrl,
+        'media_url': mainUrl,
+        'image_urls': uploadedUrls,
         'caption': caption,
-        'category': selectedTag, // <--- ADD THIS LINE
+        'category': selectedTag,
         'media_type': isVideo ? 'video' : 'image',
         'created_at': DateTime.now().toUtc().toIso8601String(),
       });
@@ -278,9 +287,36 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
             )
           : const CircularProgressIndicator(color: Colors.white);
     } else {
-      return kIsWeb
-          ? Image.network(_currentFile.path, fit: BoxFit.contain)
-          : Image.file(File(_currentFile.path), fit: BoxFit.contain);
+      return Stack(
+        children: [
+          PageView.builder(
+            itemCount: _currentFiles.length,
+            onPageChanged: (index) => setState(() => _currentIndex = index),
+            itemBuilder: (context, index) {
+              return kIsWeb
+                  ? Image.network(_currentFiles[index].path,
+                      fit: BoxFit.contain)
+                  : Image.file(File(_currentFiles[index].path),
+                      fit: BoxFit.contain);
+            },
+          ),
+          if (_currentFiles.length > 1)
+            Positioned(
+              top: 16,
+              right: 16,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20)),
+                child: Text("${_currentIndex + 1} / ${_currentFiles.length}",
+                    style: const TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.bold)),
+              ),
+            ),
+        ],
+      );
     }
   }
 
@@ -351,8 +387,6 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
-
-                  // 🔥 THE FIX: The Tag Selector Bottom Sheet
                   GestureDetector(
                     onTap: () {
                       final tags = [
@@ -396,7 +430,6 @@ class _MediaEditorScreenState extends State<MediaEditorScreen> {
                                       color: Colors.white54),
                                   onTap: () {
                                     Navigator.pop(ctx);
-                                    // 🔥 Passes the tag into your updated function!
                                     _startBackgroundUpload(tags[index]);
                                   },
                                 ),

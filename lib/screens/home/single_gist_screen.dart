@@ -434,6 +434,160 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
     );
   }
 
+  Widget _buildTag(String text, Color color) {
+    return Container(
+      margin: const EdgeInsets.only(right: 8, bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+          color: color.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(12)),
+      child: Text(text,
+          style: TextStyle(
+              color: color, fontSize: 11, fontWeight: FontWeight.bold)),
+    );
+  }
+
+  Widget _buildPollInline() {
+    final String question = _gist!['title'] ?? ''; // Now we will use this!
+    List<String> options = [];
+    final rawOptions = _gist!['poll_options'];
+    if (rawOptions != null && rawOptions is List)
+      options = rawOptions.map((e) => e.toString()).toList();
+    if (options.isEmpty) return const SizedBox.shrink();
+
+    final allowMultiple = _gist!['allow_multiple_votes'] == true;
+    final myId = supabase.auth.currentUser?.id;
+
+    return StreamBuilder<List<Map<String, dynamic>>>(
+      stream: supabase
+          .from('poll_votes')
+          .stream(primaryKey: ['id']).eq('gist_id', widget.gistId),
+      builder: (context, snapshot) {
+        final votes = snapshot.data ?? [];
+        final myVotes = votes
+            .where((v) => v['user_id'] == myId)
+            .map((v) => v['option'] as String)
+            .toSet();
+        final totalVoters = votes.map((v) => v['user_id']).toSet().length;
+
+        return Container(
+          margin: const EdgeInsets.only(top: 16),
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+              color: const Color(0xFF1E1E1E),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white10)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                const Icon(Icons.poll, size: 18, color: Colors.purpleAccent),
+                const SizedBox(width: 8),
+                const Text('POLL',
+                    style: TextStyle(
+                        color: Colors.purpleAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.0)),
+              ]),
+              const SizedBox(height: 12),
+
+              // 🔥 FIX: Displaying the question here!
+              Text(question,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 16),
+
+              ...options.map((opt) {
+                final isSelected = myVotes.contains(opt);
+                final optCount = votes.where((v) => v['option'] == opt).length;
+                final percent =
+                    votes.isEmpty ? 0 : (optCount / votes.length * 100).round();
+
+                return GestureDetector(
+                  onTap: () async {
+                    if (myId == null || !_requireAuth()) return;
+                    try {
+                      if (isSelected) {
+                        await supabase.from('poll_votes').delete().match({
+                          'gist_id': widget.gistId,
+                          'user_id': myId,
+                          'option': opt
+                        });
+                      } else {
+                        if (!allowMultiple && myVotes.isNotEmpty) {
+                          await supabase.from('poll_votes').delete().match(
+                              {'gist_id': widget.gistId, 'user_id': myId});
+                        }
+                        await supabase.from('poll_votes').insert({
+                          'gist_id': widget.gistId,
+                          'user_id': myId,
+                          'option': opt
+                        });
+                      }
+                    } catch (e) {
+                      debugPrint('Vote error: $e');
+                    }
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    height: 45,
+                    decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(12)),
+                    child: Stack(
+                      children: [
+                        FractionallySizedBox(
+                          alignment: Alignment.centerLeft,
+                          widthFactor: (percent / 100).clamp(0.0, 1.0),
+                          child: Container(
+                              decoration: BoxDecoration(
+                                  color: const Color(0xFF4CAF50)
+                                      .withOpacity(isSelected ? 0.8 : 0.3),
+                                  borderRadius: BorderRadius.circular(12))),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(
+                            children: [
+                              Icon(
+                                  isSelected
+                                      ? Icons.check_circle
+                                      : Icons.circle_outlined,
+                                  size: 20,
+                                  color: Colors.white),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                  child: Text(opt,
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.bold))),
+                              Text('$percent%',
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+              const SizedBox(height: 8),
+              Text(
+                  '$totalVoters vote${totalVoters == 1 ? '' : 's'}${allowMultiple ? ' • Multiple answers' : ''}',
+                  style: const TextStyle(color: Colors.white54, fontSize: 13)),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading)
@@ -457,11 +611,16 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
     final gistUrl = (_gist!['url'] as String?) ?? '';
     final title = _gist!['title'] ?? '';
     final profile = _gist!['profiles'] ?? {};
+    final isLocal = _gist!['type'] == 'local';
+    final hasPoll = _gist!['has_poll'] == true;
+    final isMoment = _gist!['is_moment'] == true;
+
     final imagesToShow = imageUrls.isNotEmpty
         ? imageUrls
         : (imageUrl.isNotEmpty ? [imageUrl] : []);
+    final myId = supabase.auth.currentUser?.id;
+    final isMe = myId == _gist!['user_id'];
 
-    // 1. Media Widget (Video or Carousel)
     Widget mediaWidget;
     if (mediaType == 'video') {
       mediaWidget = _videoController != null &&
@@ -580,21 +739,63 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
         backgroundColor: Colors.black,
         iconTheme: const IconThemeData(color: Colors.white),
         centerTitle: true,
-        title: Image.asset(
-          'assets/images/gist.png', // <-- FIXED TO gist.png
-          height: 100,
-          fit: BoxFit.contain,
-        ),
+        title: Image.asset('assets/images/gist.png',
+            height: 100, fit: BoxFit.contain),
+        actions: [
+          if (isMe)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              onPressed: () async {
+                final confirm = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    backgroundColor: Colors.grey[900],
+                    title: const Text('Delete Gist?',
+                        style: TextStyle(color: Colors.white)),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(ctx, false),
+                          child: const Text('Cancel')),
+                      TextButton(
+                          onPressed: () => Navigator.pop(ctx, true),
+                          child: const Text('Delete',
+                              style: TextStyle(color: Colors.redAccent))),
+                    ],
+                  ),
+                );
+                if (confirm == true) {
+                  await supabase.from('gists').delete().eq('id', widget.gistId);
+                  if (mounted) Navigator.pop(context);
+                }
+              },
+            ),
+        ],
       ),
       body: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // TAGS ROW
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Wrap(
+                children: [
+                  if (!isMoment)
+                    _buildTag(isLocal ? 'Local' : 'Global', Colors.blueAccent),
+                  if (_gist!['category'] != null &&
+                      _gist!['category'].toString().isNotEmpty)
+                    _buildTag(_gist!['category'], Colors.orangeAccent),
+                  if (hasPoll) _buildTag('Poll', Colors.purpleAccent),
+                  if (isMoment) _buildTag('Moment', Colors.amber),
+                ],
+              ),
+            ),
+
             mediaWidget,
 
-            // --- ACTION BAR ---
+            // ACTION BAR
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 12.0),
+              padding: const EdgeInsets.symmetric(vertical: 16.0),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -608,11 +809,12 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
                               _isLiked ? Icons.favorite : Icons.favorite_border,
                               color: _isLiked ? Colors.red : Colors.white,
                               size: 28),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 6),
                           Text('$_likeCount',
                               style: const TextStyle(
                                   color: Colors.white,
-                                  fontWeight: FontWeight.bold)),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16)),
                         ],
                       ),
                     ),
@@ -630,11 +832,12 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
                         children: [
                           const Icon(CupertinoIcons.chat_bubble,
                               color: Colors.white, size: 26),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 6),
                           Text('$_commentCount',
                               style: const TextStyle(
                                   color: Colors.white,
-                                  fontWeight: FontWeight.bold)),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16)),
                         ],
                       ),
                     ),
@@ -642,43 +845,42 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
                   GestureDetector(
                     onTap: () => _showShipSheet(context),
                     child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 16),
-                      child: Text('🚀', style: TextStyle(fontSize: 22)),
-                    ),
+                        padding: EdgeInsets.symmetric(horizontal: 16),
+                        child: Text('🚀', style: TextStyle(fontSize: 24))),
                   ),
                   GestureDetector(
                     onTap: () {
                       final target = imagesToShow.isNotEmpty
                           ? imagesToShow[_localPageIndex]
                           : imageUrl;
-                      // 🔥 FIX: Pass the mediaType so it knows whether to save as Video or Image
                       if (target.isNotEmpty) _downloadMedia(target, mediaType);
                     },
                     child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 16),
-                      child: Icon(Icons.download_for_offline_outlined,
-                          color: Colors.white, size: 26),
-                    ),
+                        padding: EdgeInsets.symmetric(horizontal: 16),
+                        child: Icon(Icons.download_for_offline_outlined,
+                            color: Colors.white, size: 28)),
                   ),
                 ],
               ),
             ),
 
-            // --- CAPTION AREA ---
+            // CAPTION & POLL AREA
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              padding: const EdgeInsets.symmetric(horizontal: 20.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     children: [
                       CircleAvatar(
+                        radius: 18,
                         backgroundColor: Colors.grey[800],
                         backgroundImage: profile['avatar_url'] != null
                             ? CachedNetworkImageProvider(profile['avatar_url'])
                             : null,
                         child: profile['avatar_url'] == null
-                            ? const Icon(Icons.person, color: Colors.white)
+                            ? const Icon(Icons.person,
+                                color: Colors.white, size: 20)
                             : null,
                       ),
                       const SizedBox(width: 12),
@@ -686,7 +888,7 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
                         child: RichText(
                           text: TextSpan(
                             style: const TextStyle(
-                                color: Colors.white, fontSize: 14, height: 1.3),
+                                color: Colors.white, fontSize: 15, height: 1.4),
                             children: [
                               TextSpan(
                                   text: '${profile['username'] ?? 'User'}  ',
@@ -699,31 +901,36 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
                       ),
                     ],
                   ),
+
+                  // 🔥 INLINE POLL
+                  if (hasPoll) _buildPollInline(),
+
                   if (gistUrl.isNotEmpty) ...[
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 16),
                     GestureDetector(
                       onTap: () async {
                         final uri = Uri.tryParse(gistUrl);
-                        if (uri != null && await canLaunchUrl(uri)) {
+                        if (uri != null && await canLaunchUrl(uri))
                           await launchUrl(uri,
                               mode: LaunchMode.externalApplication);
-                        }
                       },
                       child: Row(
                         children: [
                           const Icon(Icons.link,
-                              color: Colors.blueAccent, size: 18),
-                          const SizedBox(width: 4),
+                              color: Colors.blueAccent, size: 20),
+                          const SizedBox(width: 8),
                           Expanded(
                               child: Text(gistUrl,
                                   style: const TextStyle(
-                                      color: Colors.blueAccent, fontSize: 13),
+                                      color: Colors.blueAccent,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold),
                                   overflow: TextOverflow.ellipsis)),
                         ],
                       ),
                     ),
                   ],
-                  const SizedBox(height: 40),
+                  const SizedBox(height: 60),
                 ],
               ),
             ),

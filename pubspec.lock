@@ -1562,6 +1562,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "3.1.5"
+  url_strategy:
+    dependency: "direct main"
+    description:
+      name: url_strategy
+      sha256: "6eff69fa0900b731a23552b38b54389f399d247dbb0998f2cbdf25bef6790a7c"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.3.0"
   uuid:
     dependency: "direct main"
     description:
@@ -1683,7 +1691,7 @@ packages:
     source: hosted
     version: "14.2.5"
   web:
-    dependency: "direct overridden"
+    dependency: "direct main"
     description:
       name: web
       sha256: "868d88a33d8a87b18ffc05f9f030ba328ffefba92d6c127917a2ba740f9cfe4a"
