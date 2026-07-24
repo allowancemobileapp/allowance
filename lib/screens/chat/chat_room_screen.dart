@@ -230,6 +230,29 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     super.initState();
     activeChatId = widget.chatId;
 
+    // 🔥 NEW: Detect Enter key to send messages ONLY on Desktop Web!
+    _focusNode.onKeyEvent = (node, event) {
+      final isDesktopWeb = kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.macOS ||
+              defaultTargetPlatform == TargetPlatform.windows ||
+              defaultTargetPlatform == TargetPlatform.linux);
+
+      if (isDesktopWeb) {
+        // Look for the "Enter" key being pressed down
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.enter) {
+          if (HardwareKeyboard.instance.isShiftPressed) {
+            return KeyEventResult.ignored; // Shift+Enter allows new lines
+          } else {
+            _sendMessage(); // Just Enter sends the message
+            return KeyEventResult
+                .handled; // Stops the newline from being typed!
+          }
+        }
+      }
+      return KeyEventResult.ignored;
+    };
+
     _chatMeta = {
       'group_name': widget.chatTitle,
       'group_avatar': null,
@@ -240,8 +263,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     _messageController.addListener(_onMessageTextChanged);
 
     _setupMessageStream();
-    _startRealtimeSelfHeal(); // 🔥 NEW
-    _setupPinnedMessagesStream(); // 🔥 NEW
+    _startRealtimeSelfHeal();
+    _setupPinnedMessagesStream();
     _loadChatMeta();
     _setupTypingListener();
     _markMessagesAsRead();
@@ -1565,8 +1588,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     );
   }
 
-  // 🔥 FIX: Analytics now uses SingleChildScrollView to prevent pixel overflow!
-  // 🔥 FIX: Analytics now uses SingleChildScrollView to prevent pixel overflow!
   void _showPremiumAnalytics() async {
     showModalBottomSheet(
       context: context,
@@ -1580,20 +1601,30 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     );
 
     try {
+      // 🔥 FIX: Now strictly cross-references current members with the premium payments table!
+      final payments = await supabase
+          .from('group_premium_payments')
+          .select('user_id')
+          .eq('chat_id', widget.chatId);
+      final paidUserIds = payments.map((p) => p['user_id'].toString()).toSet();
+
       final parts = await supabase
           .from('chat_participants')
           .select('user_id')
           .eq('chat_id', widget.chatId);
-      final userIds = parts.map((p) => p['user_id'].toString()).toList();
+      final activePaidUserIds = parts
+          .map((p) => p['user_id'].toString())
+          .where((id) => paidUserIds.contains(id))
+          .toList();
 
       int plusUsers = 0;
       int freeUsers = 0;
 
-      if (userIds.isNotEmpty) {
+      if (activePaidUserIds.isNotEmpty) {
         final profiles = await supabase
             .from('profiles')
             .select('subscription_tier')
-            .inFilter('id', userIds);
+            .inFilter('id', activePaidUserIds);
         for (var p in profiles) {
           if (p['subscription_tier'] == 'Membership') {
             plusUsers++;
@@ -1605,7 +1636,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
       final freePrice =
           double.tryParse(_chatMeta?['price_free']?.toString() ?? '0') ?? 0;
-      // 🔥 FIX: Changed _chat? to _chatMeta?
       final plusPrice =
           double.tryParse(_chatMeta?['price_plus']?.toString() ?? '0') ?? 0;
 
@@ -1621,11 +1651,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
       showModalBottomSheet(
         context: context,
         backgroundColor: const Color(0xFF1E1E1E),
-        isScrollControlled: true, // Allow scrolling if it gets too tall
+        isScrollControlled: true,
         shape: const RoundedRectangleBorder(
             borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-        builder: (ctx) => SingleChildScrollView(
-          child: Padding(
+        builder: (ctx) => DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.4,
+          maxChildSize: 0.9,
+          expand: false,
+          builder: (_, scrollController) => SingleChildScrollView(
+            controller: scrollController,
             padding: EdgeInsets.only(
                 left: 24.0,
                 right: 24.0,
@@ -1660,7 +1695,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                   child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('Active Free Pass Members',
+                        const Text('Active Paid Free-Tier Members',
                             style:
                                 TextStyle(color: Colors.white70, fontSize: 13)),
                         Text('$freeUsers',
@@ -1673,7 +1708,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                   child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Text('Active Plus Pass Members',
+                        const Text('Active Paid Plus-Tier Members',
                             style:
                                 TextStyle(color: Colors.white70, fontSize: 13)),
                         Text('$plusUsers',
@@ -1726,7 +1761,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 ),
                 const SizedBox(height: 16),
                 const Text(
-                    'Payouts are sent automatically every Friday to your connected bank account.',
+                    'Payouts are sent automatically on the 21st of every month to your connected bank account.', // 🔥 FIX: Payday updated
                     style: TextStyle(color: Colors.white38, fontSize: 12),
                     textAlign: TextAlign.center),
                 const SizedBox(height: 16),
@@ -2216,7 +2251,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 final newReaction =
                     message['reactions'] == emoji ? null : emoji;
                 try {
-                  await supabase.from('messages').update(
+                  await Supabase.instance.client.from('messages').update(
                       {'reactions': newReaction}).eq('id', message['id']);
                 } catch (e) {
                   debugPrint('Reaction error: $e');
@@ -2960,6 +2995,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
         TextEditingController(text: _chatMeta?['price_free']?.toString() ?? '');
     final plusPriceCtrl =
         TextEditingController(text: _chatMeta?['price_plus']?.toString() ?? '');
+    final bankAcctCtrl = TextEditingController(
+        text: _chatMeta?['bank_details']?['account_number'] ?? '');
+    final acctNameCtrl = TextEditingController(
+        text: _chatMeta?['bank_details']?['account_name'] ?? '');
+    final bankNameCtrl = TextEditingController(
+        text: _chatMeta?['bank_details']?['bank_name'] ?? '');
+
     final bool isAlreadyPremium = _chatMeta?['is_premium'] == true;
     bool isSaving = false;
 
@@ -2984,19 +3026,16 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.workspace_premium,
-                            color: Colors.amber, size: 28),
-                        SizedBox(width: 8),
-                        Text('Premium Settings',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold)),
-                      ],
-                    ),
-                    // Remove Premium Status
+                    const Row(children: [
+                      Icon(Icons.workspace_premium,
+                          color: Colors.amber, size: 28),
+                      SizedBox(width: 8),
+                      Text('Premium Settings',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold)),
+                    ]),
                     if (isAlreadyPremium)
                       TextButton(
                           onPressed: () async {
@@ -3029,7 +3068,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                           style: TextStyle(color: Colors.amber, fontSize: 13)),
                       Text('• Plus users MUST receive at least a 10% discount.',
                           style: TextStyle(color: Colors.amber, fontSize: 13)),
-                      Text('• Payouts sent every Friday.',
+                      Text('• Payouts sent on the 21st of every month.',
                           style: TextStyle(color: Colors.amber, fontSize: 13)),
                     ],
                   ),
@@ -3054,6 +3093,29 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                 _inputDecoration('Plus User Price (₦)'))),
                   ],
                 ),
+                const SizedBox(height: 16),
+                const Text('Payout Bank Details',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16)),
+                const SizedBox(height: 12),
+                TextField(
+                    controller: bankAcctCtrl,
+                    keyboardType: TextInputType.number,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: _inputDecoration('Account Number')),
+                const SizedBox(height: 12),
+                TextField(
+                    controller: acctNameCtrl,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: _inputDecoration('Account Name')),
+                const SizedBox(height: 12),
+                TextField(
+                    controller: bankNameCtrl,
+                    style: const TextStyle(color: Colors.white),
+                    decoration:
+                        _inputDecoration('Bank Name (e.g. Opay, Kuda)')),
                 const SizedBox(height: 24),
                 SizedBox(
                   width: double.infinity,
@@ -3085,18 +3147,34 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                           'Plus users must get at least a 10% discount!')));
                               return;
                             }
+                            if (bankAcctCtrl.text.isEmpty ||
+                                acctNameCtrl.text.isEmpty ||
+                                bankNameCtrl.text.isEmpty) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          'Please fill out all bank payout details.')));
+                              return;
+                            }
 
                             setModalState(() => isSaving = true);
                             try {
+                              final bankDetails = {
+                                'account_number': bankAcctCtrl.text.trim(),
+                                'account_name': acctNameCtrl.text.trim(),
+                                'bank_name': bankNameCtrl.text.trim(),
+                              };
                               await supabase.from('chats').update({
                                 'is_premium': true,
                                 'price_free': freePrice,
-                                'price_plus': plusPrice
+                                'price_plus': plusPrice,
+                                'bank_details': bankDetails
                               }).eq('id', widget.chatId);
                               setState(() {
                                 _chatMeta?['is_premium'] = true;
                                 _chatMeta?['price_free'] = freePrice;
                                 _chatMeta?['price_plus'] = plusPrice;
+                                _chatMeta?['bank_details'] = bankDetails;
                               });
                               if (mounted) {
                                 Navigator.pop(ctx);
@@ -3485,7 +3563,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                     message['seriousness'] = currentLevel);
                                 Navigator.pop(ctx);
                                 try {
-                                  await supabase
+                                  await Supabase.instance.client
                                       .from('messages')
                                       .update({'seriousness': currentLevel}).eq(
                                           'id', message['id']);
@@ -3832,27 +3910,66 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                             final isAdmin = participants.any((p) =>
                                 p['user_id']?.toString() == userId &&
                                 p['role'] == 'admin');
+                            final isPlus =
+                                member['subscription_tier'] == 'Membership';
+                            final hasStory = member['has_story'] == true;
 
                             return GestureDetector(
-                              onTap: () => _showMemberOptions(member),
+                              onTap: () {
+                                if (hasStory) {
+                                  // Automatically opens the user's active stories!
+                                  _openStoryForUser(userId);
+                                } else {
+                                  _showMemberOptions(member);
+                                }
+                              },
+                              onLongPress: () => _showMemberOptions(member),
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  CircleAvatar(
-                                    radius: 32,
-                                    backgroundColor: Colors.grey[800],
-                                    backgroundImage:
-                                        member['avatar_url'] != null
-                                            ? NetworkImage(member['avatar_url'])
-                                            : null,
-                                    child: member['avatar_url'] == null
-                                        ? Text(
-                                            (member['username'] ?? 'U')[0]
-                                                .toUpperCase(),
-                                            style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 20))
-                                        : null,
+                                  Stack(
+                                    alignment: Alignment.bottomRight,
+                                    children: [
+                                      Container(
+                                        padding:
+                                            EdgeInsets.all(hasStory ? 2.5 : 0),
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          border: hasStory
+                                              ? Border.all(
+                                                  color:
+                                                      const Color(0xFF4CAF50),
+                                                  width: 2)
+                                              : null,
+                                        ),
+                                        child: CircleAvatar(
+                                          radius: 28,
+                                          backgroundColor: Colors.grey[800],
+                                          backgroundImage:
+                                              member['avatar_url'] != null
+                                                  ? NetworkImage(
+                                                      member['avatar_url'])
+                                                  : null,
+                                          child: member['avatar_url'] == null
+                                              ? Text(
+                                                  (member['username'] ?? 'U')[0]
+                                                      .toUpperCase(),
+                                                  style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 20))
+                                              : null,
+                                        ),
+                                      ),
+                                      if (isPlus)
+                                        Container(
+                                          padding: const EdgeInsets.all(2),
+                                          decoration: const BoxDecoration(
+                                              color: Colors.black,
+                                              shape: BoxShape.circle),
+                                          child: const Icon(Icons.star,
+                                              color: Colors.amber, size: 12),
+                                        )
+                                    ],
                                   ),
                                   const SizedBox(height: 8),
                                   Text('@${member['username'] ?? 'User'}',
@@ -3874,13 +3991,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                             color: Color(0xFF4CAF50),
                                             fontSize: 10,
                                             fontWeight: FontWeight.bold))
-                                  else
-                                    Text(member['school_name'] ?? '',
-                                        style: const TextStyle(
-                                            color: Colors.white54,
-                                            fontSize: 10),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis),
                                 ],
                               ),
                             );
@@ -3907,9 +4017,30 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
     );
   }
 
-  // --- NEW STICKER METHODS ---
+  Future<void> _openStoryForUser(String userId) async {
+    try {
+      final response = await supabase
+          .from('stories')
+          .select(
+              '*, profiles:user_id(username, avatar_url, school_name, subscription_tier)')
+          .eq('user_id', userId)
+          .gt('expires_at', DateTime.now().toUtc().toIso8601String())
+          .order('created_at', ascending: true);
 
-  // --- NEW: FORWARD MESSAGE SHEET ---
+      if (response.isNotEmpty && mounted) {
+        Navigator.pop(context); // Close group info sheet
+        Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (_) => StoryViewerScreen(
+                    stories: List<Map<String, dynamic>>.from(response),
+                    initialIndex: 0,
+                    userPreferences: widget.userPreferences)));
+      }
+    } catch (e) {
+      debugPrint("Error opening story: $e");
+    }
+  }
 
   Widget _buildBubble(
       List<Map<String, dynamic>> messages, int index, double maxWidth) {
@@ -4469,7 +4600,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
                                         isMe: isMe,
                                         themeColor: const Color(0xFF121212),
                                         timeStr: timeStr,
-                                        isRead: isRead),
+                                        isRead: isRead,
+                                        audioName: content.isNotEmpty &&
+                                                content != '🎤 Voice Note'
+                                            ? content
+                                            : 'Voice Note'), // 🔥 FIX: Passes actual audio name
                                   if (isReceivingMedia)
                                     Container(
                                         padding: const EdgeInsets.all(12),
@@ -5526,162 +5661,160 @@ class _ChatRoomScreenState extends State<ChatRoomScreen>
 
     return Scaffold(
       backgroundColor: Colors.black,
-      resizeToAvoidBottomInset: true,
+      resizeToAvoidBottomInset:
+          true, // 🔥 Let the OS handle the keyboard inset natively
       appBar: _buildAppBar(),
-      body: Padding(
-        // 🔥 Instead, let Flutter's ultra-fast engine handle the upward shift
-        padding: EdgeInsets.only(bottom: bottomInset),
-        child: Column(
-          children: [
-            Expanded(
-              child: Stack(
-                children: [
-                  ValueListenableBuilder<List<Map<String, dynamic>>>(
-                    valueListenable: ChatSyncService.instance.pendingMessages,
-                    builder: (context, pendingList, _) {
-                      final combinedMessages =
-                          _computeCombinedMessages(pendingList, myId);
+      body: Column(
+        // 🔥 FIX: Removed the Padding(bottomInset) which caused double-shifting!
+        children: [
+          Expanded(
+            child: Stack(
+              children: [
+                ValueListenableBuilder<List<Map<String, dynamic>>>(
+                  valueListenable: ChatSyncService.instance.pendingMessages,
+                  builder: (context, pendingList, _) {
+                    final combinedMessages =
+                        _computeCombinedMessages(pendingList, myId);
 
-                      if (combinedMessages.isEmpty) {
-                        return const Center(
-                            child: Text("Send a message to start chatting!",
-                                style: TextStyle(color: Colors.white54)));
+                    if (combinedMessages.isEmpty) {
+                      return const Center(
+                          child: Text("Send a message to start chatting!",
+                              style: TextStyle(color: Colors.white54)));
+                    }
+
+                    if (!_unreadCalculated && combinedMessages.isNotEmpty) {
+                      try {
+                        _firstUnreadIndex =
+                            combinedMessages.lastIndexWhere((m) {
+                          final senderId = m['sender_id']?.toString();
+                          final isRead = m['is_read'] == true;
+                          return !isRead &&
+                              senderId != null &&
+                              senderId != myId;
+                        });
+                      } catch (e) {
+                        _firstUnreadIndex = -1;
                       }
+                      _unreadCalculated = true;
+                    }
 
-                      if (!_unreadCalculated && combinedMessages.isNotEmpty) {
+                    return ListView.builder(
+                      controller: _scrollController,
+                      reverse: true,
+                      // 🔥 FIX: Increased cache stops bubbles from destroying/rebuilding during keyboard shift!
+                      cacheExtent: 400,
+                      // 🔥 FIX: Native swipe-down to close keyboard (clears gesture lag natively)
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.manual,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: combinedMessages.length,
+                      itemBuilder: (context, index) {
                         try {
-                          _firstUnreadIndex =
-                              combinedMessages.lastIndexWhere((m) {
-                            final senderId = m['sender_id']?.toString();
-                            final isRead = m['is_read'] == true;
-                            return !isRead &&
-                                senderId != null &&
-                                senderId != myId;
-                          });
-                        } catch (e) {
-                          _firstUnreadIndex = -1;
-                        }
-                        _unreadCalculated = true;
-                      }
+                          final msg = combinedMessages[index];
+                          final messageId =
+                              (msg['id'] ?? msg['local_id'] ?? 'idx_$index')
+                                  .toString();
 
-                      return ListView.builder(
-                        controller: _scrollController,
-                        reverse: true,
-                        // 🔥 FIX: Increased cache stops bubbles from destroying/rebuilding during keyboard shift!
-                        cacheExtent: 400,
-                        // 🔥 FIX: Native swipe-down to close keyboard (clears gesture lag natively)
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.manual,
-                        padding: const EdgeInsets.all(12),
-                        itemCount: combinedMessages.length,
-                        itemBuilder: (context, index) {
+                          DateTime date;
                           try {
-                            final msg = combinedMessages[index];
-                            final messageId =
-                                (msg['id'] ?? msg['local_id'] ?? 'idx_$index')
-                                    .toString();
-
-                            DateTime date;
-                            try {
-                              final createdAt = msg['created_at']?.toString();
-                              date = (createdAt != null && createdAt.isNotEmpty)
-                                  ? DateTime.parse(createdAt).toLocal()
-                                  : DateTime.now();
-                            } catch (e) {
-                              date = DateTime.now();
-                            }
-
-                            bool showDateHeader = false;
-                            if (index == combinedMessages.length - 1) {
-                              showDateHeader = true;
-                            } else {
-                              try {
-                                final prevMsg = combinedMessages[index + 1];
-                                final prevCreatedAt =
-                                    prevMsg['created_at']?.toString();
-                                if (prevCreatedAt != null &&
-                                    prevCreatedAt.isNotEmpty) {
-                                  final prevDate =
-                                      DateTime.parse(prevCreatedAt).toLocal();
-                                  if (date.day != prevDate.day ||
-                                      date.year != prevDate.year) {
-                                    showDateHeader = true;
-                                  }
-                                }
-                              } catch (e) {
-                                showDateHeader = false;
-                              }
-                            }
-
-                            return RepaintBoundary(
-                              key: ValueKey('msg_row_$messageId'),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (showDateHeader)
-                                    Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                            vertical: 16),
-                                        child: Center(
-                                            child: Text(_getDateLabel(date),
-                                                style: const TextStyle(
-                                                    color: Colors.white54,
-                                                    fontSize: 12)))),
-                                  if (index == _firstUnreadIndex &&
-                                      _firstUnreadIndex != -1)
-                                    Container(
-                                      margin: const EdgeInsets.symmetric(
-                                          vertical: 16),
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 12, vertical: 4),
-                                      decoration: BoxDecoration(
-                                          color: const Color(0xFF1E1E1E),
-                                          borderRadius:
-                                              BorderRadius.circular(12)),
-                                      child: const Text("UNREAD MESSAGES",
-                                          style: TextStyle(
-                                              color: Colors.amber,
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.bold)),
-                                    ),
-                                  _buildBubble(
-                                      combinedMessages, index, maxBubbleWidth),
-                                ],
-                              ),
-                            );
+                            final createdAt = msg['created_at']?.toString();
+                            date = (createdAt != null && createdAt.isNotEmpty)
+                                ? DateTime.parse(createdAt).toLocal()
+                                : DateTime.now();
                           } catch (e) {
-                            debugPrint(
-                                '💀 Message render error at index $index: $e');
-                            return const SizedBox.shrink();
+                            date = DateTime.now();
                           }
-                        },
-                      );
-                    },
-                  ),
-                  if (_showScrollToBottom)
-                    Positioned(
-                      bottom: 16,
-                      right: 16,
-                      child: FloatingActionButton.small(
-                        backgroundColor: const Color(0xFF202C33),
-                        onPressed: () => _scrollController.animateTo(0,
-                            duration: const Duration(milliseconds: 300),
-                            curve: Curves.easeOut),
-                        child: const Icon(Icons.keyboard_double_arrow_down,
-                            color: Colors.white),
-                      ),
+
+                          bool showDateHeader = false;
+                          if (index == combinedMessages.length - 1) {
+                            showDateHeader = true;
+                          } else {
+                            try {
+                              final prevMsg = combinedMessages[index + 1];
+                              final prevCreatedAt =
+                                  prevMsg['created_at']?.toString();
+                              if (prevCreatedAt != null &&
+                                  prevCreatedAt.isNotEmpty) {
+                                final prevDate =
+                                    DateTime.parse(prevCreatedAt).toLocal();
+                                if (date.day != prevDate.day ||
+                                    date.year != prevDate.year) {
+                                  showDateHeader = true;
+                                }
+                              }
+                            } catch (e) {
+                              showDateHeader = false;
+                            }
+                          }
+
+                          return RepaintBoundary(
+                            key: ValueKey('msg_row_$messageId'),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (showDateHeader)
+                                  Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 16),
+                                      child: Center(
+                                          child: Text(_getDateLabel(date),
+                                              style: const TextStyle(
+                                                  color: Colors.white54,
+                                                  fontSize: 12)))),
+                                if (index == _firstUnreadIndex &&
+                                    _firstUnreadIndex != -1)
+                                  Container(
+                                    margin: const EdgeInsets.symmetric(
+                                        vertical: 16),
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 4),
+                                    decoration: BoxDecoration(
+                                        color: const Color(0xFF1E1E1E),
+                                        borderRadius:
+                                            BorderRadius.circular(12)),
+                                    child: const Text("UNREAD MESSAGES",
+                                        style: TextStyle(
+                                            color: Colors.amber,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold)),
+                                  ),
+                                _buildBubble(
+                                    combinedMessages, index, maxBubbleWidth),
+                              ],
+                            ),
+                          );
+                        } catch (e) {
+                          debugPrint(
+                              '💀 Message render error at index $index: $e');
+                          return const SizedBox.shrink();
+                        }
+                      },
+                    );
+                  },
+                ),
+                if (_showScrollToBottom)
+                  Positioned(
+                    bottom: 16,
+                    right: 16,
+                    child: FloatingActionButton.small(
+                      backgroundColor: const Color(0xFF202C33),
+                      onPressed: () => _scrollController.animateTo(0,
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeOut),
+                      child: const Icon(Icons.keyboard_double_arrow_down,
+                          color: Colors.white),
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
-            SafeArea(
-              top: false,
-              // 🔥 Only apply bottom safe area if keyboard is closed to avoid double-padding
-              bottom: bottomInset == 0,
-              child: RepaintBoundary(child: _buildInputBar()),
-            ),
-          ],
-        ),
+          ),
+          SafeArea(
+            top: false,
+            // 🔥 Only apply bottom safe area if keyboard is closed to avoid double-padding
+            bottom: bottomInset == 0,
+            child: RepaintBoundary(child: _buildInputBar()),
+          ),
+        ],
       ),
     );
   }
@@ -6489,6 +6622,7 @@ class AudioPlayerBubble extends StatefulWidget {
   final Color themeColor;
   final String timeStr;
   final bool isRead;
+  final String audioName; // 🔥 NEW
 
   const AudioPlayerBubble({
     super.key,
@@ -6497,7 +6631,9 @@ class AudioPlayerBubble extends StatefulWidget {
     required this.themeColor,
     required this.timeStr,
     required this.isRead,
+    required this.audioName, // 🔥 NEW
   });
+  // ... rest of class remains identical until build:
 
   @override
   State<AudioPlayerBubble> createState() => _AudioPlayerBubbleState();
@@ -6691,7 +6827,7 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
                         ? _formatDuration(_position)
                         : (_isLoaded
                             ? _formatDuration(_duration)
-                            : "Voice Note"),
+                            : widget.audioName), // 🔥 FIX: Shows proper name!
                     style: TextStyle(
                         color: widget.isMe ? Colors.black54 : Colors.white60,
                         fontSize: 11)),
@@ -6930,24 +7066,32 @@ class _GroupCalendarSheetState extends State<GroupCalendarSheet> {
 
   Future<List<Map<String, dynamic>>> _fetchGroupMembers() async {
     try {
-      // 1. Fetch user IDs first (avoids the auth.users foreign key crash)
-      final resp = await _supabase
+      final resp = await Supabase.instance.client
           .from('chat_participants')
           .select('user_id')
           .eq('chat_id', widget.chatId);
-
       final List<String> userIds =
           (resp as List).map((e) => e['user_id'].toString()).toList();
-
       if (userIds.isEmpty) return [];
 
-      // 2. Fetch the actual profile data using those IDs
-      final profResp = await _supabase
+      final profResp = await Supabase.instance.client
           .from('profiles')
-          .select('id, username, avatar_url')
+          .select('id, username, avatar_url, subscription_tier')
           .inFilter('id', userIds);
 
-      return List<Map<String, dynamic>>.from(profResp);
+      // Check for active stories among members
+      final stories = await Supabase.instance.client
+          .from('stories')
+          .select('user_id')
+          .gt('expires_at', DateTime.now().toUtc().toIso8601String())
+          .inFilter('user_id', userIds);
+      final activeStoryUsers =
+          stories.map((s) => s['user_id'].toString()).toSet();
+
+      return List<Map<String, dynamic>>.from(profResp).map((p) {
+        p['has_story'] = activeStoryUsers.contains(p['id'].toString());
+        return p;
+      }).toList();
     } catch (e) {
       debugPrint('Error fetching group members: $e');
       return [];

@@ -1,4 +1,6 @@
 // lib/screens/home/single_gist_screen.dart
+import 'package:allowance/models/user_preferences.dart';
+import 'package:allowance/screens/introduction/introduction_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -26,6 +28,9 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
   int _likeCount = 0;
   int _commentCount = 0;
   bool _isLiked = false;
+  bool _isFollowing = false;
+  bool _isPostingComment = false;
+  final TextEditingController _commentController = TextEditingController();
 
   VideoPlayerController? _videoController;
   int _localPageIndex = 0;
@@ -108,7 +113,6 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
         return;
       }
 
-      // Handle Video Init
       if (data['media_type'] == 'video' && data['image_url'] != null) {
         _videoController =
             VideoPlayerController.networkUrl(Uri.parse(data['image_url']))
@@ -131,8 +135,17 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
 
       final user = supabase.auth.currentUser;
       bool liked = false;
+      bool following = false;
+
       if (user != null) {
         liked = (likesRes as List).any((l) => l['user_id'] == user.id);
+        final followCheck = await supabase
+            .from('followers')
+            .select('following_id')
+            .eq('follower_id', user.id)
+            .eq('following_id', data['user_id'])
+            .maybeSingle();
+        following = followCheck != null;
       }
 
       if (mounted) {
@@ -141,11 +154,61 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
           _likeCount = (likesRes as List).length;
           _commentCount = commentsRes.count;
           _isLiked = liked;
+          _isFollowing = following;
           _isLoading = false;
         });
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  bool _isLoggedIn() {
+    return supabase.auth.currentUser != null;
+  }
+
+  Future<void> _toggleFollow() async {
+    if (!_requireAuth()) return;
+    final myId = supabase.auth.currentUser!.id;
+    final targetId = _gist!['user_id'];
+
+    setState(() => _isFollowing = !_isFollowing);
+    try {
+      if (_isFollowing) {
+        await supabase
+            .from('followers')
+            .insert({'follower_id': myId, 'following_id': targetId});
+      } else {
+        await supabase
+            .from('followers')
+            .delete()
+            .match({'follower_id': myId, 'following_id': targetId});
+      }
+    } catch (e) {
+      setState(() => _isFollowing = !_isFollowing);
+    }
+  }
+
+  Future<void> _postComment() async {
+    final text = _commentController.text.trim();
+    final user = supabase.auth.currentUser;
+    if (text.isEmpty || user == null) return;
+
+    setState(() => _isPostingComment = true);
+    try {
+      await supabase.from('gist_comments').insert({
+        'gist_id': int.parse(widget.gistId),
+        'user_id': user.id,
+        'content': text,
+      });
+      _commentController.clear();
+      FocusScope.of(context).unfocus();
+      setState(() => _commentCount++);
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to post comment')));
+    } finally {
+      if (mounted) setState(() => _isPostingComment = false);
     }
   }
 
@@ -447,144 +510,149 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
     );
   }
 
-  Widget _buildPollInline() {
-    final String question = _gist!['title'] ?? ''; // Now we will use this!
-    List<String> options = [];
-    final rawOptions = _gist!['poll_options'];
-    if (rawOptions != null && rawOptions is List)
-      options = rawOptions.map((e) => e.toString()).toList();
-    if (options.isEmpty) return const SizedBox.shrink();
+  void _showPollSheet() {
+    if (!_requireAuth()) return;
 
-    final allowMultiple = _gist!['allow_multiple_votes'] == true;
     final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
 
-    return StreamBuilder<List<Map<String, dynamic>>>(
-      stream: supabase
-          .from('poll_votes')
-          .stream(primaryKey: ['id']).eq('gist_id', widget.gistId),
-      builder: (context, snapshot) {
-        final votes = snapshot.data ?? [];
-        final myVotes = votes
-            .where((v) => v['user_id'] == myId)
-            .map((v) => v['option'] as String)
-            .toSet();
-        final totalVoters = votes.map((v) => v['user_id']).toSet().length;
+    final options = List<String>.from(_gist!['poll_options'] ?? []);
+    final allowMultiple = _gist!['allow_multiple_votes'] == true;
 
-        return Container(
-          margin: const EdgeInsets.only(top: 16),
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-              color: const Color(0xFF1E1E1E),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.white10)),
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.grey[900],
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Row(children: [
-                const Icon(Icons.poll, size: 18, color: Colors.purpleAccent),
-                const SizedBox(width: 8),
-                const Text('POLL',
-                    style: TextStyle(
-                        color: Colors.purpleAccent,
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 1.0)),
-              ]),
-              const SizedBox(height: 12),
-
-              // 🔥 FIX: Displaying the question here!
-              Text(question,
-                  style: const TextStyle(
+              const Text('Poll',
+                  style: TextStyle(
                       color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600)),
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold)),
+              if (allowMultiple)
+                const Text('You can select multiple options',
+                    style: TextStyle(color: Colors.white54, fontSize: 12)),
               const SizedBox(height: 16),
+              StreamBuilder<List<Map<String, dynamic>>>(
+                stream: Supabase.instance.client
+                    .from('poll_votes')
+                    .stream(primaryKey: ['id']).eq('gist_id', widget.gistId),
+                builder: (context, snapshot) {
+                  final votes = snapshot.data ?? [];
 
-              ...options.map((opt) {
-                final isSelected = myVotes.contains(opt);
-                final optCount = votes.where((v) => v['option'] == opt).length;
-                final percent =
-                    votes.isEmpty ? 0 : (optCount / votes.length * 100).round();
+                  return StatefulBuilder(
+                    builder: (BuildContext context, StateSetter setModalState) {
+                      final myVotes = votes
+                          .where((v) => v['user_id'] == myId)
+                          .map((v) => v['option'] as String)
+                          .toSet();
 
-                return GestureDetector(
-                  onTap: () async {
-                    if (myId == null || !_requireAuth()) return;
-                    try {
-                      if (isSelected) {
-                        await supabase.from('poll_votes').delete().match({
-                          'gist_id': widget.gistId,
-                          'user_id': myId,
-                          'option': opt
-                        });
-                      } else {
-                        if (!allowMultiple && myVotes.isNotEmpty) {
-                          await supabase.from('poll_votes').delete().match(
-                              {'gist_id': widget.gistId, 'user_id': myId});
-                        }
-                        await supabase.from('poll_votes').insert({
-                          'gist_id': widget.gistId,
-                          'user_id': myId,
-                          'option': opt
-                        });
-                      }
-                    } catch (e) {
-                      debugPrint('Vote error: $e');
-                    }
-                  },
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    height: 45,
-                    decoration: BoxDecoration(
-                        color: Colors.black26,
-                        borderRadius: BorderRadius.circular(12)),
-                    child: Stack(
-                      children: [
-                        FractionallySizedBox(
-                          alignment: Alignment.centerLeft,
-                          widthFactor: (percent / 100).clamp(0.0, 1.0),
-                          child: Container(
+                      return Column(
+                        children: options.map((opt) {
+                          final isSelected = myVotes.contains(opt);
+                          final voteCount =
+                              votes.where((v) => v['option'] == opt).length;
+                          final percent = votes.isEmpty
+                              ? 0
+                              : (voteCount / votes.length * 100).toInt();
+
+                          return GestureDetector(
+                            onTap: () async {
+                              setModalState(() {
+                                if (isSelected) {
+                                  votes.removeWhere((v) =>
+                                      v['user_id'] == myId &&
+                                      v['option'] == opt);
+                                } else {
+                                  if (!allowMultiple) {
+                                    votes.removeWhere(
+                                        (v) => v['user_id'] == myId);
+                                  }
+                                  votes.add({'user_id': myId, 'option': opt});
+                                }
+                              });
+
+                              if (isSelected) {
+                                await Supabase.instance.client
+                                    .from('poll_votes')
+                                    .delete()
+                                    .match({
+                                  'gist_id': widget.gistId,
+                                  'user_id': myId,
+                                  'option': opt
+                                });
+                              } else {
+                                if (!allowMultiple) {
+                                  await Supabase.instance.client
+                                      .from('poll_votes')
+                                      .delete()
+                                      .match({
+                                    'gist_id': widget.gistId,
+                                    'user_id': myId
+                                  });
+                                }
+                                await Supabase.instance.client
+                                    .from('poll_votes')
+                                    .insert({
+                                  'gist_id': widget.gistId,
+                                  'user_id': myId,
+                                  'option': opt
+                                });
+                              }
+                            },
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              padding: const EdgeInsets.all(12),
                               decoration: BoxDecoration(
-                                  color: const Color(0xFF4CAF50)
-                                      .withOpacity(isSelected ? 0.8 : 0.3),
-                                  borderRadius: BorderRadius.circular(12))),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Row(
-                            children: [
-                              Icon(
-                                  isSelected
-                                      ? Icons.check_circle
-                                      : Icons.circle_outlined,
-                                  size: 20,
-                                  color: Colors.white),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                  child: Text(opt,
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.bold))),
-                              Text('$percent%',
-                                  style: const TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }).toList(),
-              const SizedBox(height: 8),
-              Text(
-                  '$totalVoters vote${totalVoters == 1 ? '' : 's'}${allowMultiple ? ' • Multiple answers' : ''}',
-                  style: const TextStyle(color: Colors.white54, fontSize: 13)),
+                                  color: isSelected
+                                      ? themeColor.withOpacity(0.2)
+                                      : Colors.white10,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                      color: isSelected
+                                          ? themeColor
+                                          : Colors.transparent)),
+                              child: Row(
+                                children: [
+                                  Icon(
+                                      isSelected
+                                          ? Icons.check_circle
+                                          : Icons.circle_outlined,
+                                      color: isSelected
+                                          ? themeColor
+                                          : Colors.white54),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                      child: Text(opt,
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 16))),
+                                  Text('$percent%',
+                                      style: TextStyle(
+                                          color: isSelected
+                                              ? themeColor
+                                              : Colors.white54,
+                                          fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      );
+                    },
+                  );
+                },
+              ),
             ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -734,209 +802,387 @@ class _SingleGistScreenState extends State<SingleGistScreen> {
     }
 
     return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
         backgroundColor: Colors.black,
-        iconTheme: const IconThemeData(color: Colors.white),
-        centerTitle: true,
-        title: Image.asset('assets/images/gist.png',
-            height: 100, fit: BoxFit.contain),
-        actions: [
-          if (isMe)
-            IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              onPressed: () async {
-                final confirm = await showDialog<bool>(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    backgroundColor: Colors.grey[900],
-                    title: const Text('Delete Gist?',
-                        style: TextStyle(color: Colors.white)),
-                    actions: [
-                      TextButton(
-                          onPressed: () => Navigator.pop(ctx, false),
-                          child: const Text('Cancel')),
-                      TextButton(
-                          onPressed: () => Navigator.pop(ctx, true),
-                          child: const Text('Delete',
-                              style: TextStyle(color: Colors.redAccent))),
-                    ],
-                  ),
-                );
-                if (confirm == true) {
-                  await supabase.from('gists').delete().eq('id', widget.gistId);
-                  if (mounted) Navigator.pop(context);
-                }
-              },
-            ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // TAGS ROW
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Wrap(
-                children: [
-                  if (!isMoment)
-                    _buildTag(isLocal ? 'Local' : 'Global', Colors.blueAccent),
-                  if (_gist!['category'] != null &&
-                      _gist!['category'].toString().isNotEmpty)
-                    _buildTag(_gist!['category'], Colors.orangeAccent),
-                  if (hasPoll) _buildTag('Poll', Colors.purpleAccent),
-                  if (isMoment) _buildTag('Moment', Colors.amber),
-                ],
-              ),
-            ),
-
-            mediaWidget,
-
-            // ACTION BAR
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  GestureDetector(
-                    onTap: _toggleLike,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: [
-                          Icon(
-                              _isLiked ? Icons.favorite : Icons.favorite_border,
-                              color: _isLiked ? Colors.red : Colors.white,
-                              size: 28),
-                          const SizedBox(width: 6),
-                          Text('$_likeCount',
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16)),
-                        ],
-                      ),
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          iconTheme: const IconThemeData(color: Colors.white),
+          centerTitle: true,
+          title: Image.asset('assets/images/gist.png',
+              height: 100, fit: BoxFit.contain),
+          actions: [
+            if (!_isLoggedIn())
+              TextButton(
+                onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => IntroductionScreen(
+                            userPreferences: UserPreferences(),
+                            onFinishIntro: () {}))),
+                child: const Text('Log in/Sign up',
+                    style: TextStyle(
+                        color: Color(0xFF4CAF50), fontWeight: FontWeight.bold)),
+              )
+            else if (!isMe)
+              TextButton(
+                  onPressed: _toggleFollow,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                        color: _isFollowing
+                            ? Colors.transparent
+                            : const Color(0xFF4CAF50),
+                        border: Border.all(color: const Color(0xFF4CAF50)),
+                        borderRadius: BorderRadius.circular(20)),
+                    child: Text(_isFollowing ? 'Following' : 'Follow',
+                        style: TextStyle(
+                            color: _isFollowing
+                                ? const Color(0xFF4CAF50)
+                                : Colors.black,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12)),
+                  )),
+            if (isMe)
+              IconButton(
+                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                onPressed: () async {
+                  // Your existing delete logic...
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      backgroundColor: Colors.grey[900],
+                      title: const Text('Delete Gist?',
+                          style: TextStyle(color: Colors.white)),
+                      actions: [
+                        TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text('Cancel')),
+                        TextButton(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            child: const Text('Delete',
+                                style: TextStyle(color: Colors.redAccent))),
+                      ],
                     ),
-                  ),
-                  GestureDetector(
-                    onTap: () {
-                      if (!_requireAuth()) return;
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                          content: Text(
-                              'Open this gist on your Home Feed to read comments!')));
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: [
-                          const Icon(CupertinoIcons.chat_bubble,
-                              color: Colors.white, size: 26),
-                          const SizedBox(width: 6),
-                          Text('$_commentCount',
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16)),
-                        ],
-                      ),
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: () => _showShipSheet(context),
-                    child: const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 16),
-                        child: Text('🚀', style: TextStyle(fontSize: 24))),
-                  ),
-                  GestureDetector(
-                    onTap: () {
-                      final target = imagesToShow.isNotEmpty
-                          ? imagesToShow[_localPageIndex]
-                          : imageUrl;
-                      if (target.isNotEmpty) _downloadMedia(target, mediaType);
-                    },
-                    child: const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 16),
-                        child: Icon(Icons.download_for_offline_outlined,
-                            color: Colors.white, size: 28)),
-                  ),
-                ],
+                  );
+                  if (confirm == true) {
+                    await supabase
+                        .from('gists')
+                        .delete()
+                        .eq('id', widget.gistId);
+                    if (mounted) Navigator.pop(context);
+                  }
+                },
               ),
+          ],
+        ),
+        body: SingleChildScrollView(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // TAGS ROW
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Wrap(
+              children: [
+                if (!isMoment)
+                  _buildTag(isLocal ? 'Local' : 'Global', Colors.blueAccent),
+                if (_gist!['category'] != null &&
+                    _gist!['category'].toString().isNotEmpty)
+                  _buildTag(_gist!['category'], Colors.orangeAccent),
+                if (hasPoll) _buildTag('Poll', Colors.purpleAccent),
+                if (isMoment) _buildTag('Moment', Colors.amber),
+              ],
             ),
+          ),
 
-            // CAPTION & POLL AREA
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      CircleAvatar(
-                        radius: 18,
-                        backgroundColor: Colors.grey[800],
-                        backgroundImage: profile['avatar_url'] != null
-                            ? CachedNetworkImageProvider(profile['avatar_url'])
-                            : null,
-                        child: profile['avatar_url'] == null
-                            ? const Icon(Icons.person,
-                                color: Colors.white, size: 20)
-                            : null,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: RichText(
-                          text: TextSpan(
+          mediaWidget,
+
+          // ACTION BAR
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16.0),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                GestureDetector(
+                  onTap: _toggleLike,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      children: [
+                        Icon(_isLiked ? Icons.favorite : Icons.favorite_border,
+                            color: _isLiked ? Colors.red : Colors.white,
+                            size: 28),
+                        const SizedBox(width: 6),
+                        Text('$_likeCount',
                             style: const TextStyle(
-                                color: Colors.white, fontSize: 15, height: 1.4),
-                            children: [
-                              TextSpan(
-                                  text: '${profile['username'] ?? 'User'}  ',
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold)),
-                              TextSpan(text: title),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16)),
+                      ],
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () {
+                    if (!_requireAuth()) return;
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('Scroll down to read comments!')));
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      children: [
+                        const Icon(CupertinoIcons.chat_bubble,
+                            color: Colors.white, size: 26),
+                        const SizedBox(width: 6),
+                        Text('$_commentCount',
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16)),
+                      ],
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: () => _showShipSheet(context),
+                  child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      child: Text('🚀', style: TextStyle(fontSize: 24))),
+                ),
+
+                // 🔥 FIX: ADDED THE POLL BUTTON HERE IN THE ACTION BAR
+                if (hasPoll)
+                  GestureDetector(
+                    onTap: _showPollSheet,
+                    child: const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 16),
+                        child: Icon(Icons.poll,
+                            color: Colors.purpleAccent, size: 28)),
                   ),
 
-                  // 🔥 INLINE POLL
-                  if (hasPoll) _buildPollInline(),
+                GestureDetector(
+                  onTap: () {
+                    final target = imagesToShow.isNotEmpty
+                        ? imagesToShow[_localPageIndex]
+                        : imageUrl;
+                    if (target.isNotEmpty) _downloadMedia(target, mediaType);
+                  },
+                  child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      child: Icon(Icons.download_for_offline_outlined,
+                          color: Colors.white, size: 28)),
+                ),
+              ],
+            ),
+          ),
 
-                  if (gistUrl.isNotEmpty) ...[
-                    const SizedBox(height: 16),
-                    GestureDetector(
-                      onTap: () async {
-                        final uri = Uri.tryParse(gistUrl);
-                        if (uri != null && await canLaunchUrl(uri))
-                          await launchUrl(uri,
-                              mode: LaunchMode.externalApplication);
-                      },
-                      child: Row(
-                        children: [
-                          const Icon(Icons.link,
-                              color: Colors.blueAccent, size: 20),
-                          const SizedBox(width: 8),
-                          Expanded(
-                              child: Text(gistUrl,
-                                  style: const TextStyle(
-                                      color: Colors.blueAccent,
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.bold),
-                                  overflow: TextOverflow.ellipsis)),
-                        ],
+          // CAPTION & POLL AREA
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: Colors.grey[800],
+                      backgroundImage: profile['avatar_url'] != null
+                          ? CachedNetworkImageProvider(profile['avatar_url'])
+                          : null,
+                      child: profile['avatar_url'] == null
+                          ? const Icon(Icons.person,
+                              color: Colors.white, size: 20)
+                          : null,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: RichText(
+                        text: TextSpan(
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 15, height: 1.4),
+                          children: [
+                            TextSpan(
+                                text: '${profile['username'] ?? 'User'}  ',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold)),
+                            TextSpan(text: title),
+                          ],
+                        ),
                       ),
                     ),
                   ],
-                  const SizedBox(height: 60),
+                ),
+
+                if (gistUrl.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  GestureDetector(
+                    onTap: () async {
+                      final uri = Uri.tryParse(gistUrl);
+                      if (uri != null && await canLaunchUrl(uri))
+                        await launchUrl(uri,
+                            mode: LaunchMode.externalApplication);
+                    },
+                    child: Row(
+                      children: [
+                        const Icon(Icons.link,
+                            color: Colors.blueAccent, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                            child: Text(gistUrl,
+                                style: const TextStyle(
+                                    color: Colors.blueAccent,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold),
+                                overflow: TextOverflow.ellipsis)),
+                      ],
+                    ),
+                  ),
                 ],
-              ),
+                const SizedBox(height: 24),
+                const Divider(color: Colors.white24),
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('Comments',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold)),
+                ),
+
+                StreamBuilder<List<Map<String, dynamic>>>(
+                  stream: supabase
+                      .from('gist_comments')
+                      .stream(primaryKey: ['id'])
+                      .eq('gist_id', int.parse(widget.gistId))
+                      .order('created_at', ascending: true),
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting)
+                      return const Padding(
+                          padding: EdgeInsets.all(20),
+                          child: Center(
+                              child: CircularProgressIndicator(
+                                  color: Color(0xFF4CAF50))));
+                    final comments = snapshot.data ?? [];
+                    if (comments.isEmpty)
+                      return const Padding(
+                          padding: EdgeInsets.all(20),
+                          child: Text("No comments yet. Be the first!",
+                              style: TextStyle(color: Colors.white54)));
+
+                    return ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: comments.length,
+                      itemBuilder: (context, index) {
+                        final comment = comments[index];
+                        final userId = comment['user_id'] as String;
+                        return FutureBuilder<Map<String, dynamic>?>(
+                          future: supabase
+                              .from('profiles')
+                              .select('username, avatar_url, subscription_tier')
+                              .eq('id', userId)
+                              .maybeSingle(),
+                          builder: (ctx, profileSnap) {
+                            final p = profileSnap.data;
+                            return ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: CircleAvatar(
+                                backgroundColor: Colors.grey[800],
+                                backgroundImage: p?['avatar_url'] != null
+                                    ? CachedNetworkImageProvider(
+                                        p!['avatar_url'])
+                                    : null,
+                                child: p?['avatar_url'] == null
+                                    ? const Icon(Icons.person,
+                                        color: Colors.white54, size: 16)
+                                    : null,
+                              ),
+                              title: Row(
+                                children: [
+                                  Text('@${p?['username'] ?? 'User'}',
+                                      style: const TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.bold)),
+                                  if (p?['subscription_tier'] ==
+                                      'Membership') ...[
+                                    const SizedBox(width: 4),
+                                    const Icon(Icons.star,
+                                        color: Colors.amber, size: 12)
+                                  ],
+                                ],
+                              ),
+                              subtitle: Padding(
+                                  padding: const EdgeInsets.only(top: 4.0),
+                                  child: Text(comment['content'] ?? '',
+                                      style: const TextStyle(
+                                          color: Colors.white, fontSize: 14))),
+                            );
+                          },
+                        );
+                      },
+                    );
+                  },
+                ),
+                const SizedBox(height: 60),
+
+                // 🔥 Input Bar for Comments
+                Container(
+                  padding: EdgeInsets.only(
+                      left: 16,
+                      right: 16,
+                      top: 12,
+                      bottom: MediaQuery.paddingOf(context).bottom + 12),
+                  decoration: const BoxDecoration(
+                      color: Color(0xFF1E1E1E),
+                      border: Border(top: BorderSide(color: Colors.white10))),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _commentController,
+                          style: const TextStyle(color: Colors.white),
+                          decoration: InputDecoration(
+                              hintText: _isLoggedIn()
+                                  ? 'Add a comment...'
+                                  : 'Log in to comment...',
+                              hintStyle: const TextStyle(color: Colors.white54),
+                              filled: true,
+                              fillColor: Colors.black,
+                              border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(30),
+                                  borderSide: BorderSide.none),
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 8)),
+                          enabled: _isLoggedIn(),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      GestureDetector(
+                        onTap: () {
+                          if (!_requireAuth()) return;
+                          if (_commentController.text.trim().isNotEmpty &&
+                              !_isPostingComment) _postComment();
+                        },
+                        child: _isPostingComment
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                    color: Color(0xFF4CAF50), strokeWidth: 2))
+                            : const Text('Post',
+                                style: TextStyle(
+                                    color: Color(0xFF4CAF50),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16)),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
-    );
+          )
+        ])));
   }
 }

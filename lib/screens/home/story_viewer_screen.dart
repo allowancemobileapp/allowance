@@ -628,15 +628,17 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
         'url': reshareUrl,
       });
 
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Story reshared successfully!'),
             backgroundColor: Colors.green));
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
             content: Text('Could not reshare story'),
             backgroundColor: Colors.red));
+      }
     }
   }
 
@@ -1257,6 +1259,7 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
           ),
 
           // 🔥 7A. STORY RESHARE TAG 🔥
+          // 🔥 7A. STORY RESHARE TAG 🔥
           if (isStoryReshare)
             Positioned(
                 top: MediaQuery.paddingOf(context).top + 90,
@@ -1264,19 +1267,20 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                 child: GestureDetector(
                     onTap: () {
                       _pauseStory();
+                      // Variables extracted HERE in the onTap closure
                       final parts = story['url']
                           .toString()
                           .replaceFirst('reshare://', '')
                           .split('|');
-                      final origId = parts.length > 0 ? parts[0] : '';
-                      final origUser = parts.length > 1
+                      final String origId = parts.isNotEmpty ? parts[0] : '';
+                      final String origUser = parts.length > 1
                           ? Uri.decodeComponent(parts[1])
                           : 'User';
-                      final origAvatar =
+                      final String origAvatar =
                           parts.length > 2 ? Uri.decodeComponent(parts[2]) : '';
-                      final origSchool =
+                      final String origSchool =
                           parts.length > 3 ? Uri.decodeComponent(parts[3]) : '';
-                      final isGroup =
+                      final bool isGroup =
                           parts.length > 4 ? parts[4] == 'true' : false;
 
                       showModalBottomSheet(
@@ -1287,82 +1291,173 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                                   top: Radius.circular(20))),
                           builder: (ctx) => Padding(
                               padding: const EdgeInsets.all(24),
-                              child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    CircleAvatar(
-                                      radius: 40,
-                                      backgroundImage: origAvatar.isNotEmpty
-                                          ? NetworkImage(origAvatar)
-                                          : null,
-                                      backgroundColor: Colors.grey[800],
-                                      child: origAvatar.isEmpty
-                                          ? Icon(
-                                              isGroup
-                                                  ? Icons.groups
-                                                  : Icons.person,
-                                              size: 40,
-                                              color: Colors.white54)
-                                          : null,
-                                    ),
-                                    const SizedBox(height: 16),
-                                    const Text('Original Post by',
-                                        style: TextStyle(
-                                            color: Colors.white54,
-                                            fontSize: 12)),
-                                    Text(isGroup ? origUser : '@$origUser',
-                                        style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 20,
-                                            fontWeight: FontWeight.bold)),
-                                    if (origSchool.isNotEmpty)
-                                      Text(origSchool,
-                                          style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 14)),
-                                    const SizedBox(height: 24),
-                                    SizedBox(
-                                        width: double.infinity,
-                                        child: ElevatedButton(
-                                          style: ElevatedButton.styleFrom(
-                                              backgroundColor:
-                                                  const Color(0xFF4CAF50),
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                      vertical: 16),
-                                              shape: RoundedRectangleBorder(
-                                                  borderRadius:
-                                                      BorderRadius.circular(
-                                                          12))),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            if (isGroup) {
-                                              Navigator.push(
-                                                  context,
-                                                  MaterialPageRoute(
-                                                      builder: (_) =>
-                                                          GroupInviteScreen(
-                                                              chatId: origId,
-                                                              userPreferences:
-                                                                  widget
-                                                                      .userPreferences))).then(
-                                                  (_) => _resumeStory());
-                                            } else {
-                                              UniversalProfileCard.show(
-                                                  context,
-                                                  origId,
-                                                  widget.userPreferences);
-                                            }
-                                          },
-                                          child: Text(
-                                              isGroup
-                                                  ? 'View Group'
-                                                  : 'View Profile',
-                                              style: const TextStyle(
-                                                  color: Colors.black,
-                                                  fontWeight: FontWeight.bold)),
-                                        ))
-                                  ]))).then((_) => _resumeStory());
+                              child: FutureBuilder<Map<String, dynamic>?>(
+                                  future: isGroup
+                                      ? Supabase.instance.client
+                                          .from('chats')
+                                          .select('is_premium')
+                                          .eq('id', origId)
+                                          .maybeSingle()
+                                      : Supabase.instance.client
+                                          .from('profiles')
+                                          .select('subscription_tier')
+                                          .eq('id', origId)
+                                          .maybeSingle(),
+                                  builder: (ctx, snap) {
+                                    final isPlus = isGroup
+                                        ? (snap.data?['is_premium'] == true)
+                                        : (snap.data?['subscription_tier'] ==
+                                            'Membership');
+
+                                    return FutureBuilder<List<dynamic>>(
+                                        future: Supabase.instance.client
+                                            .from('stories')
+                                            .select('id')
+                                            .gt(
+                                                'expires_at',
+                                                DateTime.now()
+                                                    .toUtc()
+                                                    .toIso8601String())
+                                            .eq(isGroup ? 'chat_id' : 'user_id',
+                                                origId)
+                                            .limit(1),
+                                        builder: (ctx, storySnap) {
+                                          final hasStory =
+                                              (storySnap.data ?? []).isNotEmpty;
+
+                                          return Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Stack(
+                                                  alignment:
+                                                      Alignment.bottomRight,
+                                                  children: [
+                                                    Container(
+                                                      padding: EdgeInsets.all(
+                                                          hasStory ? 3 : 0),
+                                                      decoration: BoxDecoration(
+                                                          shape:
+                                                              BoxShape.circle,
+                                                          border: hasStory
+                                                              ? Border.all(
+                                                                  color: const Color(
+                                                                      0xFF4CAF50),
+                                                                  width: 3)
+                                                              : null),
+                                                      child: CircleAvatar(
+                                                        radius: 40,
+                                                        backgroundImage:
+                                                            origAvatar
+                                                                    .isNotEmpty
+                                                                ? NetworkImage(
+                                                                    origAvatar)
+                                                                : null,
+                                                        backgroundColor:
+                                                            Colors.grey[800],
+                                                        child: origAvatar
+                                                                .isEmpty
+                                                            ? Icon(
+                                                                isGroup
+                                                                    ? Icons
+                                                                        .groups
+                                                                    : Icons
+                                                                        .person,
+                                                                size: 40,
+                                                                color: Colors
+                                                                    .white54)
+                                                            : null,
+                                                      ),
+                                                    ),
+                                                    if (isPlus)
+                                                      Container(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .all(2),
+                                                        decoration:
+                                                            const BoxDecoration(
+                                                                color: Colors
+                                                                    .black,
+                                                                shape: BoxShape
+                                                                    .circle),
+                                                        child: const Icon(
+                                                            Icons.star,
+                                                            color: Colors.amber,
+                                                            size: 16),
+                                                      )
+                                                  ],
+                                                ),
+                                                const SizedBox(height: 16),
+                                                const Text('Original Post by',
+                                                    style: TextStyle(
+                                                        color: Colors.white54,
+                                                        fontSize: 12)),
+                                                Text(
+                                                    isGroup
+                                                        ? origUser
+                                                        : '@$origUser',
+                                                    style: const TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize: 20,
+                                                        fontWeight:
+                                                            FontWeight.bold)),
+                                                if (origSchool.isNotEmpty)
+                                                  Text(origSchool,
+                                                      style: const TextStyle(
+                                                          color: Colors.white70,
+                                                          fontSize: 14)),
+                                                const SizedBox(height: 24),
+                                                SizedBox(
+                                                  width: double.infinity,
+                                                  child: ElevatedButton(
+                                                    style: ElevatedButton.styleFrom(
+                                                        backgroundColor:
+                                                            const Color(
+                                                                0xFF4CAF50),
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .symmetric(
+                                                                vertical: 16),
+                                                        shape: RoundedRectangleBorder(
+                                                            borderRadius:
+                                                                BorderRadius
+                                                                    .circular(
+                                                                        12))),
+                                                    onPressed: () {
+                                                      Navigator.pop(ctx);
+                                                      if (isGroup) {
+                                                        Navigator.push(
+                                                            context,
+                                                            MaterialPageRoute(
+                                                                builder: (_) => GroupInviteScreen(
+                                                                    chatId:
+                                                                        origId,
+                                                                    userPreferences:
+                                                                        widget
+                                                                            .userPreferences))).then(
+                                                            (_) =>
+                                                                _resumeStory());
+                                                      } else {
+                                                        UniversalProfileCard.show(
+                                                            context,
+                                                            origId,
+                                                            widget
+                                                                .userPreferences);
+                                                      }
+                                                    },
+                                                    child: Text(
+                                                        isGroup
+                                                            ? 'View Group'
+                                                            : 'View Profile',
+                                                        style: const TextStyle(
+                                                            color: Colors.black,
+                                                            fontWeight:
+                                                                FontWeight
+                                                                    .bold)),
+                                                  ),
+                                                )
+                                              ]);
+                                        });
+                                  }))).then((_) => _resumeStory());
                     },
                     child: Container(
                         padding: const EdgeInsets.symmetric(
@@ -1376,15 +1471,15 @@ class _StoryViewerScreenState extends State<StoryViewerScreen> {
                               color: Colors.white, size: 14),
                           const SizedBox(width: 6),
                           Text(
-                              'Reshared from ${Uri.decodeComponent(story['url'].toString().replaceFirst('reshare://', '').split('|')[1])}',
+                              'Reshared from ${Uri.decodeComponent(story['url'].toString().replaceFirst('reshare://', '').split('|').length > 1 ? story['url'].toString().replaceFirst('reshare://', '').split('|')[1] : 'User')}',
                               style: const TextStyle(
                                   color: Colors.white,
                                   fontSize: 12,
                                   fontWeight: FontWeight.bold)),
-                        ]))))
+                        ])))),
 
           // 🔥 7B. SHARED GIST / MOMENT PREVIEW TAG 🔥
-          else if (isSharedGist)
+          if (isSharedGist)
             Positioned(
               top: MediaQuery.paddingOf(context).top + 90,
               left: 16,

@@ -104,6 +104,29 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
     super.initState();
     activeChatId = widget.chatId;
 
+    // 🔥 NEW: Detect Enter key to send messages ONLY on Desktop Web!
+    _focusNode.onKeyEvent = (node, event) {
+      final isDesktopWeb = kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.macOS ||
+              defaultTargetPlatform == TargetPlatform.windows ||
+              defaultTargetPlatform == TargetPlatform.linux);
+
+      if (isDesktopWeb) {
+        // Look for the "Enter" key being pressed down
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.enter) {
+          if (HardwareKeyboard.instance.isShiftPressed) {
+            return KeyEventResult.ignored; // Shift+Enter allows new lines
+          } else {
+            _sendMessage(); // Just Enter sends the message
+            return KeyEventResult
+                .handled; // Stops the newline from being typed!
+          }
+        }
+      }
+      return KeyEventResult.ignored;
+    };
+
     _scrollController.addListener(_scrollListener);
 
     final po = widget.recipientProfile['pending_order'];
@@ -129,7 +152,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
 
     _setupMessageStream();
     _startRealtimeSelfHeal();
-    _setupPinnedMessagesStream(); // 🔥 NEW
+    _setupPinnedMessagesStream();
     _setupTypingListener();
     _checkFollowStatus();
     _markMessagesAsRead();
@@ -1561,7 +1584,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                                     message['seriousness'] = currentLevel);
                                 Navigator.pop(ctx);
                                 try {
-                                  await supabase
+                                  await Supabase.instance.client
                                       .from('messages')
                                       .update({'seriousness': currentLevel}).eq(
                                           'id', message['id']);
@@ -2211,7 +2234,11 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                                         isMe: isMe,
                                         themeColor: const Color(0xFF121212),
                                         timeStr: timeStr,
-                                        isRead: isRead),
+                                        isRead: isRead,
+                                        audioName: content.isNotEmpty &&
+                                                content != '🎤 Voice Note'
+                                            ? content
+                                            : 'Voice Note'), // 🔥 FIX: Passes actual audio name
                                   if (isReceivingMedia)
                                     Container(
                                         padding: const EdgeInsets.all(12),
@@ -3594,7 +3621,7 @@ class _IndividualChatScreenState extends State<IndividualChatScreen>
                 final newReaction =
                     message['reactions'] == emoji ? null : emoji;
                 try {
-                  await supabase.from('messages').update(
+                  await Supabase.instance.client.from('messages').update(
                       {'reactions': newReaction}).eq('id', message['id']);
                 } catch (e) {
                   debugPrint('Reaction error: $e');
@@ -4294,6 +4321,7 @@ class AudioPlayerBubble extends StatefulWidget {
   final Color themeColor;
   final String timeStr;
   final bool isRead;
+  final String audioName; // 🔥 NEW
 
   const AudioPlayerBubble({
     super.key,
@@ -4302,7 +4330,9 @@ class AudioPlayerBubble extends StatefulWidget {
     required this.themeColor,
     required this.timeStr,
     required this.isRead,
+    required this.audioName, // 🔥 NEW
   });
+  // ... rest of class remains identical until build:
 
   @override
   State<AudioPlayerBubble> createState() => _AudioPlayerBubbleState();
@@ -4496,7 +4526,7 @@ class _AudioPlayerBubbleState extends State<AudioPlayerBubble> {
                         ? _formatDuration(_position)
                         : (_isLoaded
                             ? _formatDuration(_duration)
-                            : "Voice Note"),
+                            : widget.audioName), // 🔥 FIX: Shows proper name!
                     style: TextStyle(
                         color: widget.isMe ? Colors.black54 : Colors.white60,
                         fontSize: 11)),

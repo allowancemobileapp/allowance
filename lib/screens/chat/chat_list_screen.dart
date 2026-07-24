@@ -1000,6 +1000,7 @@ class _ChatTileState extends State<_ChatTile> {
               ),
             ),
           ),
+          // Replace title: Row(...) inside ListTile with:
           title: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -1018,6 +1019,17 @@ class _ChatTileState extends State<_ChatTile> {
                       const SizedBox(width: 4),
                       const Icon(Icons.star, color: Colors.amber, size: 16)
                     ],
+                    if (widget.chat['is_premium'] == true) ...[
+                      // 🔥 FIX: Star for premium groups
+                      const SizedBox(width: 4),
+                      Container(
+                        padding: const EdgeInsets.all(2),
+                        decoration: const BoxDecoration(
+                            color: Colors.amber, shape: BoxShape.circle),
+                        child: const Icon(Icons.workspace_premium,
+                            color: Colors.black, size: 12),
+                      )
+                    ]
                   ],
                 ),
               ),

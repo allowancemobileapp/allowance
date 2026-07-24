@@ -7,7 +7,6 @@ import 'package:allowance/screens/home/moment_viewer_screen.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:icons_plus/icons_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -2220,45 +2219,239 @@ class _ExploreScreenState extends State<ExploreScreen> {
   }
 
   Future<void> _joinAndOpenGroup(Map<String, dynamic> group) async {
-    final currentUserId = supabase.auth.currentUser?.id;
-    if (currentUserId == null) return;
+    final isPremium = group['is_premium'] == true;
+    if (isPremium) {
+      await _processPremiumGroupJoin(group);
+    } else {
+      await _executeGroupJoin(group);
+    }
+  }
+
+  Future<void> _processPremiumGroupJoin(Map<String, dynamic> group) async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Please log in to join groups.')));
+      return;
+    }
+
+    final isPlus = widget.userPreferences.subscriptionTier == 'Membership';
+    final priceFree =
+        double.tryParse(group['price_free']?.toString() ?? '0') ?? 0.0;
+    final pricePlus =
+        double.tryParse(group['price_plus']?.toString() ?? '0') ?? 0.0;
+    final numPrice = isPlus ? pricePlus : priceFree;
+
+    if (numPrice <= 0) {
+      await _executeGroupJoin(group);
+      return;
+    }
+
+    // Show loading spinner while initializing payment
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+          child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
+    );
+
+    final chatId = group['id'].toString();
+    final reference =
+        'group_${chatId}_${myId}_${DateTime.now().millisecondsSinceEpoch}';
+    String gateway = 'paystack';
+    String? authUrlString;
+    final email = supabase.auth.currentUser?.email ?? 'user@allowance.com';
+
+    try {
+      final payResp = await supabase.functions.invoke(
+        'paystack-init',
+        body: {
+          'amount': (numPrice * 100).toInt(),
+          'email': email,
+          'reference': reference,
+          'metadata': {
+            'chat_id': chatId,
+            'user_id': myId,
+            'payment_type': 'group_access'
+          }
+        },
+      );
+      final data =
+          payResp.data is String ? jsonDecode(payResp.data) : payResp.data;
+      if (payResp.status == 200 && data != null && data['data'] != null) {
+        authUrlString = data['data']['authorization_url'];
+      } else {
+        throw 'Paystack unavailable';
+      }
+    } catch (e) {
+      gateway = 'flutterwave';
+      try {
+        final flwResp = await supabase.functions.invoke(
+          'flutterwave-init',
+          body: {
+            'tx_ref': reference,
+            'amount': numPrice.toStringAsFixed(0),
+            'currency': 'NGN',
+            'redirect_url': 'https://allowanceapp.org',
+            'customer': {'email': email},
+            'meta': {
+              'chat_id': chatId,
+              'user_id': myId,
+              'payment_type': 'group_access'
+            },
+            'customizations': {
+              'title': group['group_name'] ?? 'Premium Group',
+              'description': 'Group Access Fee'
+            }
+          },
+        );
+        final data =
+            flwResp.data is String ? jsonDecode(flwResp.data) : flwResp.data;
+        if (flwResp.status == 200 && data != null && data['data'] != null) {
+          authUrlString = data['data']['link'];
+        } else {
+          throw 'Flutterwave unavailable';
+        }
+      } catch (err) {
+        if (mounted) {
+          Navigator.pop(context); // Close loading
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text(
+                  'Payment gateways are currently offline. Try again later.'),
+              backgroundColor: Colors.red));
+        }
+        return;
+      }
+    }
+
+    if (authUrlString != null) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('pending_group_payment_$chatId',
+          jsonEncode({'reference': reference, 'gateway': gateway}));
+
+      final Uri url = Uri.parse(authUrlString);
+      if (await canLaunchUrl(url)) {
+        await launchUrl(url, mode: LaunchMode.inAppBrowserView);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text(
+                  'Payment opened. Complete it in the browser — we verify automatically...'),
+              duration: Duration(seconds: 8)));
+        }
+      }
+    }
+
+    final success = await _pollAndVerifyGroupPayment(reference, gateway,
+        maxAttempts: 30, interval: const Duration(seconds: 4));
+
+    if (success) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('pending_group_payment_$chatId');
+
+      if (mounted) {
+        Navigator.pop(context); // Close loading dialog
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('✅ Payment Verified! Access Granted!'),
+            backgroundColor: Colors.green));
+      }
+      await _executeGroupJoin(group, isPaid: true);
+    } else {
+      if (mounted) {
+        Navigator.pop(context); // Close loading dialog
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Payment taking a while. You can close this; we will check again when you return.'),
+            backgroundColor: Colors.orange));
+      }
+    }
+  }
+
+  Future<bool> _pollAndVerifyGroupPayment(String reference, String gateway,
+      {int maxAttempts = 10,
+      Duration interval = const Duration(seconds: 3)}) async {
+    for (int attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        final funcResp = await Supabase.instance.client.functions.invoke(
+          'verify-payment',
+          body: {'reference': reference, 'gateway': gateway},
+        );
+        final data =
+            funcResp.data is String ? jsonDecode(funcResp.data) : funcResp.data;
+        if (funcResp.status == 200 && data != null) {
+          if ((gateway == 'paystack' &&
+                  data['status'] == true &&
+                  data['data']?['status'] == 'success') ||
+              (gateway == 'flutterwave' &&
+                  data['status'] == 'success' &&
+                  data['data']?['status'] == 'successful')) {
+            return true;
+          }
+        }
+      } catch (e) {
+        debugPrint('Verify group transaction error: $e');
+      }
+      await Future.delayed(interval);
+    }
+    return false;
+  }
+
+  Future<void> _executeGroupJoin(Map<String, dynamic> group,
+      {bool isPaid = false}) async {
+    final myId = supabase.auth.currentUser?.id;
+    if (myId == null) return;
+
+    final chatId = group['id'].toString();
+
+    // Show loading ONLY if we didn't just come from the payment dialog
+    if (!isPaid) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(
+            child: CircularProgressIndicator(color: Color(0xFF4CAF50))),
+      );
+    }
+
     try {
       final existingMember = await supabase
           .from('chat_participants')
           .select('chat_id, user_id')
-          .eq('chat_id', group['id'])
-          .eq('user_id', currentUserId)
+          .eq('chat_id', chatId)
+          .eq('user_id', myId)
           .maybeSingle();
 
       if (existingMember == null) {
         await supabase
-            .from('chat_participants')
-            .insert({'chat_id': group['id'], 'user_id': currentUserId});
+            .rpc('join_group_via_invite', params: {'p_chat_id': chatId});
 
-        // 🔥 FIX: Drop the system message when they join from Explore!
         final myUsername = widget.userPreferences.username ?? 'Someone';
         await supabase.from('messages').insert({
-          'chat_id': group['id'],
-          'sender_id': currentUserId,
+          'chat_id': chatId,
+          'sender_id': myId,
           'content': '@$myUsername joined the group',
           'media_type': 'system',
           'is_read': true,
         });
       }
 
-      if (!mounted) return;
-      Navigator.pop(context);
-      Navigator.push(
-          context,
-          MaterialPageRoute(
-              builder: (_) => ChatRoomScreen(
-                  chatId: group['id'].toString(),
-                  chatTitle: group['group_name'] ?? 'Group Chat',
-                  isGroup: true,
-                  isAdmin: false,
-                  userPreferences: widget.userPreferences)));
+      if (mounted) {
+        if (!isPaid) Navigator.pop(context); // Close loading dialog if shown
+        Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (_) => ChatRoomScreen(
+                    chatId: chatId,
+                    chatTitle: group['group_name'] ?? 'Group Chat',
+                    isGroup: true,
+                    isAdmin: false,
+                    userPreferences: widget.userPreferences)));
+      }
     } catch (e) {
-      debugPrint("Join/Open group error: $e");
+      if (mounted) {
+        if (!isPaid) Navigator.pop(context); // Close loading
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to join group.')));
+      }
     }
   }
 }

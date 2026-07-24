@@ -254,12 +254,16 @@ class _AllowanceAppState extends State<AllowanceApp>
       });
       return;
     }
-    Future.delayed(const Duration(milliseconds: 500), () {
-      navigatorKey.currentState?.push(
-        MaterialPageRoute(
-            builder: (_) => GroupInviteScreen(
-                chatId: chatId, userPreferences: _userPreferences)),
-      );
+
+    // 🔥 FIX: Push safely using a post-frame callback to ensure Navigator is mounted
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (navigatorKey.currentState != null) {
+        navigatorKey.currentState!.push(
+          MaterialPageRoute(
+              builder: (_) => GroupInviteScreen(
+                  chatId: chatId, userPreferences: _userPreferences)),
+        );
+      }
     });
   }
 
